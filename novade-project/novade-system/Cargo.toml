@@ -1,0 +1,51 @@
+[package]
+name = "novade-system"
+version = "0.1.0"
+edition = "2021"
+authors = ["NovaDE Team"]
+description = "System layer for the NovaDE desktop environment"
+license = "MIT"
+repository = "https://github.com/novade/novade-system"
+
+[dependencies]
+# Internal dependencies
+novade-core = { path = "../novade-core" }
+novade-domain = { path = "../novade-domain" }
+
+# Async runtime
+tokio = { version = "1.28.0", features = ["full"] }
+async-trait = "0.1.68"
+
+# Error handling
+thiserror = "1.0.40"
+
+# Serialization
+serde = { version = "1.0.160", features = ["derive"] }
+serde_json = "1.0.96"
+
+# Wayland compositor
+smithay = { version = "0.3.0", features = ["backend_winit", "backend_drm", "backend_gbm", "backend_egl", "backend_session_libseat", "renderer_gl", "use_system_lib"] }
+
+# Input handling
+input = { package = "input-linux", version = "0.6.0" }
+xkbcommon = { version = "0.5.0", features = ["x11"] }
+
+# D-Bus
+zbus = "3.13.1"
+zvariant = "3.15.0"
+
+# Audio
+pipewire = "0.6.0"
+libspa = "0.6.0"
+
+# Utilities
+uuid = { version = "1.3.1", features = ["v4", "serde"] }
+log = "0.4.17"
+env_logger = "0.10.0"
+once_cell = "1.17.1"
+parking_lot = "0.12.1"
+
+[dev-dependencies]
+mockall = "0.11.4"
+test-log = "0.2.11"
+tokio-test = "0.4.2"

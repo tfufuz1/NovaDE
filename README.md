@@ -1,2 +1,0 @@
-# vivox
-C++ Qt Projekt
