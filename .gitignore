@@ -1,0 +1,50 @@
+# Rust target directory
+target/
+
+# IDE specific
+.idea/
+.vscode/
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Cargo
+Cargo.lock
+# Ignore build artifacts and cache
+**/target/
+**/Cargo.lock
+
+# Log files
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+*.bak
+
+# Configuration files that might contain secrets
+.env
+
+# Test coverage reports
+/coverage/
+*.lcov
+
+# Executables and compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.out
+
+# Dependency directories (if not managed by Cargo directly in target)
+# e.g., node_modules/ if using JS tools
+
+# Documentation output (if generated locally and not committed)
+# e.g., book_output/
+
+# Specific to this project if any other generated files
+# For example, if you have code generation steps
+# generated_code/

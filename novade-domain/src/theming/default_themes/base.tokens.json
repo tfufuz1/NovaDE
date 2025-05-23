@@ -1,0 +1,27 @@
+[
+  {
+    "id": "color-transparent",
+    "value": { "color": "#00000000" },
+    "description": "Fully transparent color."
+  },
+  {
+    "id": "color-black",
+    "value": { "color": "#000000FF" },
+    "description": "Solid black."
+  },
+  {
+    "id": "color-white",
+    "value": { "color": "#FFFFFFFF" },
+    "description": "Solid white."
+  },
+  {
+    "id": "font-size-default",
+    "value": { "font-size": "16px" },
+    "description": "Default font size for body text."
+  },
+  {
+    "id": "spacing-medium",
+    "value": { "spacing": "8px" },
+    "description": "Medium spacing unit."
+  }
+]

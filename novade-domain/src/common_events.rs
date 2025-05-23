@@ -1,224 +1,51 @@
-//! Common events module for the NovaDE domain layer.
-//!
-//! This module provides event types and utilities for event-driven
-//! communication between different parts of the domain layer.
-
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use crate::shared_types::EntityId;
+use uuid::Uuid;
+use chrono::{DateTime, Utc};
+use crate::shared_types::{UserSessionState, ApplicationId};
 
-/// A domain event representing something that happened in the domain.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DomainEvent<T> {
-    /// The unique identifier of the event
-    pub event_id: EntityId,
-    /// The timestamp when the event occurred
+// TODO: Replace with actual type from workspaces module: crate::workspaces::core::types::WorkspaceId
+pub type WorkspaceId = Uuid; 
+
+/// Represents the type of user activity detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UserActivityType {
+    MouseMoved,
+    MouseClicked,
+    MouseWheelScrolled,
+    KeyPressed,
+    TouchInteraction,
+    WorkspaceSwitched,
+    ApplicationFocused,
+    WindowOpened,
+    WindowClosed,
+}
+
+/// Event triggered when user activity is detected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserActivityDetectedEvent {
+    pub event_id: Uuid,
     pub timestamp: DateTime<Utc>,
-    /// The payload of the event
-    pub payload: T,
-    /// The source of the event (e.g., component or module name)
-    pub source: String,
+    pub activity_type: UserActivityType,
+    pub current_session_state: UserSessionState,
+    pub active_application_id: Option<ApplicationId>,
+    pub active_workspace_id: Option<WorkspaceId>, // Using placeholder
 }
 
-impl<T> DomainEvent<T> {
-    /// Creates a new domain event with the specified payload and source.
-    ///
-    /// # Arguments
-    ///
-    /// * `payload` - The payload of the event
-    /// * `source` - The source of the event
-    ///
-    /// # Returns
-    ///
-    /// A new `DomainEvent` with the specified payload and source.
-    pub fn new(payload: T, source: impl Into<String>) -> Self {
-        DomainEvent {
-            event_id: EntityId::new(),
+impl UserActivityDetectedEvent {
+    /// Creates a new `UserActivityDetectedEvent`.
+    pub fn new(
+        activity_type: UserActivityType,
+        current_session_state: UserSessionState,
+        active_application_id: Option<ApplicationId>,
+        active_workspace_id: Option<WorkspaceId>,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
             timestamp: Utc::now(),
-            payload,
-            source: source.into(),
-        }
-    }
-}
-
-impl<T: fmt::Debug> fmt::Display for DomainEvent<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Event[{}] from {} at {}: {:?}",
-            self.event_id, self.source, self.timestamp, self.payload
-        )
-    }
-}
-
-/// Workspace-related events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WorkspaceEvent {
-    /// A workspace was created.
-    WorkspaceCreated {
-        /// The ID of the workspace
-        workspace_id: EntityId,
-        /// The name of the workspace
-        name: String,
-    },
-    /// A workspace was updated.
-    WorkspaceUpdated {
-        /// The ID of the workspace
-        workspace_id: EntityId,
-        /// The name of the workspace
-        name: String,
-    },
-    /// A workspace was deleted.
-    WorkspaceDeleted {
-        /// The ID of the workspace
-        workspace_id: EntityId,
-    },
-    /// A window was assigned to a workspace.
-    WindowAssigned {
-        /// The ID of the workspace
-        workspace_id: EntityId,
-        /// The ID of the window
-        window_id: EntityId,
-    },
-    /// A window was removed from a workspace.
-    WindowRemoved {
-        /// The ID of the workspace
-        workspace_id: EntityId,
-        /// The ID of the window
-        window_id: EntityId,
-    },
-    /// The active workspace changed.
-    ActiveWorkspaceChanged {
-        /// The ID of the new active workspace
-        workspace_id: EntityId,
-    },
-}
-
-/// Theming-related events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ThemingEvent {
-    /// A theme was loaded.
-    ThemeLoaded {
-        /// The ID of the theme
-        theme_id: EntityId,
-        /// The name of the theme
-        name: String,
-    },
-    /// A theme was applied.
-    ThemeApplied {
-        /// The ID of the theme
-        theme_id: EntityId,
-        /// The name of the theme
-        name: String,
-    },
-    /// A theme was updated.
-    ThemeUpdated {
-        /// The ID of the theme
-        theme_id: EntityId,
-        /// The name of the theme
-        name: String,
-    },
-    /// A theme was deleted.
-    ThemeDeleted {
-        /// The ID of the theme
-        theme_id: EntityId,
-    },
-}
-
-/// Global settings-related events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum GlobalSettingsEvent {
-    /// A setting was changed.
-    SettingChanged {
-        /// The key of the setting
-        key: String,
-        /// The new value of the setting (serialized)
-        value: String,
-    },
-    /// Settings were loaded.
-    SettingsLoaded,
-    /// Settings were saved.
-    SettingsSaved,
-    /// Settings were reset to defaults.
-    SettingsReset,
-}
-
-/// Window policy-related events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WindowPolicyEvent {
-    /// A policy was applied to a window.
-    PolicyApplied {
-        /// The ID of the policy
-        policy_id: EntityId,
-        /// The ID of the window
-        window_id: EntityId,
-    },
-    /// A policy was updated.
-    PolicyUpdated {
-        /// The ID of the policy
-        policy_id: EntityId,
-    },
-    /// A policy was deleted.
-    PolicyDeleted {
-        /// The ID of the policy
-        policy_id: EntityId,
-    },
-}
-
-/// Notification-related events.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum NotificationEvent {
-    /// A notification was created.
-    NotificationCreated {
-        /// The ID of the notification
-        notification_id: EntityId,
-        /// The title of the notification
-        title: String,
-        /// The body of the notification
-        body: String,
-        /// The urgency of the notification
-        urgency: NotificationUrgency,
-    },
-    /// A notification was shown.
-    NotificationShown {
-        /// The ID of the notification
-        notification_id: EntityId,
-    },
-    /// A notification was dismissed.
-    NotificationDismissed {
-        /// The ID of the notification
-        notification_id: EntityId,
-    },
-    /// A notification was acted upon.
-    NotificationActioned {
-        /// The ID of the notification
-        notification_id: EntityId,
-        /// The ID of the action
-        action_id: String,
-    },
-}
-
-/// The urgency level of a notification.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NotificationUrgency {
-    /// Low urgency.
-    Low,
-    /// Normal urgency.
-    Normal,
-    /// High urgency.
-    High,
-    /// Critical urgency.
-    Critical,
-}
-
-impl fmt::Display for NotificationUrgency {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            NotificationUrgency::Low => write!(f, "Low"),
-            NotificationUrgency::Normal => write!(f, "Normal"),
-            NotificationUrgency::High => write!(f, "High"),
-            NotificationUrgency::Critical => write!(f, "Critical"),
+            activity_type,
+            current_session_state,
+            active_application_id,
+            active_workspace_id,
         }
     }
 }
@@ -226,33 +53,158 @@ impl fmt::Display for NotificationUrgency {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use crate::shared_types::{UserSessionState, ApplicationId}; // Ensure ApplicationId is in scope
+    use chrono::Utc;
+
+    // Test for UserActivityType serde
     #[test]
-    fn test_domain_event_new() {
-        let payload = "test payload";
-        let source = "test source";
-        let event = DomainEvent::new(payload, source);
-        
-        assert_eq!(event.payload, payload);
-        assert_eq!(event.source, source);
+    fn user_activity_type_serde() {
+        let activity = UserActivityType::MouseMoved;
+        let serialized = serde_json::to_string(&activity).unwrap();
+        assert_eq!(serialized, "\"MouseMoved\"");
+        let deserialized: UserActivityType = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, activity);
+    }
+
+    // Test for UserActivityDetectedEvent new() and serde
+    #[test]
+    fn user_activity_detected_event_new_and_serde() {
+        let app_id = ApplicationId::new("test_app");
+        let workspace_id = Uuid::new_v4(); // Using placeholder type
+
+        let event = UserActivityDetectedEvent::new(
+            UserActivityType::KeyPressed,
+            UserSessionState::Active,
+            Some(app_id.clone()),
+            Some(workspace_id),
+        );
+
+        assert_eq!(event.activity_type, UserActivityType::KeyPressed);
+        assert_eq!(event.current_session_state, UserSessionState::Active);
+        assert_eq!(event.active_application_id, Some(app_id));
+        assert_eq!(event.active_workspace_id, Some(workspace_id));
+        assert!(event.timestamp <= Utc::now());
+
+        let serialized = serde_json::to_string(&event).unwrap();
+        let deserialized: UserActivityDetectedEvent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, event);
     }
     
     #[test]
-    fn test_domain_event_display() {
-        let payload = "test payload";
-        let source = "test source";
-        let event = DomainEvent::new(payload, source);
-        
-        let display = format!("{}", event);
-        assert!(display.contains("test source"));
-        assert!(display.contains("test payload"));
+    fn user_activity_detected_event_serde_optional_none() {
+        let event = UserActivityDetectedEvent::new(
+            UserActivityType::WorkspaceSwitched,
+            UserSessionState::Idle,
+            None,
+            None,
+        );
+
+        assert_eq!(event.activity_type, UserActivityType::WorkspaceSwitched);
+        assert_eq!(event.current_session_state, UserSessionState::Idle);
+        assert_eq!(event.active_application_id, None);
+        assert_eq!(event.active_workspace_id, None);
+
+        let serialized = serde_json::to_string(&event).unwrap();
+        // println!("Serialized UserActivityDetectedEvent (Nones): {}", serialized); // For debugging
+        let deserialized: UserActivityDetectedEvent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, event);
     }
-    
+
+    // Test for ShutdownReason Default and serde
     #[test]
-    fn test_notification_urgency_display() {
-        assert_eq!(format!("{}", NotificationUrgency::Low), "Low");
-        assert_eq!(format!("{}", NotificationUrgency::Normal), "Normal");
-        assert_eq!(format!("{}", NotificationUrgency::High), "High");
-        assert_eq!(format!("{}", NotificationUrgency::Critical), "Critical");
+    fn shutdown_reason_default_and_serde() {
+        let default_reason = ShutdownReason::default();
+        assert_eq!(default_reason, ShutdownReason::UserRequest);
+
+        let reason = ShutdownReason::LowBattery;
+        let serialized = serde_json::to_string(&reason).unwrap();
+        assert_eq!(serialized, "\"LowBattery\"");
+        let deserialized: ShutdownReason = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, reason);
+    }
+
+    // Test for SystemShutdownInitiatedEvent new() and serde
+    #[test]
+    fn system_shutdown_initiated_event_new_and_serde() {
+        let event = SystemShutdownInitiatedEvent::new(
+            ShutdownReason::SystemUpdate,
+            true,
+            Some(300),
+            Some("System will reboot for updates.".to_string()),
+        );
+
+        assert_eq!(event.reason, ShutdownReason::SystemUpdate);
+        assert!(event.is_reboot);
+        assert_eq!(event.delay_seconds, Some(300));
+        assert_eq!(event.message, Some("System will reboot for updates.".to_string()));
+        assert!(event.timestamp <= Utc::now());
+
+        let serialized = serde_json::to_string(&event).unwrap();
+        // println!("Serialized SystemShutdownInitiatedEvent: {}", serialized); // For debugging
+        let deserialized: SystemShutdownInitiatedEvent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, event);
+    }
+
+    #[test]
+    fn system_shutdown_initiated_event_serde_optional_none() {
+        let event = SystemShutdownInitiatedEvent::new(
+            ShutdownReason::UserRequest,
+            false,
+            None,
+            None,
+        );
+
+        assert_eq!(event.reason, ShutdownReason::UserRequest);
+        assert!(!event.is_reboot);
+        assert_eq!(event.delay_seconds, None);
+        assert_eq!(event.message, None);
+
+        let serialized = serde_json::to_string(&event).unwrap();
+        // println!("Serialized SystemShutdownInitiatedEvent (Nones): {}", serialized); // For debugging
+        let deserialized: SystemShutdownInitiatedEvent = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, event);
+    }
+}
+
+/// Reason for system shutdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ShutdownReason {
+    #[default]
+    UserRequest,
+    PowerButtonPress,
+    LowBattery,
+    SystemUpdate,
+    ApplicationRequest,
+    OsError,
+    Unknown,
+}
+
+/// Event triggered when system shutdown is initiated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemShutdownInitiatedEvent {
+    pub event_id: Uuid,
+    pub timestamp: DateTime<Utc>,
+    pub reason: ShutdownReason,
+    pub is_reboot: bool,
+    pub delay_seconds: Option<u32>,
+    pub message: Option<String>,
+}
+
+impl SystemShutdownInitiatedEvent {
+    /// Creates a new `SystemShutdownInitiatedEvent`.
+    pub fn new(
+        reason: ShutdownReason,
+        is_reboot: bool,
+        delay_seconds: Option<u32>,
+        message: Option<String>,
+    ) -> Self {
+        Self {
+            event_id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            reason,
+            is_reboot,
+            delay_seconds,
+            message,
+        }
     }
 }

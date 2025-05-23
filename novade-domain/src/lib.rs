@@ -10,18 +10,47 @@ pub use novade_core as core;
 // Export domain modules
 pub mod error;
 pub mod entities;
+pub mod shared_types;
+pub mod common_events; // Added common_events module
 pub mod repositories;
 pub mod workspace;
-pub mod theming;
+pub mod theming; // Already added, ensure it's correct
 pub mod ai;
 pub mod notification;
 pub mod window_management;
 pub mod power_management;
+pub mod global_settings_management; // Add new module
 
 // Re-export common types and interfaces
 pub use error::DomainError;
+pub use shared_types::{ApplicationId, UserSessionState, ResourceIdentifier};
+pub use common_events::{UserActivityType, UserActivityDetectedEvent, ShutdownReason, SystemShutdownInitiatedEvent}; // Added common_events types
 pub use workspace::{Workspace, WorkspaceService, DefaultWorkspaceService};
-pub use theming::{Theme, ThemeManager, DefaultThemeManager, ThemeVariant, ThemeComponentType};
+// Update theming re-exports as per the new structure
+pub use theming::{
+    ThemingEngine, ThemeChangedEvent, AppliedThemeState, ThemingConfiguration, 
+    ThemeDefinition, TokenIdentifier, ThemeIdentifier, ColorSchemeType as ThemeColorSchemeType, AccentColor, ThemingError // Renamed ColorSchemeType to avoid conflict
+};
+// Re-export from global_settings_management
+pub use global_settings_management::{
+    GlobalDesktopSettings,
+    SettingsPersistenceProvider, // Trait
+    // FilesystemSettingsProvider, // Concrete type, optional to re-export from lib.rs
+    SettingPath,
+    GlobalSettingsError,
+    AppearanceSettings,
+    FontSettings,
+    WorkspaceSettings,
+    InputBehaviorSettings,
+    PowerManagementPolicySettings,
+    DefaultApplicationsSettings,
+    ColorScheme as GlobalColorScheme, // Renamed to avoid conflict
+    FontHinting,
+    FontAntialiasing,
+    MouseAccelerationProfile,
+    LidCloseAction,
+    WorkspaceSwitchingBehavior,
+};
 pub use ai::{ConsentManager, AIInteractionService, DefaultConsentManager, DefaultAIInteractionService};
 pub use notification::{NotificationManager, DefaultNotificationManager, NotificationCategory, NotificationUrgency};
 pub use window_management::{WindowPolicyManager, DefaultWindowPolicyManager, WindowAction, WindowType, WindowState};
