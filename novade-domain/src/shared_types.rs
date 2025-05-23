@@ -1,204 +1,270 @@
-//! Shared types module for the NovaDE domain layer.
-//!
-//! This module provides common type definitions used across
-//! different modules in the domain layer.
-
 use serde::{Deserialize, Serialize};
-use std::fmt;
-use uuid::Uuid;
+use std::fmt::{self, Debug, Display};
 
-/// A unique identifier for domain entities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EntityId(Uuid);
+/// Represents a unique identifier for an application.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default, PartialOrd, Ord)]
+pub struct ApplicationId(String);
 
-impl EntityId {
-    /// Creates a new random entity ID.
-    pub fn new() -> Self {
-        EntityId(Uuid::new_v4())
+impl ApplicationId {
+    /// Creates a new `ApplicationId`.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if the provided `id` is empty.
+    pub fn new(id: impl Into<String>) -> Self {
+        let id_str = id.into();
+        debug_assert!(!id_str.is_empty(), "ApplicationId darf nicht leer sein.");
+        // Potential character set validation can be added here.
+        // For now, we'll stick to the non-empty constraint.
+        Self(id_str)
     }
-    
-    /// Creates an entity ID from a UUID.
-    pub fn from_uuid(uuid: Uuid) -> Self {
-        EntityId(uuid)
-    }
-    
-    /// Gets the underlying UUID.
-    pub fn as_uuid(&self) -> &Uuid {
+
+    /// Returns a string slice of the application ID.
+    pub fn as_str(&self) -> &str {
         &self.0
     }
-    
-    /// Converts the entity ID to a string.
-    pub fn to_string(&self) -> String {
-        self.0.to_string()
+}
+
+impl Debug for ApplicationId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ApplicationId").field(&self.0).finish()
     }
 }
 
-impl Default for EntityId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for EntityId {
+impl Display for ApplicationId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-impl From<Uuid> for EntityId {
-    fn from(uuid: Uuid) -> Self {
-        EntityId(uuid)
+impl From<String> for ApplicationId {
+    fn from(id: String) -> Self {
+        debug_assert!(!id.is_empty(), "ApplicationId darf nicht leer sein.");
+        Self(id)
     }
 }
 
-impl From<EntityId> for Uuid {
-    fn from(id: EntityId) -> Self {
-        id.0
+impl From<&str> for ApplicationId {
+    fn from(id: &str) -> Self {
+        debug_assert!(!id.is_empty(), "ApplicationId darf nicht leer sein.");
+        Self(id.to_string())
     }
 }
 
-/// A version number for tracking changes to entities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Version(u64);
-
-impl Version {
-    /// Creates a new version with the specified number.
-    pub fn new(version: u64) -> Self {
-        Version(version)
-    }
-    
-    /// Creates the initial version (0).
-    pub fn initial() -> Self {
-        Version(0)
-    }
-    
-    /// Gets the next version.
-    pub fn next(&self) -> Self {
-        Version(self.0 + 1)
-    }
-    
-    /// Gets the underlying version number.
-    pub fn value(&self) -> u64 {
-        self.0
-    }
+/// Represents the state of a user session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum UserSessionState {
+    /// The session is active.
+    #[default]
+    Active,
+    /// The session is locked.
+    Locked,
+    /// The session is idle.
+    Idle,
 }
 
-impl Default for Version {
-    fn default() -> Self {
-        Self::initial()
+/// Represents a generic resource identifier.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ResourceIdentifier {
+    /// The type of the resource (e.g., "file", "url", "user").
+    pub r#type: String,
+    /// The unique identifier for the resource.
+    pub id: String,
+    /// An optional human-readable label for the resource.
+    pub label: Option<String>,
+}
+
+impl ResourceIdentifier {
+    /// Creates a new `ResourceIdentifier`.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `resource_type` or `resource_id` is empty.
+    pub fn new(
+        resource_type: impl Into<String>,
+        resource_id: impl Into<String>,
+        label: Option<String>,
+    ) -> Self {
+        let type_str = resource_type.into();
+        let id_str = resource_id.into();
+        debug_assert!(!type_str.is_empty(), "ResourceIdentifier type darf nicht leer sein.");
+        debug_assert!(!id_str.is_empty(), "ResourceIdentifier id darf nicht leer sein.");
+        Self {
+            r#type: type_str,
+            id: id_str,
+            label,
+        }
     }
-}
 
-impl fmt::Display for Version {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "v{}", self.0)
+    /// Creates a new `ResourceIdentifier` for a file.
+    pub fn file(path: impl Into<String>, label: Option<String>) -> Self {
+        Self::new("file", path.into(), label)
     }
-}
 
-/// A result type for domain operations.
-pub type DomainResult<T> = Result<T, crate::error::DomainError>;
+    /// Creates a new `ResourceIdentifier` for a URL.
+    pub fn url(url_str: impl Into<String>, label: Option<String>) -> Self {
+        Self::new("url", url_str.into(), label)
+    }
 
-/// A trait for entities that can be identified.
-pub trait Identifiable {
-    /// Gets the entity ID.
-    fn id(&self) -> EntityId;
-}
-
-/// A trait for entities that can be versioned.
-pub trait Versionable {
-    /// Gets the entity version.
-    fn version(&self) -> Version;
-    
-    /// Increments the entity version.
-    fn increment_version(&mut self);
+    /// Creates a new `ResourceIdentifier` with a generated UUID as the ID.
+    pub fn new_uuid(resource_type: impl Into<String>, label: Option<String>) -> Self {
+        Self::new(resource_type, uuid::Uuid::new_v4().to_string(), label)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+    use uuid::Uuid;
+
+    // Tests for ApplicationId
     #[test]
-    fn test_entity_id_new() {
-        let id1 = EntityId::new();
-        let id2 = EntityId::new();
-        
-        assert_ne!(id1, id2);
+    fn application_id_new_and_as_str() {
+        let app_id = ApplicationId::new("test_app");
+        assert_eq!(app_id.as_str(), "test_app");
+    }
+
+    #[test]
+    fn application_id_from_string() {
+        let app_id = ApplicationId::from("test_app_string".to_string());
+        assert_eq!(app_id.as_str(), "test_app_string");
+    }
+
+    #[test]
+    fn application_id_from_str() {
+        let app_id = ApplicationId::from("test_app_str");
+        assert_eq!(app_id.as_str(), "test_app_str");
+    }
+
+    #[test]
+    fn application_id_display() {
+        let app_id = ApplicationId::new("display_test");
+        assert_eq!(format!("{}", app_id), "display_test");
+    }
+
+    #[test]
+    fn application_id_serde() {
+        let app_id = ApplicationId::new("serde_test");
+        let serialized = serde_json::to_string(&app_id).unwrap();
+        assert_eq!(serialized, "\"serde_test\"");
+        let deserialized: ApplicationId = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, app_id);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "ApplicationId darf nicht leer sein.")]
+    fn application_id_new_empty_panic() {
+        ApplicationId::new("");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "ApplicationId darf nicht leer sein.")]
+    fn application_id_from_string_empty_panic() {
+        ApplicationId::from("".to_string());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "ApplicationId darf nicht leer sein.")]
+    fn application_id_from_str_empty_panic() {
+        ApplicationId::from("");
+    }
+
+    // Tests for UserSessionState
+    #[test]
+    fn user_session_state_default() {
+        assert_eq!(UserSessionState::default(), UserSessionState::Active);
+    }
+
+    #[test]
+    fn user_session_state_serde() {
+        let state = UserSessionState::Locked;
+        let serialized = serde_json::to_string(&state).unwrap();
+        assert_eq!(serialized, "\"Locked\"");
+        let deserialized: UserSessionState = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, state);
+
+        let state_active = UserSessionState::Active;
+        let serialized_active = serde_json::to_string(&state_active).unwrap();
+        assert_eq!(serialized_active, "\"Active\"");
+        let deserialized_active: UserSessionState = serde_json::from_str(&serialized_active).unwrap();
+        assert_eq!(deserialized_active, state_active);
+    }
+
+    // Tests for ResourceIdentifier
+    #[test]
+    fn resource_identifier_new() {
+        let res_id = ResourceIdentifier::new("user", "123", Some("Test User".to_string()));
+        assert_eq!(res_id.r#type, "user");
+        assert_eq!(res_id.id, "123");
+        assert_eq!(res_id.label, Some("Test User".to_string()));
+    }
+
+    #[test]
+    fn resource_identifier_file() {
+        let res_id = ResourceIdentifier::file("/path/to/file.txt", Some("Document".to_string()));
+        assert_eq!(res_id.r#type, "file");
+        assert_eq!(res_id.id, "/path/to/file.txt");
+        assert_eq!(res_id.label, Some("Document".to_string()));
+    }
+
+    #[test]
+    fn resource_identifier_url() {
+        let res_id = ResourceIdentifier::url("https://example.com", None);
+        assert_eq!(res_id.r#type, "url");
+        assert_eq!(res_id.id, "https://example.com");
+        assert_eq!(res_id.label, None);
+    }
+
+    #[test]
+    fn resource_identifier_new_uuid() {
+        let res_id = ResourceIdentifier::new_uuid("session", Some("Active Session".to_string()));
+        assert_eq!(res_id.r#type, "session");
+        assert!(!res_id.id.is_empty());
+        // Check if the ID is a valid UUID
+        assert!(Uuid::parse_str(&res_id.id).is_ok());
+        assert_eq!(res_id.label, Some("Active Session".to_string()));
+    }
+
+    #[test]
+    fn resource_identifier_serde() {
+        let res_id = ResourceIdentifier {
+            r#type: "product".to_string(),
+            id: "prod_abc".to_string(),
+            label: Some("Amazing Product".to_string()),
+        };
+        let serialized = serde_json::to_string(&res_id).unwrap();
+        let expected_json = r#"{"type":"product","id":"prod_abc","label":"Amazing Product"}"#;
+        assert_eq!(serialized, expected_json);
+        let deserialized: ResourceIdentifier = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, res_id);
+
+        let res_id_no_label = ResourceIdentifier {
+            r#type: "order".to_string(),
+            id: "ord_123".to_string(),
+            label: None,
+        };
+        let serialized_no_label = serde_json::to_string(&res_id_no_label).unwrap();
+        let expected_json_no_label = r#"{"type":"order","id":"ord_123","label":null}"#;
+        assert_eq!(serialized_no_label, expected_json_no_label);
+        let deserialized_no_label: ResourceIdentifier =
+            serde_json::from_str(&serialized_no_label).unwrap();
+        assert_eq!(deserialized_no_label, res_id_no_label);
     }
     
     #[test]
-    fn test_entity_id_from_uuid() {
-        let uuid = Uuid::new_v4();
-        let id = EntityId::from_uuid(uuid);
-        
-        assert_eq!(id.as_uuid(), &uuid);
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "ResourceIdentifier type darf nicht leer sein.")]
+    fn resource_identifier_new_empty_type_panic() {
+        ResourceIdentifier::new("", "some_id", None);
     }
-    
+
     #[test]
-    fn test_entity_id_to_string() {
-        let id = EntityId::new();
-        let id_str = id.to_string();
-        
-        assert_eq!(id_str, id.0.to_string());
-    }
-    
-    #[test]
-    fn test_entity_id_display() {
-        let id = EntityId::new();
-        
-        assert_eq!(format!("{}", id), id.0.to_string());
-    }
-    
-    #[test]
-    fn test_entity_id_from_uuid_conversion() {
-        let uuid = Uuid::new_v4();
-        let id: EntityId = uuid.into();
-        
-        assert_eq!(id.as_uuid(), &uuid);
-    }
-    
-    #[test]
-    fn test_entity_id_to_uuid_conversion() {
-        let id = EntityId::new();
-        let uuid: Uuid = id.into();
-        
-        assert_eq!(uuid, id.0);
-    }
-    
-    #[test]
-    fn test_version_new() {
-        let version = Version::new(42);
-        
-        assert_eq!(version.value(), 42);
-    }
-    
-    #[test]
-    fn test_version_initial() {
-        let version = Version::initial();
-        
-        assert_eq!(version.value(), 0);
-    }
-    
-    #[test]
-    fn test_version_next() {
-        let version = Version::new(42);
-        let next = version.next();
-        
-        assert_eq!(next.value(), 43);
-    }
-    
-    #[test]
-    fn test_version_display() {
-        let version = Version::new(42);
-        
-        assert_eq!(format!("{}", version), "v42");
-    }
-    
-    #[test]
-    fn test_version_ordering() {
-        let v1 = Version::new(1);
-        let v2 = Version::new(2);
-        
-        assert!(v1 < v2);
-        assert!(v2 > v1);
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "ResourceIdentifier id darf nicht leer sein.")]
+    fn resource_identifier_new_empty_id_panic() {
+        ResourceIdentifier::new("some_type", "", None);
     }
 }
