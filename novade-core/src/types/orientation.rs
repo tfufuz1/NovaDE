@@ -1,46 +1,89 @@
-//! Orientation module for the NovaDE core layer.
+//! Spatial Orientation and Direction Types.
 //!
-//! This module provides orientation and direction types used throughout the
-//! NovaDE desktop environment.
+//! This module provides enums for representing 2D orientation (horizontal/vertical)
+//! and cardinal directions (North, South, East, West). These are commonly used
+//! in UI layout, navigation, and geometric calculations.
+//!
+//! # Types
+//!
+//! - [`Orientation`]: Represents whether something is oriented horizontally or vertically.
+//! - [`Direction`]: Represents one of the four cardinal directions.
+//!
+//! # Examples
+//!
+//! ```
+//! use novade_core::types::{Orientation, Direction};
+//!
+//! let current_orientation = Orientation::Horizontal;
+//! assert!(current_orientation.is_horizontal());
+//! assert_eq!(current_orientation.flip(), Orientation::Vertical);
+//!
+//! let current_direction = Direction::North;
+//! assert!(current_direction.is_vertical());
+//! assert_eq!(current_direction.opposite(), Direction::South);
+//! assert_eq!(current_direction.orientation(), Orientation::Vertical);
+//! ```
 
 use std::fmt;
 
-/// Orientation in 2D space.
+/// Represents a general orientation in 2D space, either Horizontal or Vertical.
 ///
-/// This enum represents horizontal or vertical orientation,
-/// which is commonly used for layout and UI components.
+/// This is often used in UI layout systems, component arrangement, or any context
+/// where a primary axis of alignment or movement is needed.
+///
+/// # Examples
+///
+/// ```
+/// use novade_core::types::Orientation;
+///
+/// let panel_orientation = Orientation::Vertical;
+/// if panel_orientation.is_vertical() {
+///     // Arrange items in a column
+/// }
+/// assert_eq!(format!("{}", panel_orientation), "vertical");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Orientation {
-    /// Horizontal orientation (left to right or right to left)
+    /// Represents a horizontal orientation (e.g., along the x-axis).
     Horizontal,
-    /// Vertical orientation (top to bottom or bottom to top)
+    /// Represents a vertical orientation (e.g., along the y-axis).
     Vertical,
 }
 
 impl Orientation {
-    /// Checks if this orientation is horizontal.
+    /// Checks if this orientation is `Horizontal`.
     ///
     /// # Returns
     ///
-    /// `true` if the orientation is horizontal, `false` otherwise.
+    /// `true` if the orientation is `Horizontal`, `false` otherwise.
     pub fn is_horizontal(&self) -> bool {
         matches!(self, Orientation::Horizontal)
     }
 
-    /// Checks if this orientation is vertical.
+    /// Checks if this orientation is `Vertical`.
     ///
     /// # Returns
     ///
-    /// `true` if the orientation is vertical, `false` otherwise.
+    /// `true` if the orientation is `Vertical`, `false` otherwise.
     pub fn is_vertical(&self) -> bool {
         matches!(self, Orientation::Vertical)
     }
 
-    /// Flips the orientation.
+    /// Returns the opposite orientation.
+    ///
+    /// - `Horizontal` flips to `Vertical`.
+    /// - `Vertical` flips to `Horizontal`.
     ///
     /// # Returns
     ///
-    /// The opposite orientation (horizontal becomes vertical and vice versa).
+    /// The flipped `Orientation`.
+    ///
+    /// # Examples
+    /// ```
+    /// use novade_core::types::Orientation;
+    /// assert_eq!(Orientation::Horizontal.flip(), Orientation::Vertical);
+    /// assert_eq!(Orientation::Vertical.flip(), Orientation::Horizontal);
+    /// ```
     pub fn flip(&self) -> Self {
         match self {
             Orientation::Horizontal => Orientation::Vertical,
@@ -50,6 +93,7 @@ impl Orientation {
 }
 
 impl fmt::Display for Orientation {
+    /// Formats the `Orientation` as a lowercase string (e.g., "horizontal", "vertical").
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Orientation::Horizontal => write!(f, "horizontal"),
@@ -58,46 +102,70 @@ impl fmt::Display for Orientation {
     }
 }
 
-/// Direction in 2D space.
+/// Represents one of the four cardinal directions in 2D space.
 ///
-/// This enum represents cardinal directions (north, south, east, west),
-/// which are commonly used for navigation and layout.
+/// Useful for navigation, relative positioning, or directional input.
+///
+/// # Examples
+/// ```
+/// use novade_core::types::{Direction, Orientation};
+///
+/// let move_direction = Direction::East;
+/// if move_direction.is_horizontal() {
+///     // Adjust x-coordinate
+/// }
+/// assert_eq!(move_direction.opposite(), Direction::West);
+/// assert_eq!(move_direction.orientation(), Orientation::Horizontal);
+/// assert_eq!(format!("{}", move_direction), "east");
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
-    /// North direction (up)
+    /// Represents the North direction (typically upwards or positive Y in some coordinate systems).
     North,
-    /// South direction (down)
+    /// Represents the South direction (typically downwards or negative Y).
     South,
-    /// East direction (right)
+    /// Represents the East direction (typically rightwards or positive X).
     East,
-    /// West direction (left)
+    /// Represents the West direction (typically leftwards or negative X).
     West,
 }
 
 impl Direction {
-    /// Checks if this direction is horizontal.
+    /// Checks if this direction is horizontal (`East` or `West`).
     ///
     /// # Returns
     ///
-    /// `true` if the direction is east or west, `false` otherwise.
+    /// `true` if the direction is `East` or `West`, `false` otherwise.
     pub fn is_horizontal(&self) -> bool {
         matches!(self, Direction::East | Direction::West)
     }
 
-    /// Checks if this direction is vertical.
+    /// Checks if this direction is vertical (`North` or `South`).
     ///
     /// # Returns
     ///
-    /// `true` if the direction is north or south, `false` otherwise.
+    /// `true` if the direction is `North` or `South`, `false` otherwise.
     pub fn is_vertical(&self) -> bool {
         matches!(self, Direction::North | Direction::South)
     }
 
-    /// Gets the opposite direction.
+    /// Returns the opposite cardinal direction.
+    ///
+    /// - `North` becomes `South`.
+    /// - `South` becomes `North`.
+    /// - `East` becomes `West`.
+    /// - `West` becomes `East`.
     ///
     /// # Returns
     ///
-    /// The opposite direction (north becomes south, east becomes west, etc.).
+    /// The opposite `Direction`.
+    ///
+    /// # Examples
+    /// ```
+    /// use novade_core::types::Direction;
+    /// assert_eq!(Direction::North.opposite(), Direction::South);
+    /// assert_eq!(Direction::East.opposite(), Direction::West);
+    /// ```
     pub fn opposite(&self) -> Self {
         match self {
             Direction::North => Direction::South,
@@ -107,11 +175,14 @@ impl Direction {
         }
     }
 
-    /// Gets the orientation of this direction.
+    /// Returns the general [`Orientation`] corresponding to this direction.
+    ///
+    /// - `North` and `South` map to `Orientation::Vertical`.
+    /// - `East` and `West` map to `Orientation::Horizontal`.
     ///
     /// # Returns
     ///
-    /// `Orientation::Horizontal` for east and west, `Orientation::Vertical` for north and south.
+    /// The `Orientation` of this direction.
     pub fn orientation(&self) -> Orientation {
         if self.is_horizontal() {
             Orientation::Horizontal
@@ -122,6 +193,7 @@ impl Direction {
 }
 
 impl fmt::Display for Direction {
+    /// Formats the `Direction` as a lowercase string (e.g., "north", "east").
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Direction::North => write!(f, "north"),

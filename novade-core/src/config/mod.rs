@@ -1,212 +1,142 @@
-//! Configuration module for the NovaDE core layer.
+//! Configuration Management for NovaDE Core.
 //!
-//! This module provides configuration management utilities used throughout the
-//! NovaDE desktop environment, including loading, parsing, and accessing
-//! configuration.
+//! This module provides the structures and mechanisms for handling configuration
+//! within the NovaDE core library. It defines how configuration is structured,
+//! loaded, validated, and accessed.
+//!
+//! ## Key Components:
+//!
+//! - **Submodules**:
+//!   - [`types`]: Contains the primary configuration struct definitions like [`CoreConfig`]
+//!     and [`LoggingConfig`]. These structs define the schema of the configuration.
+//!   - [`defaults`]: Provides functions that return default values for various
+//!     configuration settings. These are used when a configuration file is missing
+//!     or incomplete.
+//!   - [`loader`]: Implements the logic for loading configuration data, typically from
+//!     a TOML file. The central piece is the [`ConfigLoader`] struct.
+//!   - [`provider`]: Defines the [`ConfigProvider`] trait for accessing configuration data
+//!     and includes implementations like [`FileConfigProvider`] for file-based configurations.
+//!     (Note: `FileConfigProvider`'s loading mechanism might need refactoring after
+//!     changes to `ConfigLoader`).
+//!
+//! - **Core Structs (Re-exported)**:
+//!   - [`CoreConfig`]: The root configuration structure for the entire core layer.
+//!   - [`LoggingConfig`]: Configuration specific to the logging subsystem.
+//!
+//! - **Core Functionality (Re-exported)**:
+//!   - [`ConfigLoader`]: An empty struct with static methods (e.g., `load()`) to load
+//!     and validate the `CoreConfig`.
+//!   - [`ConfigProvider`]: A trait for components that provide access to `CoreConfig`.
+//!   - [`FileConfigProvider`]: An example implementation of `ConfigProvider`.
+//!
+//! ## Configuration Loading Process:
+//!
+//! 1. The `ConfigLoader::load()` method is called.
+//! 2. It attempts to find and read a configuration file (e.g., `config.toml`) from
+//!    the application-specific configuration directory (determined by `utils::paths`).
+//! 3. If the file is not found, a default `CoreConfig` is generated.
+//! 4. If the file is found, its content (expected to be TOML) is parsed into `CoreConfig`.
+//!    Parsing errors are mapped to [`crate::error::ConfigError::ParseError`].
+//! 5. The resulting `CoreConfig` (either loaded or default) undergoes validation
+//!    (e.g., normalizing log levels, resolving relative log file paths). Validation
+//!    errors are mapped to [`crate::error::ConfigError::ValidationError`].
+//!
+//! # Examples
+//!
+//! ```rust,ignore
+//! // How to load configuration
+//! use novade_core::config::ConfigLoader;
+//! use novade_core::error::CoreError;
+//!
+//! match ConfigLoader::load() {
+//!     Ok(config) => {
+//!         println!("Loaded log level: {}", config.logging.level);
+//!         // Use the config...
+//!     }
+//!     Err(e) => {
+//!         eprintln!("Failed to load configuration: {}", e);
+//!         // Handle error, perhaps by falling back to minimal defaults or exiting.
+//!         // For instance, initialize minimal logging:
+//!         novade_core::logging::init_minimal_logging();
+//!         tracing::error!("Configuration error: {}", e);
+//!     }
+//! }
+//! ```
 
 pub mod defaults;
-pub mod file_loader;
+pub mod types; 
+pub mod loader; // Renamed from file_loader
+pub mod provider; // Added for ConfigProvider
 
-use std::path::Path;
-use serde::{Serialize, Deserialize};
-use crate::error::ConfigError;
+// use std::path::Path; // No longer needed here
+// use crate::error::ConfigError; // No longer needed here, used internally by loader/provider
 
-/// Root configuration structure for the NovaDE desktop environment.
-///
-/// This struct contains all configuration settings for the core layer.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CoreConfig {
-    /// Logging configuration
-    #[serde(default)]
-    pub logging: LoggingConfig,
-    
-    /// Application configuration
-    #[serde(default)]
-    pub application: ApplicationConfig,
-    
-    /// System configuration
-    #[serde(default)]
-    pub system: SystemConfig,
-}
+// Re-export new config types and loader/provider
+pub use types::{CoreConfig, LoggingConfig};
+pub use loader::ConfigLoader; // New ConfigLoader struct
+pub use provider::{ConfigProvider, FileConfigProvider}; // Moved ConfigProvider trait and FileConfigProvider struct
 
-impl Default for CoreConfig {
-    fn default() -> Self {
-        CoreConfig {
-            logging: LoggingConfig::default(),
-            application: ApplicationConfig::default(),
-            system: SystemConfig::default(),
-        }
-    }
-}
 
-/// Logging configuration for the NovaDE desktop environment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    /// Log level filter
-    #[serde(default = "defaults::default_log_level")]
-    pub level: String,
-    
-    /// Whether to log to file
-    #[serde(default)]
-    pub log_to_file: bool,
-    
-    /// Log file path
-    #[serde(default = "defaults::default_log_file")]
-    pub log_file: String,
-    
-    /// Whether to log to console
-    #[serde(default = "defaults::default_log_to_console")]
-    pub log_to_console: bool,
-}
+// The ConfigLoader trait definition is removed from here.
+// The ConfigProvider trait definition is removed from here (moved to provider.rs).
 
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        LoggingConfig {
-            level: defaults::default_log_level(),
-            log_to_file: false,
-            log_file: defaults::default_log_file(),
-            log_to_console: defaults::default_log_to_console(),
-        }
-    }
-}
-
-/// Application configuration for the NovaDE desktop environment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApplicationConfig {
-    /// Application name
-    #[serde(default = "defaults::default_app_name")]
-    pub name: String,
-    
-    /// Application version
-    #[serde(default = "defaults::default_app_version")]
-    pub version: String,
-    
-    /// Application data directory
-    #[serde(default = "defaults::default_data_dir")]
-    pub data_dir: String,
-    
-    /// Application cache directory
-    #[serde(default = "defaults::default_cache_dir")]
-    pub cache_dir: String,
-    
-    /// Application config directory
-    #[serde(default = "defaults::default_config_dir")]
-    pub config_dir: String,
-}
-
-impl Default for ApplicationConfig {
-    fn default() -> Self {
-        ApplicationConfig {
-            name: defaults::default_app_name(),
-            version: defaults::default_app_version(),
-            data_dir: defaults::default_data_dir(),
-            cache_dir: defaults::default_cache_dir(),
-            config_dir: defaults::default_config_dir(),
-        }
-    }
-}
-
-/// System configuration for the NovaDE desktop environment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemConfig {
-    /// Number of worker threads
-    #[serde(default = "defaults::default_worker_threads")]
-    pub worker_threads: usize,
-    
-    /// Whether to use hardware acceleration
-    #[serde(default = "defaults::default_use_hardware_acceleration")]
-    pub use_hardware_acceleration: bool,
-}
-
-impl Default for SystemConfig {
-    fn default() -> Self {
-        SystemConfig {
-            worker_threads: defaults::default_worker_threads(),
-            use_hardware_acceleration: defaults::default_use_hardware_acceleration(),
-        }
-    }
-}
-
-/// Interface for loading configuration.
-pub trait ConfigLoader {
-    /// Loads configuration from the default location.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the loaded `CoreConfig` if successful,
-    /// or a `ConfigError` if loading failed.
-    fn load_config(&self) -> Result<CoreConfig, ConfigError>;
-    
-    /// Loads configuration from the specified path.
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The path to load configuration from
-    ///
-    /// # Returns
-    ///
-    /// A `Result` containing the loaded `CoreConfig` if successful,
-    /// or a `ConfigError` if loading failed.
-    fn load_config_from_path<P: AsRef<Path>>(&self, path: P) -> Result<CoreConfig, ConfigError>;
-}
-
-/// Interface for accessing configuration.
-pub trait ConfigProvider {
-    /// Gets the current configuration.
-    ///
-    /// # Returns
-    ///
-    /// A reference to the current `CoreConfig`.
-    fn get_config(&self) -> &CoreConfig;
-    
-    /// Watches for configuration changes.
-    ///
-    /// # Arguments
-    ///
-    /// * `callback` - A callback function to call when configuration changes
-    ///
-    /// # Returns
-    ///
-    /// A `Result` indicating success or failure.
-    fn watch_config<F>(&self, callback: F) -> Result<(), ConfigError>
-    where
-        F: Fn(&CoreConfig) + Send + 'static;
-}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::path::PathBuf;
-    
+    use super::*; // Imports CoreConfig, LoggingConfig from the re-export above
+    use crate::config::defaults as config_defaults; // For direct comparison if needed
+    use std::path::PathBuf; // For testing Option<PathBuf>
+
     #[test]
-    fn test_core_config_default() {
+    fn test_new_core_config_default() {
         let config = CoreConfig::default();
-        assert_eq!(config.logging.level, "info");
-        assert_eq!(config.application.name, "novade");
+        // Check that logging config within core_config matches the default LoggingConfig
+        let default_log_config = LoggingConfig::default();
+        assert_eq!(config.logging.level, default_log_config.level);
+        assert_eq!(config.logging.file_path, default_log_config.file_path);
+        assert_eq!(config.logging.format, default_log_config.format);
     }
     
     #[test]
-    fn test_logging_config_default() {
+    fn test_new_logging_config_default() {
         let config = LoggingConfig::default();
-        assert_eq!(config.level, "info");
-        assert!(!config.log_to_file);
-        assert!(config.log_to_console);
+        assert_eq!(config.level, config_defaults::default_log_level_spec());
+        assert_eq!(config.file_path, config_defaults::default_log_file_path_spec());
+        assert_eq!(config.format, config_defaults::default_log_format_spec());
+    }
+
+    // Example of a serde deserialization test for the new CoreConfig
+    #[test]
+    fn test_core_config_deserialize_minimal() {
+        let json_data = r#"{
+            "logging": {
+                "level": "debug"
+            }
+        }"#;
+        let config: CoreConfig = serde_json::from_str(json_data).expect("Failed to deserialize CoreConfig");
+        
+        assert_eq!(config.logging.level, "debug");
+        // file_path and format should take their defaults from LoggingConfig's defaults
+        assert_eq!(config.logging.file_path, config_defaults::default_log_file_path_spec());
+        assert_eq!(config.logging.format, config_defaults::default_log_format_spec());
+    }
+
+    #[test]
+    fn test_core_config_deserialize_full_logging() {
+         let json_data = r#"{
+            "logging": {
+                "level": "trace",
+                "file_path": "/var/log/app.log",
+                "format": "json"
+            }
+        }"#;
+        let config: CoreConfig = serde_json::from_str(json_data).expect("Failed to deserialize CoreConfig");
+        
+        assert_eq!(config.logging.level, "trace");
+        assert_eq!(config.logging.file_path, Some(PathBuf::from("/var/log/app.log")));
+        assert_eq!(config.logging.format, "json");
     }
     
-    #[test]
-    fn test_application_config_default() {
-        let config = ApplicationConfig::default();
-        assert_eq!(config.name, "novade");
-        assert_eq!(config.version, "0.1.0");
-        assert!(!config.data_dir.is_empty());
-        assert!(!config.cache_dir.is_empty());
-        assert!(!config.config_dir.is_empty());
-    }
-    
-    #[test]
-    fn test_system_config_default() {
-        let config = SystemConfig::default();
-        assert!(config.worker_threads > 0);
-        assert!(config.use_hardware_acceleration);
-    }
+    // Tests for ApplicationConfig and SystemConfig defaults are removed
+    // as these structs are no longer part of CoreConfig directly.
 }

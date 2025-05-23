@@ -1,127 +1,84 @@
-//! Default configuration values for the NovaDE core layer.
+//! Default Configuration Values for NovaDE Core.
 //!
-//! This module provides default values for configuration settings
-//! used throughout the NovaDE desktop environment.
+//! This module provides functions that return default values for various
+//! configuration settings defined in [`super::types`]. These functions are
+//! used by `serde` when deserializing configuration structures if specific
+//! fields are missing from the configuration source.
+//!
+//! The defaults aim to provide a sensible out-of-the-box experience while
+//! allowing users to override them as needed.
 
-use std::thread;
+use std::path::PathBuf;
+use super::types::LoggingConfig;
 
-/// Default log level.
-pub fn default_log_level() -> String {
+/// Returns the default log level specification string.
+///
+/// This value is used as the default for [`LoggingConfig::level`].
+/// Currently defaults to `"info"`.
+pub fn default_log_level_spec() -> String {
     "info".to_string()
 }
 
-/// Default log file path.
-pub fn default_log_file() -> String {
-    "novade.log".to_string()
+/// Returns the default log file path specification.
+///
+/// This value is used as the default for [`LoggingConfig::file_path`].
+/// Currently defaults to `None`, meaning file logging is disabled by default.
+/// If a default path were desired, it could be constructed here (e.g., using
+/// functions from `crate::utils::paths`).
+pub fn default_log_file_path_spec() -> Option<PathBuf> {
+    None // No default log file path; logging to file is disabled unless explicitly configured.
 }
 
-/// Default setting for logging to console.
-pub fn default_log_to_console() -> bool {
-    true
+/// Returns the default log format specification string.
+///
+/// This value is used as the default for [`LoggingConfig::format`].
+/// Currently defaults to `"text"`.
+pub fn default_log_format_spec() -> String {
+    "text".to_string()
 }
 
-/// Default application name.
-pub fn default_app_name() -> String {
-    "novade".to_string()
+/// Constructs a default [`LoggingConfig`] instance.
+///
+/// This function is used as the `serde` default for the `logging` field
+/// in [`super::types::CoreConfig`]. It aggregates the individual default
+/// settings for logging level, file path, and format.
+pub fn default_core_logging_config() -> LoggingConfig {
+    LoggingConfig {
+        level: default_log_level_spec(),
+        file_path: default_log_file_path_spec(),
+        format: default_log_format_spec(),
+    }
 }
 
-/// Default application version.
-pub fn default_app_version() -> String {
-    "0.1.0".to_string()
-}
-
-/// Default data directory.
-pub fn default_data_dir() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    format!("{}/.local/share/novade", home)
-}
-
-/// Default cache directory.
-pub fn default_cache_dir() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    format!("{}/.cache/novade", home)
-}
-
-/// Default config directory.
-pub fn default_config_dir() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    format!("{}/.config/novade", home)
-}
-
-/// Default number of worker threads.
-pub fn default_worker_threads() -> usize {
-    let num_cpus = thread::available_parallelism()
-        .map(|p| p.get())
-        .unwrap_or(1);
-    
-    // Use at most 75% of available CPUs, but at least 1
-    std::cmp::max(1, num_cpus * 3 / 4)
-}
-
-/// Default setting for hardware acceleration.
-pub fn default_use_hardware_acceleration() -> bool {
-    true
-}
+// Removed old default functions that are no longer directly used by the new CoreConfig/LoggingConfig structure
+// - default_log_to_console() (not part of new LoggingConfig spec)
+// - default_app_name(), default_app_version(), default_data_dir(), etc. (part of removed ApplicationConfig)
+// - default_worker_threads(), default_use_hardware_acceleration() (part of removed SystemConfig)
 
 #[cfg(test)]
 mod tests {
     use super::*;
     
     #[test]
-    fn test_default_log_level() {
-        assert_eq!(default_log_level(), "info");
+    fn test_default_log_level_spec() {
+        assert_eq!(default_log_level_spec(), "info");
     }
     
     #[test]
-    fn test_default_log_file() {
-        assert_eq!(default_log_file(), "novade.log");
+    fn test_default_log_file_path_spec() {
+        assert_eq!(default_log_file_path_spec(), None);
     }
     
     #[test]
-    fn test_default_log_to_console() {
-        assert!(default_log_to_console());
+    fn test_default_log_format_spec() {
+        assert_eq!(default_log_format_spec(), "text");
     }
     
     #[test]
-    fn test_default_app_name() {
-        assert_eq!(default_app_name(), "novade");
-    }
-    
-    #[test]
-    fn test_default_app_version() {
-        assert_eq!(default_app_version(), "0.1.0");
-    }
-    
-    #[test]
-    fn test_default_data_dir() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        assert_eq!(default_data_dir(), format!("{}/.local/share/novade", home));
-    }
-    
-    #[test]
-    fn test_default_cache_dir() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        assert_eq!(default_cache_dir(), format!("{}/.cache/novade", home));
-    }
-    
-    #[test]
-    fn test_default_config_dir() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        assert_eq!(default_config_dir(), format!("{}/.config/novade", home));
-    }
-    
-    #[test]
-    fn test_default_worker_threads() {
-        let num_cpus = thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(1);
-        
-        let expected = std::cmp::max(1, num_cpus * 3 / 4);
-        assert_eq!(default_worker_threads(), expected);
-    }
-    
-    #[test]
-    fn test_default_use_hardware_acceleration() {
-        assert!(default_use_hardware_acceleration());
+    fn test_default_core_logging_config() {
+        let logging_config = default_core_logging_config();
+        assert_eq!(logging_config.level, "info");
+        assert_eq!(logging_config.file_path, None);
+        assert_eq!(logging_config.format, "text");
     }
 }
