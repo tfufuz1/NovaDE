@@ -24,10 +24,19 @@ serde = { version = "1.0.160", features = ["derive"] }
 serde_json = "1.0.96"
 
 # Wayland compositor
-smithay = { version = "0.3.0", features = ["backend_winit", "backend_drm", "backend_gbm", "backend_egl", "backend_session_libseat", "renderer_gl", "use_system_lib"] }
+smithay = { version = "0.10.0", features = [
+    "backend_drm",      # For direct rendering manager interaction
+    "backend_egl",      # For EGL context management (often implied by renderer_gl)
+    "renderer_gl",      # For OpenGL ES rendering support
+    "backend_libinput", # For input device handling
+    "backend_udev",     # For device discovery and management
+    "wayland_frontend", # Core Wayland protocol implementation
+    "desktop"           # For higher-level desktop abstractions (xdg_shell, space, etc.)
+] }
+calloop = "0.10.5"
 
 # Input handling
-input = { package = "input-linux", version = "0.6.0" }
+# input = { package = "input-linux", version = "0.6.0" } # backend_libinput replaces this
 xkbcommon = { version = "0.5.0", features = ["x11"] }
 
 # D-Bus
@@ -40,10 +49,13 @@ libspa = "0.6.0"
 
 # Utilities
 uuid = { version = "1.3.1", features = ["v4", "serde"] }
-log = "0.4.17"
-env_logger = "0.10.0"
+# log = "0.4.17" # tracing replaces log
+# env_logger = "0.10.0" # tracing-subscriber replaces env_logger
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
 once_cell = "1.17.1"
 parking_lot = "0.12.1"
+
 
 [dev-dependencies]
 mockall = "0.11.4"
