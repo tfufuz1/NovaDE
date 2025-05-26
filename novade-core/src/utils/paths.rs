@@ -1,347 +1,373 @@
-//! XDG Base Directory and Application-Specific Path Resolution.
+//! Filesystem Path Utilities.
 //!
-//! This module provides utility functions for resolving standard directory paths
-//! according to the XDG Base Directory Specification and for constructing paths
-//! specific to the NovaDE application. It relies on the `directories-next` crate.
-//!
-//! # Key Functions
-//!
-//! - **XDG Base Directories**:
-//!   - [`get_config_base_dir()`]: Returns `$XDG_CONFIG_HOME` (e.g., `~/.config`).
-//!   - [`get_data_base_dir()`]: Returns `$XDG_DATA_HOME` (e.g., `~/.local/share`).
-//!   - [`get_cache_base_dir()`]: Returns `$XDG_CACHE_HOME` (e.g., `~/.cache`).
-//!   - [`get_state_base_dir()`]: Returns `$XDG_STATE_HOME` (e.g., `~/.local/state` on Linux).
-//!
-//! - **Application-Specific Directories** (derived from XDG paths):
-//!   - [`get_app_config_dir()`]: e.g., `~/.config/NovaDE/NovaDE`.
-//!   - [`get_app_data_dir()`]: e.g., `~/.local/share/NovaDE/NovaDE`.
-//!   - [`get_app_cache_dir()`]: e.g., `~/.cache/NovaDE/NovaDE`.
-//!   - [`get_app_state_dir()`]: e.g., `~/.local/state/NovaDE/NovaDE`.
-//!
-//! All functions return `Result<PathBuf, CoreError>`, typically yielding
-//! [`CoreError::Config(ConfigError::DirectoryUnavailable)`] if a required
-//! directory cannot be determined (e.g., when the HOME directory is not found).
-//!
-//! # Constants
-//!
-//! The paths for application-specific directories are constructed using the following constants:
-//! - `QUALIFIER`: "org"
-//! - `ORGANIZATION`: "NovaDE"
-//! - `APPLICATION`: "NovaDE"
-//! These might be made configurable in the future if necessary.
+//! This module provides helper functions for resolving standard XDG (X Desktop Group)
+//! base directories and application-specific directories for configuration, data,
+//! cache, and state files. It uses the `directories-next` crate.
 
-use std::path::PathBuf;
+use crate::error::{ConfigError, CoreError};
 use directories_next::{BaseDirs, ProjectDirs};
-use crate::error::{CoreError, ConfigError}; // Ensure these are correctly pathed
+use std::path::PathBuf;
 
-// These constants need to be defined as per the spec for ProjectDirs.
-// For novade-core, they might be generic or related to "NovaDE" itself.
-// The spec uses "YourOrg", "YourApp". Let's use "NovaDE" for Application
-// and a placeholder for QUALIFIER and ORGANIZATION or make them configurable.
-// For now, hardcoding placeholders as per spec example, but this should be reviewed.
+/// The qualifier for the project, typically a reverse domain name.
 const QUALIFIER: &str = "org";
-const ORGANIZATION: &str = "NovaDE"; // Using NovaDE instead of "YourOrg"
+/// The organization name associated with the project.
+const ORGANIZATION: &str = "NovaDE";
+/// The application name.
 const APPLICATION: &str = "NovaDE";
 
-/// Returns the primary base directory for user-specific configuration files.
+/// Retrieves the XDG configuration base directory.
 ///
-/// This path typically corresponds to `$XDG_CONFIG_HOME` on Linux systems
-/// (e.g., `~/.config`). On other platforms, it resolves to the conventional
-/// user-specific configuration directory.
+/// This is typically `~/.config` on Linux.
 ///
-/// # Errors
-/// Returns [`CoreError::Config(ConfigError::DirectoryUnavailable)`] if the base
-/// configuration directory cannot be determined (e.g., if the HOME directory is not set).
+/// # Returns
 ///
-/// # Examples
-/// ```
-/// // On Linux, this might print something like: "/home/username/.config"
-/// match novade_core::utils::paths::get_config_base_dir() {
-///     Ok(path) => println!("Config base directory: {}", path.display()),
-///     Err(e) => eprintln!("Error getting config base dir: {}", e),
-/// }
-/// ```
+/// * `Ok(PathBuf)` containing the path to the config base directory.
+/// * `Err(CoreError)` if the directory cannot be determined.
 pub fn get_config_base_dir() -> Result<PathBuf, CoreError> {
     BaseDirs::new()
         .map(|dirs| dirs.config_dir().to_path_buf())
-        .ok_or_else(|| CoreError::Config(ConfigError::DirectoryUnavailable {
-            dir_type: "Config Base".to_string()
-        }))
+        .ok_or_else(|| {
+            CoreError::Config(ConfigError::DirectoryUnavailable {
+                dir_type: "Config Base".to_string(),
+            })
+        })
 }
 
-/// Returns the primary base directory for user-specific data files.
+/// Retrieves the XDG data base directory.
 ///
-/// This path typically corresponds to `$XDG_DATA_HOME` on Linux systems
-/// (e.g., `~/.local/share`). On other platforms, it resolves to the conventional
-/// user-specific data directory.
+/// This is typically `~/.local/share` on Linux.
 ///
-/// # Errors
-/// Returns [`CoreError::Config(ConfigError::DirectoryUnavailable)`] if the base
-/// data directory cannot be determined.
+/// # Returns
 ///
-/// # Examples
-/// ```
-/// // On Linux, this might print something like: "/home/username/.local/share"
-/// match novade_core::utils::paths::get_data_base_dir() {
-///     Ok(path) => println!("Data base directory: {}", path.display()),
-///     Err(e) => eprintln!("Error getting data base dir: {}", e),
-/// }
-/// ```
+/// * `Ok(PathBuf)` containing the path to the data base directory.
+/// * `Err(CoreError)` if the directory cannot be determined.
 pub fn get_data_base_dir() -> Result<PathBuf, CoreError> {
     BaseDirs::new()
         .map(|dirs| dirs.data_dir().to_path_buf())
-        .ok_or_else(|| CoreError::Config(ConfigError::DirectoryUnavailable {
-            dir_type: "Data Base".to_string()
-        }))
+        .ok_or_else(|| {
+            CoreError::Config(ConfigError::DirectoryUnavailable {
+                dir_type: "Data Base".to_string(),
+            })
+        })
 }
 
-/// Returns the primary base directory for user-specific cache files.
+/// Retrieves the XDG cache base directory.
 ///
-/// This path typically corresponds to `$XDG_CACHE_HOME` on Linux systems
-/// (e.g., `~/.cache`). On other platforms, it resolves to the conventional
-/// user-specific cache directory.
+/// This is typically `~/.cache` on Linux.
 ///
-/// # Errors
-/// Returns [`CoreError::Config(ConfigError::DirectoryUnavailable)`] if the base
-/// cache directory cannot be determined.
+/// # Returns
 ///
-/// # Examples
-/// ```
-/// // On Linux, this might print something like: "/home/username/.cache"
-/// match novade_core::utils::paths::get_cache_base_dir() {
-///     Ok(path) => println!("Cache base directory: {}", path.display()),
-///     Err(e) => eprintln!("Error getting cache base dir: {}", e),
-/// }
-/// ```
+/// * `Ok(PathBuf)` containing the path to the cache base directory.
+/// * `Err(CoreError)` if the directory cannot be determined.
 pub fn get_cache_base_dir() -> Result<PathBuf, CoreError> {
     BaseDirs::new()
         .map(|dirs| dirs.cache_dir().to_path_buf())
-        .ok_or_else(|| CoreError::Config(ConfigError::DirectoryUnavailable {
-            dir_type: "Cache Base".to_string()
-        }))
+        .ok_or_else(|| {
+            CoreError::Config(ConfigError::DirectoryUnavailable {
+                dir_type: "Cache Base".to_string(),
+            })
+        })
 }
 
-/// Returns the primary base directory for user-specific state files.
+/// Retrieves the XDG state base directory.
 ///
-/// This path typically corresponds to `$XDG_STATE_HOME` on Linux systems
-/// (e.g., `~/.local/state`). If `$XDG_STATE_HOME` is not set on Linux,
-/// it falls back to `$HOME/.local/state`.
+/// On Linux, this attempts to use `$XDG_STATE_HOME`, falling back to `~/.local/state`.
+/// On other platforms, it uses the equivalent of a local data directory.
 ///
-/// For non-Linux platforms, this function currently uses `BaseDirs::data_local_dir()`
-/// as a common fallback, as `directories-next::BaseDirs` does not provide a generic
-/// `state_dir()` method. This behavior might need platform-specific adjustments
-/// for stricter XDG compliance or platform conventions on macOS/Windows.
+/// # Returns
 ///
-/// # Errors
-/// Returns [`CoreError::Config(ConfigError::DirectoryUnavailable)`] if the base
-/// state directory cannot be determined.
-///
-/// # Examples
-/// ```
-/// // On Linux, this might print something like: "/home/username/.local/state"
-/// match novade_core::utils::paths::get_state_base_dir() {
-///     Ok(path) => println!("State base directory: {}", path.display()),
-///     Err(e) => eprintln!("Error getting state base dir: {}", e),
-/// }
-/// ```
+/// * `Ok(PathBuf)` containing the path to the state base directory.
+/// * `Err(CoreError)` if the directory cannot be determined.
 pub fn get_state_base_dir() -> Result<PathBuf, CoreError> {
     BaseDirs::new()
         .map(|dirs| {
             #[cfg(target_os = "linux")]
             {
-                match std::env::var("XDG_STATE_HOME") {
-                    Ok(state_home) if !state_home.is_empty() => PathBuf::from(state_home),
-                    _ => dirs.home_dir().join(".local/state"),
-                }
+                std::env::var("XDG_STATE_HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| dirs.home_dir().join(".local/state"))
             }
             #[cfg(not(target_os = "linux"))]
             {
-                // For non-Linux, use data_local_dir as a common fallback
-                // or a platform-specific equivalent if directories-next provides one.
-                // The spec implies data_local_dir for other OS.
-                // If data_local_dir is not suitable, this might need adjustment.
-                // For instance, on macOS, Application Support/YourApp/state might be more appropriate.
-                // However, directories-next doesn't have a generic state_dir() for BaseDirs.
-                // Using data_local_dir is a common pattern but might not perfectly match XDG for all OS.
-                dirs.data_local_dir().to_path_buf() 
+                // As per spec, using data_local_dir for non-Linux state.
+                // Note: directories_next::BaseDirs doesn't have a dedicated `state_dir`.
+                // `data_local_dir` is often `~/.local/share` on Linux,
+                // `~/Library/Application Support` on macOS,
+                // `%APPDATA%` (roaming) or `%LOCALAPPDATA%` on Windows.
+                // The spec might need refinement here for true cross-platform state,
+                // but adhering to current spec.
+                dirs.data_local_dir().to_path_buf()
             }
         })
-        .ok_or_else(|| CoreError::Config(ConfigError::DirectoryUnavailable {
-            dir_type: "State Base".to_string()
-        }))
+        .ok_or_else(|| {
+            CoreError::Config(ConfigError::DirectoryUnavailable {
+                dir_type: "State Base".to_string(),
+            })
+        })
 }
 
-/// Returns the application-specific configuration directory for NovaDE.
+/// Retrieves the application-specific configuration directory.
 ///
-/// This path is derived using `ProjectDirs` based on the `QUALIFIER`, `ORGANIZATION`,
-/// and `APPLICATION` constants. For example, on Linux, this typically resolves to
-/// `~/.config/NovaDE/NovaDE`.
+/// Path is typically like `~/.config/NovaDE/NovaDE` on Linux.
 ///
-/// # Errors
-/// Returns [`CoreError::Config(ConfigError::DirectoryUnavailable)`] if the application-specific
-/// configuration directory cannot be determined (e.g., if `ProjectDirs` cannot be initialized).
+/// # Returns
 ///
-/// # Examples
-/// ```
-/// // On Linux, this might print something like: "/home/username/.config/NovaDE/NovaDE"
-/// match novade_core::utils::paths::get_app_config_dir() {
-///     Ok(path) => println!("App config directory: {}", path.display()),
-///     Err(e) => eprintln!("Error getting app config dir: {}", e),
-/// }
-/// ```
+/// * `Ok(PathBuf)` containing the path to the application's config directory.
+/// * `Err(CoreError)` if the directory cannot be determined.
 pub fn get_app_config_dir() -> Result<PathBuf, CoreError> {
     ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
         .map(|dirs| dirs.config_dir().to_path_buf())
-        .ok_or_else(|| CoreError::Config(ConfigError::DirectoryUnavailable {
-            dir_type: "App Config".to_string()
-        }))
+        .ok_or_else(|| {
+            CoreError::Config(ConfigError::DirectoryUnavailable {
+                dir_type: "App Config".to_string(),
+            })
+        })
 }
 
-/// Returns the application-specific data directory for NovaDE.
+/// Retrieves the application-specific data directory.
 ///
-/// This path is derived using `ProjectDirs`. For example, on Linux, this typically
-/// resolves to `~/.local/share/NovaDE/NovaDE`.
+/// Path is typically like `~/.local/share/NovaDE/NovaDE` on Linux.
 ///
-/// # Errors
-/// Returns [`CoreError::Config(ConfigError::DirectoryUnavailable)`] if the application-specific
-/// data directory cannot be determined.
+/// # Returns
 ///
-/// # Examples
-/// ```
-/// // On Linux, this might print: "/home/username/.local/share/NovaDE/NovaDE"
-/// match novade_core::utils::paths::get_app_data_dir() {
-///     Ok(path) => println!("App data directory: {}", path.display()),
-///     Err(e) => eprintln!("Error getting app data dir: {}", e),
-/// }
-/// ```
+/// * `Ok(PathBuf)` containing the path to the application's data directory.
+/// * `Err(CoreError)` if the directory cannot be determined.
 pub fn get_app_data_dir() -> Result<PathBuf, CoreError> {
     ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
         .map(|dirs| dirs.data_dir().to_path_buf())
-        .ok_or_else(|| CoreError::Config(ConfigError::DirectoryUnavailable {
-            dir_type: "App Data".to_string()
-        }))
+        .ok_or_else(|| {
+            CoreError::Config(ConfigError::DirectoryUnavailable {
+                dir_type: "App Data".to_string(),
+            })
+        })
 }
 
-/// Returns the application-specific cache directory for NovaDE.
+/// Retrieves the application-specific cache directory.
 ///
-/// This path is derived using `ProjectDirs`. For example, on Linux, this typically
-/// resolves to `~/.cache/NovaDE/NovaDE`.
+/// Path is typically like `~/.cache/NovaDE/NovaDE` on Linux.
 ///
-/// # Errors
-/// Returns [`CoreError::Config(ConfigError::DirectoryUnavailable)`] if the application-specific
-/// cache directory cannot be determined.
+/// # Returns
 ///
-/// # Examples
-/// ```
-/// // On Linux, this might print: "/home/username/.cache/NovaDE/NovaDE"
-/// match novade_core::utils::paths::get_app_cache_dir() {
-///     Ok(path) => println!("App cache directory: {}", path.display()),
-///     Err(e) => eprintln!("Error getting app cache dir: {}", e),
-/// }
-/// ```
+/// * `Ok(PathBuf)` containing the path to the application's cache directory.
+/// * `Err(CoreError)` if the directory cannot be determined.
 pub fn get_app_cache_dir() -> Result<PathBuf, CoreError> {
     ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
         .map(|dirs| dirs.cache_dir().to_path_buf())
-        .ok_or_else(|| CoreError::Config(ConfigError::DirectoryUnavailable {
-            dir_type: "App Cache".to_string()
-        }))
+        .ok_or_else(|| {
+            CoreError::Config(ConfigError::DirectoryUnavailable {
+                dir_type: "App Cache".to_string(),
+            })
+        })
 }
 
-/// Returns the application-specific state directory for NovaDE.
+/// Retrieves the application-specific state directory.
 ///
-/// This path is constructed by appending `ORGANIZATION/APPLICATION`
-/// (i.e., `NovaDE/NovaDE`) to the path returned by [`get_state_base_dir()`].
-/// For example, on Linux, this typically resolves to `~/.local/state/NovaDE/NovaDE`.
+/// This combines the XDG state base directory with the project's path components.
 ///
-/// # Errors
-/// Returns [`CoreError::Config(ConfigError::DirectoryUnavailable)`] if the base state
-/// directory cannot be determined (propagated from `get_state_base_dir`).
+/// # Returns
 ///
-/// # Examples
-/// ```
-/// // On Linux, this might print: "/home/username/.local/state/NovaDE/NovaDE"
-/// match novade_core::utils::paths::get_app_state_dir() {
-///     Ok(path) => println!("App state directory: {}", path.display()),
-///     Err(e) => eprintln!("Error getting app state dir: {}", e),
-/// }
-/// ```
+/// * `Ok(PathBuf)` containing the path to the application's state directory.
+/// * `Err(CoreError)` if the directory cannot be determined.
 pub fn get_app_state_dir() -> Result<PathBuf, CoreError> {
-    // ProjectDirs doesn't have a dedicated state_dir() method.
-    // We construct it by appending ORGANIZATION/APPLICATION to the system's state_base_dir.
-    get_state_base_dir().map(|base_state| {
-        base_state.join(ORGANIZATION).join(APPLICATION)
-    })
-    // The error from get_state_base_dir will propagate if it fails.
-    // If get_state_base_dir succeeds but joining somehow fails (unlikely for PathBuf),
-    // that specific error isn't caught here, but PathBuf join is robust.
-    // If ProjectDirs itself failed to initialize (e.g. no home dir),
-    // it wouldn't be caught by this structure since we rely on get_state_base_dir first.
-    // However, get_state_base_dir (via BaseDirs) would likely fail first in such a scenario.
+    ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
+        .and_then(|proj_dirs| {
+            get_state_base_dir().ok().map(|base_state| base_state.join(proj_dirs.project_path()))
+        })
+        .ok_or_else(|| {
+            // This error is returned if ProjectDirs::from was None OR if get_state_base_dir().ok() was None (meaning get_state_base_dir() returned Err).
+            // Consider a more specific error message or error type if get_state_base_dir() itself fails.
+            CoreError::Config(ConfigError::DirectoryUnavailable {
+                dir_type: "App State".to_string(), 
+            })
+        })
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Mocking directories_next is complex. Tests will focus on:
+    // 1. The constants used.
+    // 2. The logic of get_app_state_dir if get_state_base_dir and ProjectDirs work.
+    // Full path tests depend on the environment and `directories-next` behavior.
+    // We assume `directories-next` works as intended.
 
-    // Helper to assert that a path is absolute and likely valid (non-empty)
-    fn assert_is_valid_path(res: Result<PathBuf, CoreError>, dir_type: &str) {
-        match res {
+    #[test]
+    fn constants_are_set_correctly() {
+        assert_eq!(QUALIFIER, "org");
+        assert_eq!(ORGANIZATION, "NovaDE");
+        assert_eq!(APPLICATION, "NovaDE");
+    }
+
+    // The following tests are highly dependent on the environment where they are run
+    // and the behavior of `directories-next`. They might be flaky or fail in
+    // constrained CI environments if HOME or other required env vars are not set.
+    // Therefore, we'll mostly test that they *return something* or the correct error type
+    // if `directories-next` can't find the dirs (which happens if HOME isn't set).
+
+    #[test]
+    fn get_config_base_dir_returns_ok_or_specific_error() {
+        match get_config_base_dir() {
             Ok(path) => {
-                println!("Path for {}: {:?}", dir_type, path);
-                assert!(path.is_absolute(), "Path for {} is not absolute: {:?}", dir_type, path);
-                assert!(!path.as_os_str().is_empty(), "Path for {} is empty", dir_type);
+                println!("Config base dir: {:?}", path); // For debugging in test output
+                assert!(path.is_absolute(), "Path should be absolute");
             }
-            Err(e) => {
-                // On some CI environments, HOME might not be set, leading to errors.
-                // We'll print the error and not fail the test outright if it's DirectoryUnavailable.
-                if let CoreError::Config(ConfigError::DirectoryUnavailable { ref dir_type, .. }) = e {
-                    eprintln!("Could not determine path for {}: {:?}", dir_type, e);
-                } else {
-                    panic!("Expected Ok or DirectoryUnavailable for {}, got {:?}", dir_type, e);
-                }
+            Err(CoreError::Config(ConfigError::DirectoryUnavailable { dir_type })) => {
+                assert_eq!(dir_type, "Config Base");
             }
+            Err(e) => panic!("Unexpected error: {:?}", e),
         }
     }
 
     #[test]
-    fn test_get_config_base_dir() {
-        assert_is_valid_path(get_config_base_dir(), "Config Base");
+    fn get_data_base_dir_returns_ok_or_specific_error() {
+        match get_data_base_dir() {
+            Ok(path) => {
+                println!("Data base dir: {:?}", path);
+                assert!(path.is_absolute());
+            }
+            Err(CoreError::Config(ConfigError::DirectoryUnavailable { dir_type })) => {
+                assert_eq!(dir_type, "Data Base");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
     }
 
     #[test]
-    fn test_get_data_base_dir() {
-        assert_is_valid_path(get_data_base_dir(), "Data Base");
-    }
-
-    #[test]
-    fn test_get_cache_base_dir() {
-        assert_is_valid_path(get_cache_base_dir(), "Cache Base");
-    }
-
-    #[test]
-    fn test_get_state_base_dir() {
-        // This test might be more prone to issues in CI if XDG_STATE_HOME is expected
-        // and not set, and home_dir().join(".local/state") path also has issues.
-        assert_is_valid_path(get_state_base_dir(), "State Base");
-    }
-
-    #[test]
-    fn test_get_app_config_dir() {
-        assert_is_valid_path(get_app_config_dir(), "App Config");
-    }
-
-    #[test]
-    fn test_get_app_data_dir() {
-        assert_is_valid_path(get_app_data_dir(), "App Data");
-    }
-
-    #[test]
-    fn test_get_app_cache_dir() {
-        assert_is_valid_path(get_app_cache_dir(), "App Cache");
+    fn get_cache_base_dir_returns_ok_or_specific_error() {
+        match get_cache_base_dir() {
+            Ok(path) => {
+                println!("Cache base dir: {:?}", path);
+                assert!(path.is_absolute());
+            }
+            Err(CoreError::Config(ConfigError::DirectoryUnavailable { dir_type })) => {
+                assert_eq!(dir_type, "Cache Base");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
     }
     
     #[test]
-    fn test_get_app_state_dir() {
-        assert_is_valid_path(get_app_state_dir(), "App State");
+    fn get_state_base_dir_returns_ok_or_specific_error() {
+        // This test is particularly environment-dependent for Linux XDG_STATE_HOME.
+        // We're mostly checking if it resolves to *something* or the correct error.
+        match get_state_base_dir() {
+            Ok(path) => {
+                println!("State base dir: {:?}", path);
+                assert!(path.is_absolute());
+                // On Linux, if XDG_STATE_HOME is not set, it should default to ~/.local/state
+                #[cfg(target_os = "linux")]
+                if std::env::var("XDG_STATE_HOME").is_err() {
+                    if let Some(home) = std::env::var("HOME").ok().map(PathBuf::from) {
+                         assert_eq!(path, home.join(".local/state"));
+                    } else {
+                        // If HOME isn't set, BaseDirs might fail, covered by the error case.
+                    }
+                }
+            }
+            Err(CoreError::Config(ConfigError::DirectoryUnavailable { dir_type })) => {
+                assert_eq!(dir_type, "State Base");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+
+    #[test]
+    fn get_app_config_dir_returns_ok_or_specific_error() {
+        match get_app_config_dir() {
+            Ok(path) => {
+                println!("App config dir: {:?}", path);
+                assert!(path.is_absolute());
+                // Check for application name, as path structure can vary by OS/env
+                assert!(path.to_string_lossy().to_lowercase().contains(&APPLICATION.to_lowercase()));
+            }
+            Err(CoreError::Config(ConfigError::DirectoryUnavailable { dir_type })) => {
+                assert_eq!(dir_type, "App Config");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn get_app_data_dir_returns_ok_or_specific_error() {
+         match get_app_data_dir() {
+            Ok(path) => {
+                println!("App data dir: {:?}", path);
+                assert!(path.is_absolute());
+                assert!(path.to_string_lossy().to_lowercase().contains(&APPLICATION.to_lowercase()));
+            }
+            Err(CoreError::Config(ConfigError::DirectoryUnavailable { dir_type })) => {
+                assert_eq!(dir_type, "App Data");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn get_app_cache_dir_returns_ok_or_specific_error() {
+        match get_app_cache_dir() {
+            Ok(path) => {
+                println!("App cache dir: {:?}", path);
+                assert!(path.is_absolute());
+                assert!(path.to_string_lossy().to_lowercase().contains(&APPLICATION.to_lowercase()));
+            }
+            Err(CoreError::Config(ConfigError::DirectoryUnavailable { dir_type })) => {
+                assert_eq!(dir_type, "App Cache");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+    
+    #[test]
+    fn get_app_state_dir_returns_ok_or_specific_error() {
+        match get_app_state_dir() {
+            Ok(path) => {
+                println!("App state dir: {:?}", path);
+                assert!(path.is_absolute());
+                assert!(path.to_string_lossy().to_lowercase().contains(&APPLICATION.to_lowercase()));
+                 if cfg!(target_os = "linux") && std::env::var("XDG_STATE_HOME").is_err() && std::env::var("HOME").is_ok() {
+                    // Ensure the base state path component is also present if we are on Linux with default XDG structure
+                    assert!(path.to_string_lossy().contains(".local/state"));
+                }
+            }
+            Err(CoreError::Config(ConfigError::DirectoryUnavailable { dir_type })) => {
+                assert_eq!(dir_type, "App State");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    // Example of how one might write more deterministic tests if `directories-next` was mockable
+    // or if we controlled the environment variables fully.
+    // For now, these tests rely on the system's environment.
+    #[test]
+    #[cfg(target_os = "linux")] // Example: Linux specific test for XDG_STATE_HOME
+    fn test_get_state_base_dir_linux_xdg_state_home_respected() {
+        let original_xdg_state_home = std::env::var("XDG_STATE_HOME").ok();
+        let test_state_path = "/tmp/test-xdg-state-home";
+        std::env::set_var("XDG_STATE_HOME", test_state_path);
+
+        match get_state_base_dir() {
+            Ok(path) => {
+                assert_eq!(path, PathBuf::from(test_state_path));
+            }
+            Err(e) => {
+                // Restore env var before panicking
+                if let Some(val) = original_xdg_state_home {
+                    std::env::set_var("XDG_STATE_HOME", val);
+                } else {
+                    std::env::remove_var("XDG_STATE_HOME");
+                }
+                panic!("get_state_base_dir failed when XDG_STATE_HOME was set: {:?}", e);
+            }
+        }
+
+        // Restore original environment
+        if let Some(val) = original_xdg_state_home {
+            std::env::set_var("XDG_STATE_HOME", val);
+        } else {
+            std::env::remove_var("XDG_STATE_HOME");
+        }
     }
 }

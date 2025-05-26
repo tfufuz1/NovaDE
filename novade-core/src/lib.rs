@@ -10,17 +10,17 @@
 //! toolkit for common desktop environment tasks. This includes:
 //!
 //! - **Error Handling**: A unified error system through the `CoreError` enum and its
-//!   associated specific error types like `ConfigError` and `LoggingError`.
+//!   associated specific error types like `ConfigError` and `ColorParseError`.
 //! - **Core Data Types**: Fundamental data structures for geometry (`Point`, `Size`, `Rect`, `RectInt`),
-//!   color representation (`Color`, `ColorFormat`), application identification (`AppIdentifier`),
-//!   status indicators (`Status`), and more.
+//!   color representation (`Color`), application identification (`AppIdentifier`),
+//!   status indicators (`Status`), `Orientation`, and more.
 //! - **Configuration Management**: Utilities for loading, parsing, and validating
-//!   application configuration, primarily through the `ConfigLoader` and `CoreConfig` structs.
+//!   application configuration, primarily through the `ConfigLoader` and `CoreConfig` structs,
+//!   including global access to the configuration.
 //! - **Logging**: A flexible logging framework built on top of the `tracing` crate,
 //!   configurable for various outputs (console, file) and formats (text, JSON).
-//! - **Utility Functions**: A collection of helper functions for filesystem operations (`utils::fs`),
-//!   path resolution (`utils::paths`), asynchronous tasks (`utils::async_utils`), and
-//!   string manipulation (`utils::string_utils`).
+//! - **Utility Functions**: A collection of helper functions for filesystem operations (`utils::fs`)
+//!   and XDG path resolution (`utils::paths`).
 //!
 //! ## Key Features
 //!
@@ -37,16 +37,28 @@
 //!
 //! ```rust,ignore
 //! // Example: Initializing logging and loading configuration
-//! use novade_core::config::{ConfigLoader, CoreConfig};
-//! use novade_core::logging::initialize_logging;
+//! use novade_core::config::{ConfigLoader, CoreConfig, initialize_core_config, get_core_config};
+//! use novade_core::logging::init_logging; // Renamed
 //! use novade_core::error::CoreError;
 //!
 //! fn main() -> Result<(), CoreError> {
 //!     // Load configuration first
-//!     let core_config = ConfigLoader::load()?;
+//!     let core_config = ConfigLoader::load().or_else(|e| {
+//!         // Handle error, e.g. if config file not found, use defaults
+//!         if matches!(e, CoreError::Config(config::ConfigError::NotFound { .. })) {
+//!             eprintln!("Config file not found, using default settings. Error: {}", e);
+//!             Ok(CoreConfig::default()) // Proceed with default config
+//!         } else {
+//!             Err(e) // Propagate other errors
+//!         }
+//!     })?;
+//!     
+//!     // Initialize global config
+//!     initialize_core_config(core_config.clone())
+//!         .map_err(|_| CoreError::Internal("Config already initialized".to_string()))?;
 //!
-//!     // Initialize logging based on the loaded configuration
-//!     initialize_logging(&core_config.logging, false)?;
+//!     // Initialize logging based on the (potentially default) configuration
+//!     init_logging(&get_core_config().logging, false)?;
 //!
 //!     tracing::info!("NovaDE Core initialized successfully.");
 //!     // ... your application logic ...
@@ -64,19 +76,28 @@ pub mod logging;
 pub mod utils;
 
 // Re-export key types for convenience
-pub use error::{CoreError, ConfigError, LoggingError};
+pub use error::{CoreError, ConfigError, ColorParseError}; // LoggingError removed, ColorParseError added
 pub use types::{
-    Point, Size, Rect, RectInt, Color, ColorFormat, Orientation, Direction, 
-    color::ColorParseError, AppIdentifier, Status
+    Point, Size, Rect, RectInt, Color, Orientation, // ColorFormat, Direction removed
+    AppIdentifier, Status // ColorParseError removed from here
 };
-pub use config::{CoreConfig, LoggingConfig, ConfigLoader, ConfigProvider};
-pub use logging::{initialize_logging, init_minimal_logging}; // Removed is_initialized
+pub use config::{
+    CoreConfig, LoggingConfig, FeatureFlags, // Added FeatureFlags
+    ConfigLoader, 
+    initialize_core_config, get_core_config // Added global access functions
+};
+pub use logging::{init_logging, init_minimal_logging}; // Renamed initialize_logging
 pub use utils::{
-    spawn_task, timeout, sleep, interval, // From async_utils
-    ensure_directory_exists, read_file_to_string, write_string_to_file, copy_file, get_all_files, // From fs (formerly file_utils)
-    // Note: Path functions from utils::paths are not re-exported by default here.
-    // Note: String case conversions from utils::string_utils are not re-exported by default here.
-    truncate_string, format_bytes, // From string_utils
-    // For case conversions, use string_utils::to_snake_case etc.
-    // For path utils, use utils::paths::get_config_base_dir etc.
+    // fs utilities
+    ensure_dir_exists,
+    read_to_string,
+    // paths utilities
+    get_config_base_dir,
+    get_data_base_dir,
+    get_cache_base_dir,
+    get_state_base_dir,
+    get_app_config_dir,
+    get_app_data_dir,
+    get_app_cache_dir,
+    get_app_state_dir,
 };
