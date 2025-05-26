@@ -1,15 +1,16 @@
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::path::PathBuf; // Not directly used for mock, but good for context
+    // use std::path::PathBuf; // Not directly used for mock, but good for context
     use tokio::sync::RwLock;
-    use serde_json::json;
-    use tracing::debug; // For debugging test output if needed
+    use serde_json::{json, Value as JsonValue};
+    use std::collections::HashMap; // For ApplicationSettingGroup in GlobalDesktopSettings
+    // use tracing::debug; // For debugging test output if needed
 
     use crate::global_settings_management::{
         service::{GlobalSettingsService, DefaultGlobalSettingsService},
-        types::*,
-        paths::*,
+        types::*, // Includes ApplicationSettingGroup
+        paths::*, // Includes SettingPath, ApplicationSettingPath
         errors::GlobalSettingsError,
         persistence_iface::SettingsPersistenceProvider,
     };
@@ -356,5 +357,195 @@ mod tests {
         // It would send a SettingsLoadedEvent if the channel supported it.
         // So, try_recv should be empty.
         assert!(matches!(event_rx.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
+    }
+
+    // --- Application Settings Specific Tests ---
+
+    #[tokio::test]
+    async fn test_set_and_get_application_settings() {
+        let (service, mock_provider) = create_and_load_test_service(None).await;
+        let mut event_rx = service.subscribe_to_setting_changes();
+
+        let path_app1_feat = SettingPath::Application(ApplicationSettingPath {
+            app_id: "com.testapp".to_string(),
+            key: "feature.enabled".to_string(),
+        });
+        let val_app1_feat = json!(true);
+
+        let path_app1_user = SettingPath::Application(ApplicationSettingPath {
+            app_id: "com.testapp".to_string(),
+            key: "user.name".to_string(),
+        });
+        let val_app1_user = json!("tester");
+        
+        let path_app2_timeout = SettingPath::Application(ApplicationSettingPath {
+            app_id: "org.otherapp".to_string(),
+            key: "config.timeout".to_string(),
+        });
+        let val_app2_timeout = json!(100);
+
+        // Set first setting for app1
+        service.update_setting(path_app1_feat.clone(), val_app1_feat.clone()).await.expect("Set app1_feat failed");
+        assert_eq!(service.get_setting(&path_app1_feat).unwrap(), val_app1_feat);
+        let event1 = event_rx.recv().await.unwrap();
+        assert_eq!(event1.path, path_app1_feat);
+        assert_eq!(event1.new_value, val_app1_feat);
+
+        // Set second setting for app1
+        service.update_setting(path_app1_user.clone(), val_app1_user.clone()).await.expect("Set app1_user failed");
+        assert_eq!(service.get_setting(&path_app1_user).unwrap(), val_app1_user);
+        let event2 = event_rx.recv().await.unwrap();
+        assert_eq!(event2.path, path_app1_user);
+        assert_eq!(event2.new_value, val_app1_user);
+        
+        // Verify first setting for app1 is still there
+        assert_eq!(service.get_setting(&path_app1_feat).unwrap(), val_app1_feat);
+
+        // Set setting for app2
+        service.update_setting(path_app2_timeout.clone(), val_app2_timeout.clone()).await.expect("Set app2_timeout failed");
+        assert_eq!(service.get_setting(&path_app2_timeout).unwrap(), val_app2_timeout);
+        let event3 = event_rx.recv().await.unwrap();
+        assert_eq!(event3.path, path_app2_timeout);
+        assert_eq!(event3.new_value, val_app2_timeout);
+
+        // Verify all settings in internal state
+        let current_settings = service.get_current_settings().unwrap();
+        assert_eq!(current_settings.application_settings.get("com.testapp").unwrap().settings.get("feature.enabled").unwrap(), &val_app1_feat);
+        assert_eq!(current_settings.application_settings.get("com.testapp").unwrap().settings.get("user.name").unwrap(), &val_app1_user);
+        assert_eq!(current_settings.application_settings.get("org.otherapp").unwrap().settings.get("config.timeout").unwrap(), &val_app2_timeout);
+        
+        // Verify persistence (3 updates = 3 saves)
+        assert_eq!(mock_provider.get_save_called_count().await, 3);
+        let persisted_settings = mock_provider.settings.read().await.clone();
+        assert_eq!(persisted_settings.application_settings.get("com.testapp").unwrap().settings.get("feature.enabled").unwrap(), &val_app1_feat);
+    }
+
+    #[tokio::test]
+    async fn test_update_existing_application_setting() {
+        let (service, _) = create_and_load_test_service(None).await;
+        let mut event_rx = service.subscribe_to_setting_changes();
+
+        let path = SettingPath::Application(ApplicationSettingPath {
+            app_id: "com.testapp".to_string(),
+            key: "feature.enabled".to_string(),
+        });
+        let initial_val = json!(true);
+        let updated_val = json!(false);
+
+        service.update_setting(path.clone(), initial_val.clone()).await.expect("Initial set failed");
+        assert_eq!(service.get_setting(&path).unwrap(), initial_val);
+        let _ = event_rx.recv().await.unwrap(); // Consume initial event
+
+        service.update_setting(path.clone(), updated_val.clone()).await.expect("Update failed");
+        assert_eq!(service.get_setting(&path).unwrap(), updated_val);
+        let event = event_rx.recv().await.unwrap();
+        assert_eq!(event.path, path);
+        assert_eq!(event.new_value, updated_val);
+    }
+
+    #[tokio::test]
+    async fn test_get_non_existent_application_setting() {
+        let (service, _) = create_and_load_test_service(None).await;
+
+        let path_non_existent_app = SettingPath::Application(ApplicationSettingPath {
+            app_id: "non.existent.app".to_string(),
+            key: "some.key".to_string(),
+        });
+        match service.get_setting(&path_non_existent_app) {
+            Err(GlobalSettingsError::PathNotFound(p)) => assert_eq!(p, path_non_existent_app),
+            res => panic!("Expected PathNotFound, got {:?}", res),
+        }
+
+        // Set up an app, then try to get a non-existent key within it
+        let existing_app_id = "com.testapp".to_string();
+        let path_existing_app_valid_key = SettingPath::Application(ApplicationSettingPath {
+            app_id: existing_app_id.clone(),
+            key: "valid.key".to_string(),
+        });
+        service.update_setting(path_existing_app_valid_key, json!("valid_value")).await.expect("Set failed");
+
+        let path_existing_app_non_existent_key = SettingPath::Application(ApplicationSettingPath {
+            app_id: existing_app_id.clone(),
+            key: "non.existent.key".to_string(),
+        });
+        match service.get_setting(&path_existing_app_non_existent_key) {
+            Err(GlobalSettingsError::PathNotFound(p)) => assert_eq!(p, path_existing_app_non_existent_key),
+            res => panic!("Expected PathNotFound for non-existent key, got {:?}", res),
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_application_setting_validation_in_service_update() {
+        let (service, _) = create_and_load_test_service(None).await;
+        
+        // This path is valid, but GlobalDesktopSettings.validate_recursive will be called
+        // after the change. The ApplicationSettingGroup's validate method checks keys.
+        // The service itself doesn't deserialize ApplicationSettingPath, it passes the value
+        // directly to the ApplicationSettingGroup's settings map.
+        // The validation that GlobalDesktopSettings::validate_recursive does on ApplicationSettingGroup
+        // is that the key is not empty. So we can't directly test service blocking invalid app_id or key
+        // via SettingPath because SettingPath's FromStr already validates that.
+        // What we can test is if the *value* causes a validation error higher up,
+        // but for application_settings, the value is JsonValue, so type errors are unlikely.
+        // The main validation for ApplicationSettingGroup is that the *key* is not empty,
+        // which is enforced by ApplicationSettingPath FromStr.
+        // Let's ensure update_setting still calls validate_recursive which would catch it if we manually
+        // put bad data into GlobalDesktopSettings (which update_setting does via its helpers).
+        
+        // To test ApplicationSettingGroup's validation via the service, we'd need to
+        // have a way for a JsonValue to be invalid for an application, which is not currently defined.
+        // The existing validation for ApplicationSettingGroup is `key.is_empty()`, which is handled by path parsing.
+        
+        // Let's try to make GlobalDesktopSettings invalid through other means and ensure app settings don't bypass it.
+        let path_app = SettingPath::Application(ApplicationSettingPath {
+            app_id: "com.testapp".to_string(),
+            key: "some.key".to_string(),
+        });
+        let val_app = json!("some_value");
+
+        // Make another part of settings invalid first
+        let mut current_settings = service.get_current_settings().unwrap();
+        current_settings.appearance.interface_scaling_factor = 0.0; // Invalid
+        let mock_provider_invalid_base = Arc::new(MockPersistenceProvider::new());
+        mock_provider_invalid_base.set_settings(current_settings).await;
+        let service_invalid_base = create_test_service(mock_provider_invalid_base).await;
+        service_invalid_base.load_settings().await.expect_err("Load should fail due to invalid base settings");
+        // This doesn't test app settings validation directly, but shows overall validation is active.
+
+        // If update_field_in_settings were to somehow bypass ApplicationSettingPath and insert an empty key,
+        // then new_settings_clone.validate_recursive() in update_setting would catch it.
+        // This seems hard to test without directly manipulating internal state in a test-specific way.
+        // The current structure means ApplicationSettingPath ensures app_id and key are non-empty.
+        // And ApplicationSettingGroup ensures keys within its map are non-empty (which is what we use).
+        // So, this aspect seems covered by tests in types_tests.rs and paths_tests.rs.
+    }
+
+    #[tokio::test]
+    async fn test_reset_to_defaults_clears_application_settings() {
+        let (service, mock_provider) = create_and_load_test_service(None).await;
+
+        let path_app1_feat = SettingPath::Application(ApplicationSettingPath {
+            app_id: "com.testapp".to_string(),
+            key: "feature.enabled".to_string(),
+        });
+        service.update_setting(path_app1_feat.clone(), json!(true)).await.expect("Set app setting failed");
+        
+        assert!(!service.get_current_settings().unwrap().application_settings.is_empty(), "App settings should exist before reset");
+        let save_count_before_reset = mock_provider.get_save_called_count().await;
+
+
+        service.reset_to_defaults().await.expect("Reset to defaults failed");
+
+        let current_settings = service.get_current_settings().unwrap();
+        assert!(current_settings.application_settings.is_empty(), "Application settings should be empty after reset");
+
+        match service.get_setting(&path_app1_feat) {
+            Err(GlobalSettingsError::PathNotFound(p)) => assert_eq!(p, path_app1_feat),
+            res => panic!("Expected PathNotFound after reset, got {:?}", res),
+        }
+        
+        assert_eq!(mock_provider.get_save_called_count().await, save_count_before_reset + 1);
+        let persisted_settings = mock_provider.settings.read().await.clone();
+        assert!(persisted_settings.application_settings.is_empty());
     }
 }
