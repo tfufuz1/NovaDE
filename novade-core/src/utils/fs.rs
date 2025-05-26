@@ -1,501 +1,226 @@
 //! Filesystem Utilities.
 //!
-//! This module provides helper functions for common filesystem operations such as
-//! creating directories, reading and writing files, copying files, and introspecting
-//! file paths (e.g., getting extensions or stems).
-//!
-//! Functions that perform I/O operations typically return `Result<T, CoreError>`
-//! or `Result<T, std::io::Error>`, mapping underlying I/O errors appropriately.
-//!
-//! # Examples
-//!
-//! ```rust,ignore
-//! use novade_core::utils::fs;
-//! use novade_core::error::CoreError;
-//! use std::path::Path;
-//!
-//! fn example_fs_operations(temp_dir_path: &Path) -> Result<(), CoreError> {
-//!     // Ensure a directory exists
-//!     let my_dir = temp_dir_path.join("my_app_data");
-//!     fs::ensure_directory_exists(&my_dir)?;
-//!     assert!(my_dir.is_dir());
-//!
-//!     // Write to a file
-//!     let my_file = my_dir.join("config.txt");
-//!     fs::write_string_to_file(&my_file, "setting=true", false)?; // create_dirs = false as my_dir exists
-//!
-//!     // Read from a file
-//!     let content = fs::read_file_to_string(&my_file)?;
-//!     assert_eq!(content, "setting=true");
-//!
-//!     Ok(())
-//! }
-//! ```
+//! This module provides helper functions for common filesystem operations,
+//! such as ensuring a directory exists and reading file contents to a string.
+//! These functions are designed to integrate with the crate's error handling
+//! by returning `CoreError`.
 
-use std::fs;
-use std::io::{self, Read, Write}; // io::Error is used for source in CoreError::Filesystem
-use std::path::{Path, PathBuf};
 use crate::error::CoreError;
+use std::fs;
+use std::path::Path;
 
 /// Ensures that a directory exists at the given path.
 ///
-/// If the directory (or any of its parents) does not exist, they will be created.
+/// If the path does not exist, this function will attempt to create it, including
+/// any necessary parent directories.
+/// If the path already exists but is not a directory, an error is returned.
+/// If the path exists and is a directory, the function succeeds.
 ///
 /// # Arguments
 ///
-/// * `path`: A type that can be converted into a `&Path` (e.g., `PathBuf`, `&str`).
+/// * `path`: A reference to a `Path` representing the directory whose existence should be ensured.
 ///
-/// # Errors
+/// # Returns
 ///
-/// Returns a [`CoreError::Filesystem`] if:
-/// - The path exists but is not a directory.
-/// - The directory or any of its parents could not be created due to an I/O error
-///   (e.g., permission issues).
-pub fn ensure_directory_exists<P: AsRef<Path>>(path: P) -> Result<(), CoreError> {
-    let path_ref = path.as_ref();
-    
-    if !path_ref.exists() {
-        fs::create_dir_all(path_ref).map_err(|e| CoreError::Filesystem {
-            message: format!("Failed to create directory '{}'", path_ref.display()),
-            path: path_ref.to_path_buf(),
+/// * `Ok(())` if the directory exists or was successfully created.
+/// * `Err(CoreError)` if the path exists but is not a directory, or if directory creation fails.
+///
+/// # Examples
+///
+/// ```no_run
+/// # use std::path::Path;
+/// # use novade_core::utils::fs::ensure_dir_exists;
+/// # use tempfile::tempdir;
+/// // Create a temporary directory for the example
+/// let temp_dir = tempdir().unwrap();
+/// let dir_path = temp_dir.path().join("my_app_data");
+///
+/// match ensure_dir_exists(&dir_path) {
+///     Ok(_) => println!("Directory {:?} ensured.", dir_path),
+///     Err(e) => eprintln!("Error ensuring directory: {}", e),
+/// }
+/// assert!(dir_path.exists());
+/// assert!(dir_path.is_dir());
+/// temp_dir.close().unwrap(); // Clean up
+/// ```
+pub fn ensure_dir_exists(path: &Path) -> Result<(), CoreError> {
+    if path.exists() {
+        if !path.is_dir() {
+            Err(CoreError::Filesystem {
+                message: "Path exists but is not a directory".to_string(),
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists, // Using AlreadyExists as path is occupied by a non-dir
+                    "Path exists but is not a directory",
+                ),
+            })
+        } else {
+            Ok(())
+        }
+    } else {
+        fs::create_dir_all(path).map_err(|e| CoreError::Filesystem {
+            message: "Failed to create directory".to_string(),
+            path: path.to_path_buf(),
             source: e,
-        })?;
-    } else if !path_ref.is_dir() {
-        return Err(CoreError::Filesystem {
-            message: format!("Path '{}' exists but is not a directory", path_ref.display()),
-            path: path_ref.to_path_buf(),
-            source: io::Error::new(io::ErrorKind::AlreadyExists, "Path exists but is not a directory"),
-        });
+        })
     }
-    
-    Ok(())
 }
 
 /// Reads the entire contents of a file into a string.
 ///
-/// This is a convenience wrapper around `std::fs::read_to_string`.
+/// This is a convenience wrapper around `std::fs::read_to_string` that maps
+/// the `std::io::Error` to `CoreError::Filesystem`.
 ///
 /// # Arguments
 ///
-/// * `path`: A type that can be converted into a `&Path` representing the file to read.
+/// * `path`: A reference to a `Path` representing the file to read.
 ///
-/// # Errors
+/// # Returns
 ///
-/// Returns a [`CoreError::Filesystem`] if the file cannot be read, for example:
-/// - The file does not exist.
-/// - The user does not have permission to read the file.
-/// - The file's content is not valid UTF-8.
-pub fn read_file_to_string<P: AsRef<Path>>(path: P) -> Result<String, CoreError> {
-    let path_ref = path.as_ref();
-    
-    std::fs::read_to_string(path_ref).map_err(|e| CoreError::Filesystem {
-        message: format!("Failed to read file '{}' to string", path_ref.display()),
-        path: path_ref.to_path_buf(),
+/// * `Ok(String)` containing the file contents if successful.
+/// * `Err(CoreError)` if the file cannot be read (e.g., does not exist, permissions error).
+///
+/// # Examples
+///
+/// ```no_run
+/// # use std::path::Path;
+/// # use std::fs::File;
+/// # use std::io::Write;
+/// # use novade_core::utils::fs::read_to_string;
+/// # use tempfile::NamedTempFile;
+/// // Create a temporary file for the example
+/// let mut temp_file = NamedTempFile::new().unwrap();
+/// writeln!(temp_file, "Hello, NovaDE!").unwrap();
+/// let file_path = temp_file.path();
+///
+/// match read_to_string(file_path) {
+///     Ok(contents) => println!("File contents: {}", contents),
+///     Err(e) => eprintln!("Error reading file: {}", e),
+/// }
+/// // temp_file is automatically deleted on drop
+/// ```
+pub fn read_to_string(path: &Path) -> Result<String, CoreError> {
+    fs::read_to_string(path).map_err(|e| CoreError::Filesystem {
+        message: "Failed to read file to string".to_string(),
+        path: path.to_path_buf(),
         source: e,
     })
-}
-
-/// Writes a string slice to a file.
-///
-/// This function will create the file if it does not exist, and will truncate it if it does.
-///
-/// # Arguments
-///
-/// * `path`: A type that can be converted into a `&Path` representing the file to write to.
-/// * `content`: The string slice to write to the file.
-/// * `create_dirs`: If `true`, any non-existent parent directories of `path` will be
-///   created using [`ensure_directory_exists`].
-///
-/// # Errors
-///
-/// Returns a [`CoreError::Filesystem`] if:
-/// - Writing to the file fails (e.g., permission issues, disk full).
-/// - `create_dirs` is `true` and creating parent directories fails.
-pub fn write_string_to_file<P: AsRef<Path>>(path: P, content: &str, create_dirs: bool) -> Result<(), CoreError> {
-    let path_ref = path.as_ref();
-    
-    if create_dirs {
-        if let Some(parent) = path_ref.parent() {
-            ensure_directory_exists(parent)?; // Already returns CoreError
-        }
-    }
-    
-    let mut file = fs::File::create(path_ref).map_err(|e| CoreError::Filesystem {
-        message: format!("Failed to create file for writing at '{}'", path_ref.display()),
-        path: path_ref.to_path_buf(),
-        source: e,
-    })?;
-    
-    file.write_all(content.as_bytes()).map_err(|e| CoreError::Filesystem {
-        message: format!("Failed to write content to file '{}'", path_ref.display()),
-        path: path_ref.to_path_buf(),
-        source: e,
-    })?;
-    
-    Ok(())
-}
-
-/// Copies the contents of one file to another.
-///
-/// This function will overwrite the destination file if it already exists.
-///
-/// # Arguments
-///
-/// * `src`: The path to the source file.
-/// * `dst`: The path to the destination file.
-/// * `create_dirs`: If `true`, any non-existent parent directories of `dst` will be
-///   created using [`ensure_directory_exists`].
-///
-/// # Errors
-///
-/// Returns a [`CoreError::Filesystem`] if:
-/// - The source file does not exist or is not readable.
-/// - The destination file cannot be written to.
-/// - `create_dirs` is `true` and creating parent directories fails.
-pub fn copy_file<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dst: Q, create_dirs: bool) -> Result<(), CoreError> {
-    let src_path = src.as_ref();
-    let dst_path = dst.as_ref();
-    
-    if create_dirs {
-        if let Some(parent) = dst_path.parent() {
-            ensure_directory_exists(parent)?; // Already returns CoreError
-        }
-    }
-    
-    fs::copy(src_path, dst_path).map_err(|e| CoreError::Filesystem {
-        message: format!("Failed to copy file from '{}' to '{}'", src_path.display(), dst_path.display()),
-        // Path field in CoreError::Filesystem is singular. We'll use destination path as primary.
-        // Source path is in the message.
-        path: dst_path.to_path_buf(), 
-        source: e,
-    })?;
-    
-    Ok(())
-}
-
-/// Recursively collects all file paths within a given directory.
-///
-/// This function traverses the directory and its subdirectories, adding the path
-/// of each regular file encountered to the returned vector.
-///
-/// # Arguments
-///
-/// * `dir`: A type that can be converted into a `&Path` representing the directory to scan.
-///
-/// # Errors
-///
-/// Returns an `std::io::Error` if:
-/// - The initial path `dir` is not a directory or does not exist.
-/// - Reading any part of the directory structure fails (e.g., due to permissions).
-pub fn get_all_files<P: AsRef<Path>>(dir: P) -> io::Result<Vec<PathBuf>> {
-    let dir_path = dir.as_ref();
-    let mut files = Vec::new();
-    
-    if dir_path.is_dir() {
-        for entry in fs::read_dir(dir_path)? {
-            let entry = entry?;
-            let path = entry.path();
-            
-            if path.is_dir() {
-                // Recursive call for subdirectories
-                files.append(&mut get_all_files(&path)?);
-            } else {
-                files.push(path);
-            }
-        }
-    }
-    // If dir_path is not a directory, an empty Vec is returned, which is valid.
-    // An error would occur if fs::read_dir fails (e.g. path doesn't exist or no permission).
-    
-    Ok(files)
-}
-
-/// Extracts the file extension from a path as a `String`.
-///
-/// # Arguments
-///
-/// * `path`: A type that can be converted into a `&Path`.
-///
-/// # Returns
-///
-/// An `Option<String>` containing the file extension if it exists and is valid UTF-8.
-/// Returns `None` if there is no extension or it's not valid UTF-8.
-///
-/// # Examples
-/// ```
-/// use novade_core::utils::fs::get_file_extension;
-/// assert_eq!(get_file_extension("archive.tar.gz"), Some("gz".to_string()));
-/// assert_eq!(get_file_extension("image.jpeg"), Some("jpeg".to_string()));
-/// assert_eq!(get_file_extension("document"), None);
-/// ```
-pub fn get_file_extension<P: AsRef<Path>>(path: P) -> Option<String> {
-    path.as_ref()
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|s| s.to_string())
-}
-
-/// Extracts the file stem (name without the final extension) from a path as a `String`.
-///
-/// # Arguments
-///
-/// * `path`: A type that can be converted into a `&Path`.
-///
-/// # Returns
-///
-/// An `Option<String>` containing the file stem if it exists and is valid UTF-8.
-/// Returns `None` if there is no file name or stem, or it's not valid UTF-8.
-///
-/// # Examples
-/// ```
-/// use novade_core::utils::fs::get_file_stem;
-/// assert_eq!(get_file_stem("archive.tar.gz"), Some("archive.tar".to_string()));
-/// assert_eq!(get_file_stem("image.jpeg"), Some("image".to_string()));
-/// assert_eq!(get_file_stem("document"), Some("document".to_string()));
-/// assert_eq!(get_file_stem(".bashrc"), Some("".to_string())); // Stem of ".bashrc" is often considered empty
-/// ```
-pub fn get_file_stem<P: AsRef<Path>>(path: P) -> Option<String> {
-    path.as_ref()
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(|s| s.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
-    // Note: CoreError is already imported at the module level, so no need for `use crate::error::CoreError` here.
-    
+    use std::fs::File;
+    use std::io::Write;
+    use tempfile::{tempdir, NamedTempFile};
+
     #[test]
-    fn test_ensure_directory_exists_new() {
-        let temp_dir = TempDir::new().unwrap();
-        let test_dir = temp_dir.path().join("test_dir");
-        
-        assert!(!test_dir.exists());
-        
-        let result = ensure_directory_exists(&test_dir);
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result.err());
-        assert!(test_dir.exists());
-        assert!(test_dir.is_dir());
-    }
-    
-    #[test]
-    fn test_ensure_directory_exists_existing() {
-        let temp_dir = TempDir::new().unwrap();
-        
-        assert!(temp_dir.path().exists());
-        assert!(temp_dir.path().is_dir());
-        
-        let result = ensure_directory_exists(temp_dir.path());
-        assert!(result.is_ok(), "Expected Ok for existing dir, got {:?}", result.err());
-    }
-    
-    #[test]
-    fn test_ensure_directory_exists_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let test_file_path = temp_dir.path().join("test_file");
-        
-        fs::write(&test_file_path, "test").unwrap();
-        
-        assert!(test_file_path.exists());
-        assert!(!test_file_path.is_dir());
-        
-        let result = ensure_directory_exists(&test_file_path);
-        assert!(result.is_err());
-        match result {
-            Err(CoreError::Filesystem { message, path, source }) => {
-                assert!(message.contains("exists but is not a directory"));
-                assert_eq!(path, test_file_path);
-                assert_eq!(source.kind(), io::ErrorKind::AlreadyExists);
-            },
-            Ok(_) => panic!("Expected CoreError::Filesystem, got Ok"),
-            Err(e) => panic!("Expected CoreError::Filesystem, got {:?}", e),
-        }
-    }
-    
-    #[test]
-    fn test_read_file_to_string() {
-        let temp_dir = TempDir::new().unwrap();
-        let test_file = temp_dir.path().join("test_file");
-        
-        let content = "Hello, world!";
-        fs::write(&test_file, content).unwrap();
-        
-        let result = read_file_to_string(&test_file);
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result.err());
-        assert_eq!(result.unwrap(), content);
-    }
-    
-    #[test]
-    fn test_read_file_to_string_nonexistent() {
-        let temp_dir = TempDir::new().unwrap();
-        let test_file_path = temp_dir.path().join("nonexistent");
-        
-        let result = read_file_to_string(&test_file_path);
-        assert!(result.is_err());
-        match result {
-            Err(CoreError::Filesystem { message, path, source }) => {
-                assert!(message.contains("Failed to read file"));
-                assert_eq!(path, test_file_path);
-                assert_eq!(source.kind(), io::ErrorKind::NotFound);
-            },
-            Ok(_) => panic!("Expected CoreError::Filesystem for non-existent file, got Ok"),
-            Err(e) => panic!("Expected CoreError::Filesystem, got {:?}", e),
-        }
-    }
-    
-    #[test]
-    fn test_write_string_to_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let test_file = temp_dir.path().join("test_file.txt");
-        
-        let content = "Hello, NovaDE!";
-        let result = write_string_to_file(&test_file, content, false);
-        
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result.err());
-        assert!(test_file.exists());
-        
-        let read_content = std::fs::read_to_string(&test_file).unwrap();
-        assert_eq!(read_content, content);
-    }
-    
-    #[test]
-    fn test_write_string_to_file_create_dirs() {
-        let temp_dir = TempDir::new().unwrap();
-        let test_file = temp_dir.path().join("new_subdir").join("test_file.txt");
-        
-        assert!(!test_file.parent().unwrap().exists());
-        
-        let content = "NovaDE rocks!";
-        let result = write_string_to_file(&test_file, content, true);
-        
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result.err());
-        assert!(test_file.parent().unwrap().exists());
-        assert!(test_file.exists());
-        
-        let read_content = std::fs::read_to_string(&test_file).unwrap();
-        assert_eq!(read_content, content);
+    fn test_ensure_dir_exists_creates_new_directory() {
+        let temp_root = tempdir().expect("Failed to create temp root dir for test");
+        let new_dir_path = temp_root.path().join("new_dir");
+
+        assert!(!new_dir_path.exists());
+        let result = ensure_dir_exists(&new_dir_path);
+        assert!(result.is_ok(), "ensure_dir_exists failed: {:?}", result.err());
+        assert!(new_dir_path.exists(), "Directory was not created");
+        assert!(new_dir_path.is_dir(), "Path created is not a directory");
     }
 
     #[test]
-    fn test_write_string_to_file_permission_denied() {
-        // This test requires creating a read-only directory or file, which is platform-dependent.
-        // For simplicity, we'll simulate a failure by trying to write to a path that's likely problematic.
-        // This test is more of a conceptual check for error mapping.
-        // On Unix, creating a directory and then trying to write to it as a file.
-        let temp_dir = TempDir::new().unwrap();
-        let dir_as_file_path = temp_dir.path().join("iamadirectory");
-        std::fs::create_dir(&dir_as_file_path).unwrap();
+    fn test_ensure_dir_exists_creates_nested_directories() {
+        let temp_root = tempdir().expect("Failed to create temp root dir for test");
+        let nested_dir_path = temp_root.path().join("parent_dir/child_dir");
 
-        let result = write_string_to_file(&dir_as_file_path, "test", false);
-        assert!(result.is_err());
-        match result {
-            Err(CoreError::Filesystem { message, path, source: _ }) => {
-                assert!(message.contains("Failed to create file for writing"));
-                assert_eq!(path, dir_as_file_path);
-            },
-            _ => panic!("Expected CoreError::Filesystem"),
+        assert!(!nested_dir_path.exists());
+        let result = ensure_dir_exists(&nested_dir_path);
+        assert!(result.is_ok(), "ensure_dir_exists failed for nested: {:?}", result.err());
+        assert!(nested_dir_path.exists(), "Nested directory was not created");
+        assert!(nested_dir_path.is_dir(), "Nested path created is not a directory");
+    }
+
+    #[test]
+    fn test_ensure_dir_exists_succeeds_if_directory_already_exists() {
+        let temp_root = tempdir().expect("Failed to create temp root dir for test");
+        let existing_dir_path = temp_root.path().join("existing_dir");
+
+        fs::create_dir(&existing_dir_path).expect("Failed to pre-create directory for test");
+        assert!(existing_dir_path.exists() && existing_dir_path.is_dir());
+
+        let result = ensure_dir_exists(&existing_dir_path);
+        assert!(result.is_ok(), "ensure_dir_exists failed for existing dir: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_ensure_dir_exists_errors_if_path_is_file() {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temp file for test");
+        writeln!(temp_file, "This is a file, not a directory.").unwrap();
+        let file_path = temp_file.path().to_path_buf();
+
+        assert!(file_path.exists() && file_path.is_file());
+
+        let result = ensure_dir_exists(&file_path);
+        assert!(result.is_err(), "ensure_dir_exists should have failed for a file path");
+
+        match result.err().unwrap() {
+            CoreError::Filesystem { message, path, source: _ } => {
+                assert_eq!(message, "Path exists but is not a directory");
+                assert_eq!(path, file_path);
+            }
+            other_error => panic!("Unexpected error type: {:?}", other_error),
+        }
+    }
+
+    // Note: Testing permissions errors for ensure_dir_exists is complex in a unit test environment
+    // as it requires setting up specific non-writable paths.
+
+    #[test]
+    fn test_read_to_string_success() {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temp file for test");
+        let content = "Hello, NovaDE!\nThis is a test file.";
+        writeln!(temp_file, "{}", content).unwrap();
+        let file_path = temp_file.path();
+
+        let result = read_to_string(file_path);
+        assert!(result.is_ok(), "read_to_string failed: {:?}", result.err());
+        // writeln! adds a newline, so the expected content should include it.
+        let expected_content = format!("{}\n", content);
+        assert_eq!(result.unwrap(), expected_content);
+    }
+
+    #[test]
+    fn test_read_to_string_file_not_found() {
+        let temp_root = tempdir().expect("Failed to create temp root dir for test");
+        let non_existent_file_path = temp_root.path().join("does_not_exist.txt");
+
+        let result = read_to_string(&non_existent_file_path);
+        assert!(result.is_err(), "read_to_string should have failed for non-existent file");
+
+        match result.err().unwrap() {
+            CoreError::Filesystem { message, path, source: _ } => {
+                assert_eq!(message, "Failed to read file to string");
+                assert_eq!(path, non_existent_file_path);
+            }
+            other_error => panic!("Unexpected error type: {:?}", other_error),
+        }
+    }
+
+    #[test]
+    fn test_read_to_string_on_directory_fails() {
+        let temp_root = tempdir().expect("Failed to create temp root dir for test");
+        let dir_path = temp_root.path(); // Path to the temp directory itself
+
+        let result = read_to_string(dir_path);
+        assert!(result.is_err(), "read_to_string should have failed for a directory");
+
+        match result.err().unwrap() {
+            CoreError::Filesystem { message, path, source: _ } => {
+                assert_eq!(message, "Failed to read file to string"); // std::fs::read_to_string gives generic error for dirs
+                assert_eq!(path, dir_path.to_path_buf());
+            }
+            other_error => panic!("Unexpected error type: {:?}", other_error),
         }
     }
     
-    #[test]
-    fn test_copy_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let src_file = temp_dir.path().join("source.txt");
-        let dst_file = temp_dir.path().join("destination.txt");
-        
-        let content = "Copy me!";
-        std::fs::write(&src_file, content).unwrap();
-        
-        let result = copy_file(&src_file, &dst_file, false);
-        
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result.err());
-        assert!(dst_file.exists());
-        
-        let read_content = std::fs::read_to_string(&dst_file).unwrap();
-        assert_eq!(read_content, content);
-    }
-    
-    #[test]
-    fn test_copy_file_create_dirs() {
-        let temp_dir = TempDir::new().unwrap();
-        let src_file = temp_dir.path().join("source_cd.txt");
-        let dst_file = temp_dir.path().join("new_dir_for_copy").join("destination_cd.txt");
-        
-        let content = "Copy me with dirs!";
-        std::fs::write(&src_file, content).unwrap();
-        
-        assert!(!dst_file.parent().unwrap().exists());
-        
-        let result = copy_file(&src_file, &dst_file, true);
-        
-        assert!(result.is_ok(), "Expected Ok, got {:?}", result.err());
-        assert!(dst_file.parent().unwrap().exists());
-        assert!(dst_file.exists());
-        
-        let read_content = std::fs::read_to_string(&dst_file).unwrap();
-        assert_eq!(read_content, content);
-    }
-
-    #[test]
-    fn test_copy_file_src_not_exists() {
-        let temp_dir = TempDir::new().unwrap();
-        let src_file = temp_dir.path().join("non_existent_source.txt");
-        let dst_file = temp_dir.path().join("destination_ne.txt");
-
-        let result = copy_file(&src_file, &dst_file, false);
-        assert!(result.is_err());
-        match result {
-            Err(CoreError::Filesystem { message, path, source }) => {
-                assert!(message.contains("Failed to copy file"));
-                assert_eq!(path, dst_file); // dst_path is used as primary path in error
-                assert_eq!(source.kind(), io::ErrorKind::NotFound);
-            },
-            _ => panic!("Expected CoreError::Filesystem for source not found"),
-        }
-    }
-    
-    #[test]
-    fn test_get_all_files() {
-        let temp_dir = TempDir::new().unwrap();
-        let file1 = temp_dir.path().join("file1");
-        let subdir = temp_dir.path().join("subdir");
-        let file2 = subdir.join("file2");
-        
-        fs::write(&file1, "file1").unwrap();
-        fs::create_dir(&subdir).unwrap();
-        fs::write(&file2, "file2").unwrap();
-        
-        let result = get_all_files(temp_dir.path());
-        
-        assert!(result.is_ok());
-        
-        let files = result.unwrap();
-        assert_eq!(files.len(), 2);
-        
-        let file_paths: Vec<String> = files
-            .iter()
-            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
-            .collect();
-        
-        assert!(file_paths.contains(&"file1".to_string()));
-        assert!(file_paths.contains(&"file2".to_string()));
-    }
-    
-    #[test]
-    fn test_get_file_extension() {
-        assert_eq!(get_file_extension("file.txt"), Some("txt".to_string()));
-        assert_eq!(get_file_extension("file.tar.gz"), Some("gz".to_string()));
-        assert_eq!(get_file_extension("file"), None);
-        assert_eq!(get_file_extension(".hidden"), Some("hidden".to_string()));
-    }
-    
-    #[test]
-    fn test_get_file_stem() {
-        assert_eq!(get_file_stem("file.txt"), Some("file".to_string()));
-        assert_eq!(get_file_stem("file.tar.gz"), Some("file.tar".to_string()));
-        assert_eq!(get_file_stem("file"), Some("file".to_string()));
-        assert_eq!(get_file_stem(".hidden"), Some("".to_string()));
-    }
+    // Note: Testing permissions errors for read_to_string is also complex in unit tests.
+    // Such tests are usually better as integration tests with specific filesystem setups.
 }

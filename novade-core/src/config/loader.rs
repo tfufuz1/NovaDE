@@ -184,7 +184,7 @@ impl ConfigLoader {
                 // If it's already absolute, use it as is, but ensure parent dir exists
                 if let Some(parent_dir) = relative_path.parent() {
                     if !parent_dir.exists() {
-                         nova_fs::ensure_directory_exists(parent_dir)?;
+                         nova_fs::ensure_dir_exists(parent_dir)?;
                     }
                 }
             } else {
@@ -194,7 +194,7 @@ impl ConfigLoader {
                 
                 if let Some(parent_dir) = absolute_path.parent() {
                      if !parent_dir.exists() {
-                        nova_fs::ensure_directory_exists(parent_dir)?;
+                        nova_fs::ensure_dir_exists(parent_dir)?;
                     }
                 }
                 config.logging.file_path = Some(absolute_path);
