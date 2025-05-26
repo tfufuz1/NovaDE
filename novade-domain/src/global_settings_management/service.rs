@@ -9,7 +9,10 @@ use super::errors::GlobalSettingsError;
 use super::persistence_iface::SettingsPersistenceProvider;
 
 // For path navigation helpers
-use super::paths::{AppearanceSettingPath, FontSettingPath, WorkspaceSettingPath, InputBehaviorSettingPath, PowerManagementPolicySettingPath, DefaultApplicationsSettingPath};
+use super::paths::{
+    SettingPath, ApplicationSettingPath, AppearanceSettingPath, FontSettingPath, WorkspaceSettingPath,
+    InputBehaviorSettingPath, PowerManagementPolicySettingPath, DefaultApplicationsSettingPath,
+};
 
 
 const DEFAULT_BROADCAST_CAPACITY: usize = 32; // Default capacity for the event channel
@@ -260,7 +263,15 @@ fn update_field_in_settings(
             DefaultApplicationsSettingPath::ImageViewerDesktopFile => settings.default_applications.image_viewer_desktop_file = deserialize_field(path, value)?,
             DefaultApplicationsSettingPath::TextEditorDesktopFile => settings.default_applications.text_editor_desktop_file = deserialize_field(path, value)?,
         },
-        // Add future top-level categories here
+        SettingPath::Application(app_path) => {
+            let app_settings_group = settings
+                .application_settings
+                .entry(app_path.app_id.clone())
+                .or_default();
+            app_settings_group
+                .settings
+                .insert(app_path.key.clone(), value);
+        } // Add future top-level categories here
     }
     Ok(())
 }
@@ -323,6 +334,22 @@ fn get_field_from_settings(
             DefaultApplicationsSettingPath::ImageViewerDesktopFile => serde_json::to_value(&settings.default_applications.image_viewer_desktop_file),
             DefaultApplicationsSettingPath::TextEditorDesktopFile => serde_json::to_value(&settings.default_applications.text_editor_desktop_file),
         },
+        SettingPath::Application(app_path) => {
+            return settings
+                .application_settings
+                .get(&app_path.app_id)
+                .ok_or_else(|| GlobalSettingsError::PathNotFound(path.clone()))
+                .and_then(|app_group| {
+                    app_group
+                        .settings
+                        .get(&app_path.key)
+                        .cloned() // Clone the JsonValue
+                        .ok_or_else(|| GlobalSettingsError::PathNotFound(path.clone()))
+                });
+            // This does not go through the final map_err, so it's slightly different.
+            // However, the error types are compatible.
+            // For direct JsonValue, no further serde_json::to_value is needed.
+        }
     };
     value.map_err(|e| GlobalSettingsError::serialization_error(Some(path.to_string()), e))
 }

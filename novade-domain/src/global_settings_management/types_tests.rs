@@ -1,8 +1,10 @@
 #[cfg(test)]
 mod tests {
     use crate::global_settings_management::types::*;
-    use serde_json;
+    use serde_json::{self, json, Value as JsonValue};
+    use std::collections::HashMap;
     use toml;
+    use std::fmt::Debug; // Added for test_serde_default_for_type
 
     // Helper to test serde for both JSON and TOML, and Default
     fn test_serde_default_for_type<T: Serialize + for<'de> Deserialize<'de> + PartialEq + Debug + Default + Clone>() {
@@ -43,8 +45,74 @@ mod tests {
         test_serde_default_for_type::<InputBehaviorSettings>();
         test_serde_default_for_type::<PowerManagementPolicySettings>();
         test_serde_default_for_type::<DefaultApplicationsSettings>();
+        test_serde_default_for_type::<ApplicationSettingGroup>(); // Added
         test_serde_default_for_type::<GlobalDesktopSettings>();
     }
+
+    // --- ApplicationSettingGroup Tests ---
+
+    #[test]
+    fn test_application_setting_group_serde() {
+        let mut settings_map = HashMap::new();
+        settings_map.insert("key1".to_string(), JsonValue::String("value1".to_string()));
+        settings_map.insert("key2".to_string(), JsonValue::Bool(true));
+        let group = ApplicationSettingGroup { settings: settings_map };
+
+        // Serialize to JSON
+        let json_string = serde_json::to_string(&group).expect("Serialization to JSON failed");
+        // Expected: {"settings":{"key1":"value1","key2":true}} or {"settings":{"key2":true,"key1":"value1"}}
+        // HashMap order is not guaranteed, so we check deserialized
+        // println!("Serialized ApplicationSettingGroup: {}", json_string); 
+
+        // Deserialize from JSON
+        let deserialized_group: ApplicationSettingGroup = serde_json::from_str(&json_string).expect("Deserialization from JSON failed");
+        assert_eq!(group, deserialized_group);
+
+        // Test deserialization of an empty JSON object
+        let empty_json = "{}";
+        let deserialized_empty_group: ApplicationSettingGroup = serde_json::from_str(empty_json).expect("Deserialization of empty JSON object failed");
+        assert_eq!(deserialized_empty_group, ApplicationSettingGroup::default());
+        assert!(deserialized_empty_group.settings.is_empty());
+
+        // Test deserialization of group with empty settings map
+        let empty_settings_json = r#"{"settings":{}}"#;
+        let deserialized_empty_settings_group: ApplicationSettingGroup = serde_json::from_str(empty_settings_json).expect("Deserialization of empty settings map failed");
+        assert!(deserialized_empty_settings_group.settings.is_empty());
+    }
+
+    #[test]
+    fn test_application_setting_group_validation() {
+        let mut group = ApplicationSettingGroup::default();
+        group.settings.insert("valid_key".to_string(), json!("valid_value"));
+        assert!(group.validate().is_ok());
+
+        group.settings.insert("".to_string(), json!("another_value"));
+        let validation_result = group.validate();
+        assert!(validation_result.is_err());
+        assert_eq!(validation_result.err().unwrap(), "Application setting key cannot be empty.");
+    }
+
+    // --- GlobalDesktopSettings with ApplicationSettings Tests ---
+    #[test]
+    fn test_global_desktop_settings_with_application_settings_serde() {
+        let mut global_settings = GlobalDesktopSettings::default();
+        let mut app_group_settings = HashMap::new();
+        app_group_settings.insert("feature_enabled".to_string(), JsonValue::Bool(true));
+        let app_group = ApplicationSettingGroup { settings: app_group_settings };
+        
+        global_settings.application_settings.insert("com.example.app".to_string(), app_group.clone());
+
+        // Serialize
+        let json_string = serde_json::to_string(&global_settings).expect("Global settings serialization failed");
+        // println!("Serialized GlobalDesktopSettings with app settings: {}", json_string);
+
+        // Deserialize
+        let deserialized_global_settings: GlobalDesktopSettings = serde_json::from_str(&json_string).expect("Global settings deserialization failed");
+        assert_eq!(global_settings, deserialized_global_settings);
+        assert!(deserialized_global_settings.application_settings.contains_key("com.example.app"));
+        assert_eq!(deserialized_global_settings.application_settings.get("com.example.app").unwrap().settings.get("feature_enabled").unwrap(), &JsonValue::Bool(true));
+    }
+
 
     // --- Validation Tests ---
 
@@ -208,6 +276,25 @@ mod tests {
         assert_eq!(
             settings.validate_recursive().err().unwrap(),
             "Appearance settings: Font settings: Default font size muss größer als 0 sein."
+        );
+        settings.appearance.font_settings.default_font_size = 10.0; // Reset for next test
+        assert!(settings.validate_recursive().is_ok()); // Back to valid
+
+        // Test validation of application_settings
+        let mut app_group_valid = ApplicationSettingGroup::default();
+        app_group_valid.settings.insert("valid_key".to_string(), json!(true));
+        settings.application_settings.insert("app.id.one".to_string(), app_group_valid);
+        assert!(settings.validate_recursive().is_ok());
+
+        let mut app_group_invalid = ApplicationSettingGroup::default();
+        app_group_invalid.settings.insert("".to_string(), json!(false)); // Invalid empty key
+        settings.application_settings.insert("app.id.two".to_string(), app_group_invalid);
+        
+        let validation_result = settings.validate_recursive();
+        assert!(validation_result.is_err());
+        assert_eq!(
+            validation_result.err().unwrap(),
+            "Application settings for 'app.id.two': Application setting key cannot be empty."
         );
     }
 }

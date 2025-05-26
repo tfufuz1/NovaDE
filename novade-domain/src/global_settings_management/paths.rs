@@ -168,6 +168,19 @@ impl Display for DefaultApplicationsSettingPath {
 
 // --- Top-Level SettingPath Enum ---
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct ApplicationSettingPath {
+    pub app_id: String,
+    pub key: String,
+}
+
+// Note: We cannot use #[serde(untagged)] for SettingPath easily if we want to keep
+// the kebab-case for existing variants and also have a custom format for Application.
+// The FromStr and Display implementations will handle the custom "application.<app_id>.<key>" format.
+// For direct serialization/deserialization, ApplicationSettingPath itself is kebab-case for its fields if needed,
+// but SettingPath::Application will be handled by serde as a variant "application" containing the struct.
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SettingPath {
@@ -176,6 +189,7 @@ pub enum SettingPath {
     InputBehavior(InputBehaviorSettingPath),
     PowerManagementPolicy(PowerManagementPolicySettingPath),
     DefaultApplications(DefaultApplicationsSettingPath),
+    Application(ApplicationSettingPath), // New variant
     // Add future top-level categories here
 }
 
@@ -187,6 +201,7 @@ impl Display for SettingPath {
             SettingPath::InputBehavior(sub_path) => write!(f, "input-behavior.{}", sub_path),
             SettingPath::PowerManagementPolicy(sub_path) => write!(f, "power-management-policy.{}", sub_path),
             SettingPath::DefaultApplications(sub_path) => write!(f, "default-applications.{}", sub_path),
+            SettingPath::Application(app_path) => write!(f, "application.{}.{}", app_path.app_id, app_path.key),
         }
     }
 }
@@ -297,17 +312,53 @@ impl FromStr for SettingPath {
     type Err = SettingPathParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut parts = s.splitn(2, '.');
+        let mut parts = s.split('.');
         let top_level = parts.next().ok_or_else(|| SettingPathParseError("Pfad darf nicht leer sein".to_string()))?;
-        let rest = parts.next();
 
-        match (top_level, rest) {
-            ("appearance", Some(sub_path_str)) => Ok(SettingPath::Appearance(AppearanceSettingPath::from_str(sub_path_str)?)),
-            ("workspace", Some(sub_path_str)) => Ok(SettingPath::Workspace(WorkspaceSettingPath::from_str(sub_path_str)?)),
-            ("input-behavior", Some(sub_path_str)) => Ok(SettingPath::InputBehavior(InputBehaviorSettingPath::from_str(sub_path_str)?)),
-            ("power-management-policy", Some(sub_path_str)) => Ok(SettingPath::PowerManagementPolicy(PowerManagementPolicySettingPath::from_str(sub_path_str)?)),
-            ("default-applications", Some(sub_path_str)) => Ok(SettingPath::DefaultApplications(DefaultApplicationsSettingPath::from_str(sub_path_str)?)),
-            (_, None) => Err(SettingPathParseError(format!("Unvollständiger Pfad: '{}'. Benötigt Unterpfad.", top_level))),
+        match top_level {
+            "appearance" => {
+                let sub_path_str = s.strip_prefix("appearance.").ok_or_else(|| SettingPathParseError("Unvollständiger Appearance-Pfad".to_string()))?;
+                Ok(SettingPath::Appearance(AppearanceSettingPath::from_str(sub_path_str)?))
+            }
+            "workspace" => {
+                let sub_path_str = s.strip_prefix("workspace.").ok_or_else(|| SettingPathParseError("Unvollständiger Workspace-Pfad".to_string()))?;
+                Ok(SettingPath::Workspace(WorkspaceSettingPath::from_str(sub_path_str)?))
+            }
+            "input-behavior" => {
+                let sub_path_str = s.strip_prefix("input-behavior.").ok_or_else(|| SettingPathParseError("Unvollständiger InputBehavior-Pfad".to_string()))?;
+                Ok(SettingPath::InputBehavior(InputBehaviorSettingPath::from_str(sub_path_str)?))
+            }
+            "power-management-policy" => {
+                let sub_path_str = s.strip_prefix("power-management-policy.").ok_or_else(|| SettingPathParseError("Unvollständiger PowerManagementPolicy-Pfad".to_string()))?;
+                Ok(SettingPath::PowerManagementPolicy(PowerManagementPolicySettingPath::from_str(sub_path_str)?))
+            }
+            "default-applications" => {
+                let sub_path_str = s.strip_prefix("default-applications.").ok_or_else(|| SettingPathParseError("Unvollständiger DefaultApplications-Pfad".to_string()))?;
+                Ok(SettingPath::DefaultApplications(DefaultApplicationsSettingPath::from_str(sub_path_str)?))
+            }
+            "application" => {
+                // Expecting application.<app_id>.<key>
+                // We already consumed "application", so parts iterator is now at <app_id>
+                let app_id = parts.next().ok_or_else(|| SettingPathParseError("Unvollständiger Application-Pfad: app_id fehlt".to_string()))?;
+                if app_id.is_empty() {
+                    return Err(SettingPathParseError("Application-Pfad: app_id darf nicht leer sein".to_string()));
+                }
+
+                // The rest of the string after "application.<app_id>." is the key
+                // This handles keys that might themselves contain dots.
+                let key_prefix = format!("application.{}.", app_id);
+                let key = s.strip_prefix(&key_prefix).ok_or_else(|| SettingPathParseError("Unvollständiger Application-Pfad: key fehlt".to_string()))?;
+
+
+                if key.is_empty() {
+                    return Err(SettingPathParseError("Application-Pfad: key darf nicht leer sein".to_string()));
+                }
+
+                Ok(SettingPath::Application(ApplicationSettingPath {
+                    app_id: app_id.to_string(),
+                    key: key.to_string(),
+                }))
+            }
             _ => Err(SettingPathParseError(format!("Unbekannter Top-Level-Pfad: {}", top_level))),
         }
     }

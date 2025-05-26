@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // --- Enums ---
 
@@ -137,6 +138,20 @@ pub struct DefaultApplicationsSettings {
 
 // --- Top-Level Settings Struct ---
 
+/// Holds a collection of key-value settings for a specific application.
+///
+/// The keys are strings, and values are generic `serde_json::Value` types,
+/// allowing applications to store diverse setting structures.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ApplicationSettingGroup {
+    /// The actual settings for the application, stored as a map from setting key to JSON value.
+    pub settings: HashMap<String, serde_json::Value>,
+}
+
+/// Represents all global desktop settings, including appearance, workspace configuration,
+/// input behaviors, power management policies, default applications, and
+/// configurations for individual applications.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct GlobalDesktopSettings {
@@ -145,11 +160,25 @@ pub struct GlobalDesktopSettings {
     pub input_behavior: InputBehaviorSettings,
     pub power_management_policy: PowerManagementPolicySettings,
     pub default_applications: DefaultApplicationsSettings,
+    /// Stores settings for individual applications, keyed by a unique application identifier
+    /// (e.g., "com.example.texteditor" or "org.novade.filemanager").
+    pub application_settings: HashMap<String, ApplicationSettingGroup>,
     // pub notifications: NotificationSettings, // Example for future extension
     // pub privacy: PrivacySettings,           // Example for future extension
 }
 
 // --- Validation Methods ---
+
+impl ApplicationSettingGroup {
+    pub fn validate(&self) -> Result<(), String> {
+        for key in self.settings.keys() {
+            if key.is_empty() {
+                return Err("Application setting key cannot be empty.".to_string());
+            }
+        }
+        Ok(())
+    }
+}
 
 impl FontSettings {
     pub fn validate(&self) -> Result<(), String> {
@@ -293,6 +322,9 @@ impl GlobalDesktopSettings {
         self.input_behavior.validate().map_err(|e| format!("Input behavior settings: {}", e))?;
         self.power_management_policy.validate().map_err(|e| format!("Power management policy settings: {}", e))?;
         self.default_applications.validate().map_err(|e| format!("Default applications settings: {}", e))?;
+        for (app_id, app_setting_group) in &self.application_settings {
+            app_setting_group.validate().map_err(|e| format!("Application settings for '{}': {}", app_id, e))?;
+        }
         Ok(())
     }
 }
