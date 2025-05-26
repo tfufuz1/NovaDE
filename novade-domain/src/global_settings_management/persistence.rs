@@ -92,7 +92,7 @@ impl SettingsPersistenceProvider for FilesystemSettingsProvider {
             // We might need a new variant in GlobalSettingsError or use a placeholder.
             // Using a descriptive string for now.
             GlobalSettingsError::SerializationError{
-                path: crate::global_settings_management::paths::SettingPath::Appearance(crate::global_settings_management::paths::AppearanceSettingPath::ActiveThemeName), // Placeholder path for now
+                path_description: None, // Error is for the entire settings object
                 source_message: e.to_string()
             }
             // A more general variant might be:

@@ -3,7 +3,7 @@ use tokio::sync::{broadcast, RwLock};
 use tracing::{warn, error, info}; // For logging
 use serde_json::Value as JsonValue;
 
-use super::types::{GlobalDesktopSettings, SettingChangedEvent, SettingsLoadedEvent, SettingsSavedEvent};
+use super::types::{GlobalDesktopSettings, SettingChangedEvent, SettingsLoadedEvent, SettingsSavedEvent, GlobalSettingsEvent};
 use super::paths::SettingPath;
 use super::errors::GlobalSettingsError;
 use super::persistence_iface::SettingsPersistenceProvider;
@@ -25,28 +25,13 @@ pub trait GlobalSettingsService: Send + Sync {
     async fn update_setting(&self, path: SettingPath, value: JsonValue) -> Result<(), GlobalSettingsError>;
     fn get_setting(&self, path: &SettingPath) -> Result<JsonValue, GlobalSettingsError>;
     async fn reset_to_defaults(&self) -> Result<(), GlobalSettingsError>;
-    fn subscribe_to_setting_changes(&self) -> broadcast::Receiver<SettingChangedEvent>;
-    // Consider adding:
-    // fn subscribe_to_settings_loaded(&self) -> broadcast::Receiver<SettingsLoadedEvent>;
-    // fn subscribe_to_settings_saved(&self) -> broadcast::Receiver<SettingsSavedEvent>;
+    fn subscribe_to_events(&self) -> broadcast::Receiver<GlobalSettingsEvent>;
 }
 
 pub struct DefaultGlobalSettingsService {
     settings: Arc<RwLock<GlobalDesktopSettings>>,
     persistence_provider: Arc<dyn SettingsPersistenceProvider>,
-    event_sender: broadcast::Sender<SettingChangedEvent>,
-    // For other events like SettingsLoadedEvent, SettingsSavedEvent, separate senders might be needed
-    // or a more generic event enum. For now, only SettingChangedEvent is broadcasted as per trait.
-    // If needed, this can be expanded.
-    // For simplicity, we'll use the same sender for all events if they are all SettingChangedEvent-like,
-    // or add new senders if the event types are distinct and subscribers need to differentiate.
-    // The trait defines only subscribe_to_setting_changes.
-    // Let's assume for now that SettingsLoadedEvent and SettingsSavedEvent are for logging or internal use,
-    // or would be part of a different subscription if required by the interface.
-    // If they *must* be broadcast, the event type for the channel would need to be an enum.
-    // Let's make a note to potentially use an enum for events if multiple event types are broadcast on one channel.
-    // For now, sticking to the trait's definition for `SettingChangedEvent`.
-    // Other events will be logged.
+    event_sender: broadcast::Sender<GlobalSettingsEvent>,
     broadcast_capacity: usize,
 }
 
@@ -56,7 +41,7 @@ impl DefaultGlobalSettingsService {
         broadcast_capacity: Option<usize>,
     ) -> Self {
         let capacity = broadcast_capacity.unwrap_or(DEFAULT_BROADCAST_CAPACITY);
-        let (event_sender, _) = broadcast::channel(capacity);
+        let (event_sender, _) = broadcast::channel::<GlobalSettingsEvent>(capacity);
         Self {
             settings: Arc::new(RwLock::new(GlobalDesktopSettings::default())),
             persistence_provider,
@@ -85,16 +70,12 @@ impl GlobalSettingsService for DefaultGlobalSettingsService {
         *settings_guard = loaded_settings.clone();
         info!("Globale Einstellungen erfolgreich geladen und angewendet.");
 
-        // Regarding SettingsLoadedEvent: The trait doesn't specify a subscription for it.
-        // If we were to send it on the `event_sender`, it would need to be part of an enum
-        // that SettingChangedEvent also belongs to.
-        // For now, logging is sufficient as per current trait design.
-        // Example if we had a generic event channel:
-        // if self.event_sender.receiver_count() > 0 {
-        //     if let Err(e) = self.event_sender.send(SystemEvent::SettingsLoaded(SettingsLoadedEvent { settings: loaded_settings })) {
-        //         warn!("Fehler beim Senden des SettingsLoadedEvent: {}", e);
-        //     }
-        // }
+        if self.event_sender.receiver_count() > 0 {
+            let event = GlobalSettingsEvent::SettingsLoaded(SettingsLoadedEvent { settings: loaded_settings.clone() });
+            if let Err(e) = self.event_sender.send(event) {
+                warn!("Fehler beim Senden des SettingsLoadedEvent: {}", e);
+            }
+        }
         Ok(())
     }
 
@@ -103,8 +84,13 @@ impl GlobalSettingsService for DefaultGlobalSettingsService {
         let settings_guard = self.settings.read().await;
         self.persistence_provider.save_global_settings(&*settings_guard).await?;
         info!("Globale Einstellungen erfolgreich gespeichert.");
-        // Regarding SettingsSavedEvent, similar logic to SettingsLoadedEvent for event broadcasting.
-        // Log for now.
+
+        if self.event_sender.receiver_count() > 0 {
+            let event = GlobalSettingsEvent::SettingsSaved(SettingsSavedEvent::default());
+            if let Err(e) = self.event_sender.send(event) {
+                warn!("Fehler beim Senden des SettingsSavedEvent: {}", e);
+            }
+        }
         Ok(())
     }
 
@@ -137,15 +123,14 @@ impl GlobalSettingsService for DefaultGlobalSettingsService {
         *settings_guard = new_settings_clone;
         
         if self.event_sender.receiver_count() > 0 {
-            if let Err(e) = self.event_sender.send(SettingChangedEvent { path, new_value: value }) {
-                warn!("Fehler beim Senden des SettingChangedEvent: {}. Empfängeranzahl: {}", e, self.event_sender.receiver_count());
-                // Not returning an error here as the setting was updated, only event broadcast failed.
-                // Depending on requirements, this could be GlobalSettingsError::EventChannelError.
+            let event = GlobalSettingsEvent::SettingChanged(SettingChangedEvent { path: path.clone(), new_value: value });
+            if let Err(e) = self.event_sender.send(event) {
+                warn!("Fehler beim Senden des GlobalSettingsEvent::SettingChanged: {}. Empfängeranzahl: {}", e, self.event_sender.receiver_count());
             } else {
-                info!("SettingChangedEvent erfolgreich gesendet.");
+                info!("GlobalSettingsEvent::SettingChanged erfolgreich gesendet.");
             }
         } else {
-            info!("Keine Empfänger für SettingChangedEvent registriert.");
+            info!("Keine Empfänger für GlobalSettingsEvent::SettingChanged registriert.");
         }
         
         // Release lock before saving
@@ -180,21 +165,19 @@ impl GlobalSettingsService for DefaultGlobalSettingsService {
         *settings_guard = default_settings.clone();
         info!("Globale Einstellungen auf Standardwerte zurückgesetzt und angewendet.");
 
-        // Regarding SettingsLoadedEvent for reset:
-        // Log for now, or use a specific ResetEvent if the channel supports it.
-        // Example if event channel was generic:
-        // if self.event_sender.receiver_count() > 0 {
-        //     if let Err(e) = self.event_sender.send(SystemEvent::SettingsReset(SettingsLoadedEvent { settings: default_settings })) {
-        //         warn!("Fehler beim Senden des SettingsLoadedEvent nach Reset: {}", e);
-        //     }
-        // }
+        if self.event_sender.receiver_count() > 0 {
+            let event = GlobalSettingsEvent::SettingsLoaded(SettingsLoadedEvent { settings: default_settings.clone() });
+            if let Err(e) = self.event_sender.send(event) {
+                warn!("Fehler beim Senden des SettingsLoadedEvent nach Reset: {}", e);
+            }
+        }
         
         drop(settings_guard);
-        self.save_settings().await?;
+        self.save_settings().await?; // This will also send a SettingsSaved event
         Ok(())
     }
 
-    fn subscribe_to_setting_changes(&self) -> broadcast::Receiver<SettingChangedEvent> {
+    fn subscribe_to_events(&self) -> broadcast::Receiver<GlobalSettingsEvent> {
         self.event_sender.subscribe()
     }
 }

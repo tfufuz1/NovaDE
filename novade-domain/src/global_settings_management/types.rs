@@ -217,6 +217,23 @@ pub struct SettingsLoadedEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)] // Added Default
 pub struct SettingsSavedEvent; // Empty struct, just a notification
 
+// --- Global Event Enum ---
+
+/// Represents any event that can occur within the global settings management system.
+///
+/// This enum aggregates specific event types, allowing subscribers to listen for a broader
+/// category of setting-related changes or a specific one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum GlobalSettingsEvent {
+    /// Indicates that a specific setting value has changed.
+    SettingChanged(SettingChangedEvent),
+    /// Indicates that a complete set of settings has been loaded.
+    /// This is often dispatched on application startup or when settings are reset.
+    SettingsLoaded(SettingsLoadedEvent),
+    /// Confirms that the current settings state has been successfully persisted.
+    SettingsSaved(SettingsSavedEvent),
+}
+
 impl AppearanceSettings {
     pub fn validate(&self) -> Result<(), String> {
         if self.active_theme_name.is_empty() {

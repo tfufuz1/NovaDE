@@ -9,7 +9,7 @@ mod tests {
 
     use crate::global_settings_management::{
         service::{GlobalSettingsService, DefaultGlobalSettingsService},
-        types::*, // Includes ApplicationSettingGroup
+        types::{GlobalSettingsEvent, SettingChangedEvent, SettingsLoadedEvent, SettingsSavedEvent, GlobalDesktopSettings, ApplicationSettingGroup, MouseAccelerationProfile}, // Explicit imports
         paths::*, // Includes SettingPath, ApplicationSettingPath
         errors::GlobalSettingsError,
         persistence_iface::SettingsPersistenceProvider,
@@ -103,7 +103,23 @@ mod tests {
         let mut initial_settings = GlobalDesktopSettings::default();
         initial_settings.appearance.active_theme_name = "TestTheme".to_string();
         
-        let (service, _) = create_and_load_test_service(Some(initial_settings.clone())).await;
+        // Manual setup to subscribe before load
+        let mock_provider = Arc::new(MockPersistenceProvider::new());
+        mock_provider.set_settings(initial_settings.clone()).await;
+        let service = create_test_service(mock_provider.clone()).await;
+        let mut event_rx = service.subscribe_to_events();
+
+        service.load_settings().await.expect("Initial load_settings failed");
+
+        // Check for SettingsLoaded event
+        let event = event_rx.recv().await.unwrap();
+        match event {
+            GlobalSettingsEvent::SettingsLoaded(payload) => {
+                assert_eq!(payload.settings.appearance.active_theme_name, "TestTheme");
+                assert_eq!(payload.settings, initial_settings);
+            }
+            other => panic!("Expected SettingsLoaded, got {:?}", other),
+        }
         
         let current_settings = service.get_current_settings().unwrap();
         assert_eq!(current_settings.appearance.active_theme_name, "TestTheme");
@@ -153,20 +169,39 @@ mod tests {
     #[tokio::test]
     async fn test_save_settings_success() {
         let (service, mock_provider) = create_and_load_test_service(None).await; // Start with defaults
+        // create_and_load_test_service calls load_settings, which sends SettingsLoaded. Consume it.
+        // Also, if create_and_load uses initial_settings, load_settings would have used that.
+        // For this test, it's simpler if create_and_load_test_service doesn't send events or we get a fresh receiver.
+        // Let's get a fresh receiver after initial load and before specific actions.
+        
+        let mut event_rx = service.subscribe_to_events(); // Subscribe fresh to ignore previous load events.
         
         // Modify settings through update to ensure they are different from default
         let path = SettingPath::Appearance(AppearanceSettingPath::ActiveThemeName);
-        let new_theme_name = json!("NewThemeName");
-        service.update_setting(path, new_theme_name.clone()).await.expect("Update setting failed");
-        // update_setting calls save_settings internally, so save_called_count is already 1.
+        let new_theme_name_val = "NewThemeName";
+        let new_theme_name_json = json!(new_theme_name_val);
+        service.update_setting(path.clone(), new_theme_name_json.clone()).await.expect("Update setting failed");
+        
+        // update_setting sends SettingChanged then SettingsSaved. Consume them.
+        let _ = event_rx.recv().await.unwrap(); // SettingChanged
+        let _ = event_rx.recv().await.unwrap(); // SettingsSaved from update_setting
+        
+        let save_count_before_explicit_save = mock_provider.get_save_called_count().await;
 
         // Call save_settings explicitly again
         let save_result = service.save_settings().await;
         assert!(save_result.is_ok());
-        assert_eq!(mock_provider.get_save_called_count().await, 2); // Once from update, once from explicit call
+        assert_eq!(mock_provider.get_save_called_count().await, save_count_before_explicit_save + 1);
+
+        // Check for SettingsSaved event from the explicit call
+        let event = event_rx.recv().await.unwrap();
+        match event {
+            GlobalSettingsEvent::SettingsSaved(_) => { /* Correct event received */ }
+            other => panic!("Expected SettingsSaved, got {:?}", other),
+        }
 
         let persisted_settings = mock_provider.settings.read().await.clone();
-        assert_eq!(persisted_settings.appearance.active_theme_name, new_theme_name.as_str().unwrap());
+        assert_eq!(persisted_settings.appearance.active_theme_name, new_theme_name_val);
     }
     
     #[tokio::test]
@@ -209,7 +244,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_and_get_string_setting() {
         let (service, mock_provider) = setup_service_for_update_get().await;
-        let mut event_rx = service.subscribe_to_setting_changes();
+        let mut event_rx = service.subscribe_to_events();
 
         let path = SettingPath::Appearance(AppearanceSettingPath::ActiveThemeName);
         let new_value = json!("UpdatedThemeName");
@@ -225,10 +260,22 @@ mod tests {
         let current_settings = service.get_current_settings().unwrap();
         assert_eq!(current_settings.appearance.active_theme_name, "UpdatedThemeName");
         
-        // Check event
-        let event = event_rx.recv().await.unwrap();
-        assert_eq!(event.path, path);
-        assert_eq!(event.new_value, new_value);
+        // Check SettingChanged event
+        let received_event1 = event_rx.recv().await.unwrap();
+        match received_event1 {
+            GlobalSettingsEvent::SettingChanged(event_payload) => {
+                assert_eq!(event_payload.path, path);
+                assert_eq!(event_payload.new_value, new_value);
+            }
+            other_event => panic!("Expected SettingChanged, got {:?}", other_event),
+        }
+
+        // Check SettingsSaved event
+        let received_event2 = event_rx.recv().await.unwrap();
+        match received_event2 {
+            GlobalSettingsEvent::SettingsSaved(_) => { /* Correct event received */ }
+            other_event => panic!("Expected SettingsSaved, got {:?}", other_event),
+        }
         
         // Check persistence
         assert_eq!(mock_provider.get_save_called_count().await, 1); // update_setting calls save
@@ -329,9 +376,9 @@ mod tests {
     #[tokio::test]
     async fn test_reset_to_defaults() {
         let (service, mock_provider) = setup_service_for_update_get().await;
-        let mut event_rx = service.subscribe_to_setting_changes(); // Should receive events for each field reset if we did it that way
+        let mut event_rx = service.subscribe_to_events(); // Should receive events for each field reset if we did it that way
                                                               // However, reset_to_defaults currently sends SettingsLoadedEvent, not individual SettingChangedEvents.
-                                                              // The trait only defines subscribe_to_setting_changes.
+                                                              // The trait only defines subscribe_to_events.
                                                               // So, for now, no SettingChangedEvent is expected from reset_to_defaults.
 
         // Change a setting first
@@ -352,10 +399,23 @@ mod tests {
         let persisted_settings = mock_provider.settings.read().await.clone();
         assert_eq!(persisted_settings, GlobalDesktopSettings::default());
 
-        // Check for SettingChangedEvents:
-        // As per current implementation of reset_to_defaults, it does NOT send individual SettingChangedEvents.
-        // It would send a SettingsLoadedEvent if the channel supported it.
-        // So, try_recv should be empty.
+        // Check for SettingsLoaded event
+        let event1 = event_rx.recv().await.unwrap();
+        match event1 {
+            GlobalSettingsEvent::SettingsLoaded(payload) => {
+                assert_eq!(payload.settings, GlobalDesktopSettings::default());
+            }
+            other => panic!("Expected SettingsLoaded, got {:?}", other),
+        }
+
+        // Check for SettingsSaved event
+        let event2 = event_rx.recv().await.unwrap();
+        match event2 {
+            GlobalSettingsEvent::SettingsSaved(_) => { /* Correct event received */ }
+            other => panic!("Expected SettingsSaved, got {:?}", other),
+        }
+        
+        // Ensure no other events
         assert!(matches!(event_rx.try_recv(), Err(tokio::sync::broadcast::error::TryRecvError::Empty)));
     }
 
@@ -364,7 +424,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_and_get_application_settings() {
         let (service, mock_provider) = create_and_load_test_service(None).await;
-        let mut event_rx = service.subscribe_to_setting_changes();
+        let mut event_rx = service.subscribe_to_events();
 
         let path_app1_feat = SettingPath::Application(ApplicationSettingPath {
             app_id: "com.testapp".to_string(),
@@ -387,16 +447,32 @@ mod tests {
         // Set first setting for app1
         service.update_setting(path_app1_feat.clone(), val_app1_feat.clone()).await.expect("Set app1_feat failed");
         assert_eq!(service.get_setting(&path_app1_feat).unwrap(), val_app1_feat);
-        let event1 = event_rx.recv().await.unwrap();
-        assert_eq!(event1.path, path_app1_feat);
-        assert_eq!(event1.new_value, val_app1_feat);
+        
+        let received_event1_changed = event_rx.recv().await.unwrap();
+        match received_event1_changed {
+            GlobalSettingsEvent::SettingChanged(payload) => {
+                assert_eq!(payload.path, path_app1_feat);
+                assert_eq!(payload.new_value, val_app1_feat);
+            }
+            other => panic!("Expected SettingChanged, got {:?}", other),
+        }
+        let received_event1_saved = event_rx.recv().await.unwrap();
+        assert!(matches!(received_event1_saved, GlobalSettingsEvent::SettingsSaved(_)), "Expected SettingsSaved, got {:?}", received_event1_saved);
 
         // Set second setting for app1
         service.update_setting(path_app1_user.clone(), val_app1_user.clone()).await.expect("Set app1_user failed");
         assert_eq!(service.get_setting(&path_app1_user).unwrap(), val_app1_user);
-        let event2 = event_rx.recv().await.unwrap();
-        assert_eq!(event2.path, path_app1_user);
-        assert_eq!(event2.new_value, val_app1_user);
+
+        let received_event2_changed = event_rx.recv().await.unwrap();
+        match received_event2_changed {
+            GlobalSettingsEvent::SettingChanged(payload) => {
+                assert_eq!(payload.path, path_app1_user);
+                assert_eq!(payload.new_value, val_app1_user);
+            }
+            other => panic!("Expected SettingChanged, got {:?}", other),
+        }
+        let received_event2_saved = event_rx.recv().await.unwrap();
+        assert!(matches!(received_event2_saved, GlobalSettingsEvent::SettingsSaved(_)), "Expected SettingsSaved, got {:?}", received_event2_saved);
         
         // Verify first setting for app1 is still there
         assert_eq!(service.get_setting(&path_app1_feat).unwrap(), val_app1_feat);
@@ -404,9 +480,17 @@ mod tests {
         // Set setting for app2
         service.update_setting(path_app2_timeout.clone(), val_app2_timeout.clone()).await.expect("Set app2_timeout failed");
         assert_eq!(service.get_setting(&path_app2_timeout).unwrap(), val_app2_timeout);
-        let event3 = event_rx.recv().await.unwrap();
-        assert_eq!(event3.path, path_app2_timeout);
-        assert_eq!(event3.new_value, val_app2_timeout);
+
+        let received_event3_changed = event_rx.recv().await.unwrap();
+        match received_event3_changed {
+            GlobalSettingsEvent::SettingChanged(payload) => {
+                assert_eq!(payload.path, path_app2_timeout);
+                assert_eq!(payload.new_value, val_app2_timeout);
+            }
+            other => panic!("Expected SettingChanged, got {:?}", other),
+        }
+        let received_event3_saved = event_rx.recv().await.unwrap();
+        assert!(matches!(received_event3_saved, GlobalSettingsEvent::SettingsSaved(_)), "Expected SettingsSaved, got {:?}", received_event3_saved);
 
         // Verify all settings in internal state
         let current_settings = service.get_current_settings().unwrap();
@@ -423,7 +507,7 @@ mod tests {
     #[tokio::test]
     async fn test_update_existing_application_setting() {
         let (service, _) = create_and_load_test_service(None).await;
-        let mut event_rx = service.subscribe_to_setting_changes();
+        let mut event_rx = service.subscribe_to_events();
 
         let path = SettingPath::Application(ApplicationSettingPath {
             app_id: "com.testapp".to_string(),
@@ -434,13 +518,23 @@ mod tests {
 
         service.update_setting(path.clone(), initial_val.clone()).await.expect("Initial set failed");
         assert_eq!(service.get_setting(&path).unwrap(), initial_val);
-        let _ = event_rx.recv().await.unwrap(); // Consume initial event
+        // Consume SettingChanged and SettingsSaved events for the initial set
+        let _ = event_rx.recv().await.unwrap(); 
+        let _ = event_rx.recv().await.unwrap(); 
 
         service.update_setting(path.clone(), updated_val.clone()).await.expect("Update failed");
         assert_eq!(service.get_setting(&path).unwrap(), updated_val);
-        let event = event_rx.recv().await.unwrap();
-        assert_eq!(event.path, path);
-        assert_eq!(event.new_value, updated_val);
+        
+        let received_event_changed = event_rx.recv().await.unwrap();
+        match received_event_changed {
+            GlobalSettingsEvent::SettingChanged(payload) => {
+                assert_eq!(payload.path, path);
+                assert_eq!(payload.new_value, updated_val);
+            }
+            other => panic!("Expected SettingChanged, got {:?}", other),
+        }
+        let received_event_saved = event_rx.recv().await.unwrap();
+        assert!(matches!(received_event_saved, GlobalSettingsEvent::SettingsSaved(_)), "Expected SettingsSaved, got {:?}", received_event_saved);
     }
 
     #[tokio::test]
