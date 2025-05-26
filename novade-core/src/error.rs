@@ -6,7 +6,7 @@
 //! definition and handling.
 //!
 //! The main error type for this crate is [`CoreError`], which encapsulates
-//! more specific errors like [`ConfigError`] and [`LoggingError`].
+//! more specific errors like [`ConfigError`].
 //!
 //! # Examples
 //!
@@ -22,13 +22,30 @@
 //! }
 //! ```
 
-use std::io;
 use std::path::PathBuf;
-use std::vec::Vec; // Added for ConfigError::NotFound
 use thiserror::Error;
-use toml; // Added for ConfigError::ParseError
+use toml; // Required for ConfigError::ParseError
 
-/// Core error type for the NovaDE desktop environment.
+/// Error type for color parsing, specifically for hex string conversion.
+///
+/// This error is used by `crate::types::color::Color::from_hex`.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ColorParseError {
+    /// The hex string has an invalid length.
+    #[error("Invalid hex string length: expected 3, 4, 6, or 8 characters after '#', found {0}")]
+    InvalidLength(usize),
+    /// The hex string contains invalid characters.
+    #[error("Invalid hex character: '{0}'")]
+    InvalidHexCharacter(char),
+    /// The hex string is missing the leading '#' prefix.
+    #[error("Hex string must start with '#'")]
+    MissingPrefix,
+    /// An error occurred during hex decoding.
+    #[error("Failed to decode hex component: {0}")]
+    HexDecodingError(String),
+}
+
+/// The primary error type for the core infrastructure layer.
 ///
 /// This enum represents all possible errors that can occur in the core layer.
 /// It is designed to be used as a common error type throughout the application,
@@ -39,6 +56,11 @@ pub enum CoreError {
     /// Wraps a [`ConfigError`].
     #[error("Configuration Error: {0}")]
     Config(#[from] ConfigError),
+
+    /// Errors related to parsing color strings.
+    /// Wraps a [`ColorParseError`].
+    #[error("Color Parsing Error: {0}")]
+    ColorParse(#[from] ColorParseError),
 
     /// Errors that occur during the initialization of the logging system.
     /// Contains a descriptive message of the failure.
@@ -72,13 +94,13 @@ pub enum CoreError {
     Internal(String),
 }
 
-/// Error type for configuration-related operations.
+/// Specific errors related to configuration handling.
 ///
 /// This enum represents errors that can occur during configuration
 /// loading, parsing, or access. It is typically wrapped by [`CoreError::Config`].
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    /// An error occurred while attempting to read a configuration file.
+    /// Failed to read the configuration file.
     /// Includes the path to the file and the source I/O error.
     #[error("Failed to read configuration file from {path:?}")]
     ReadError {
@@ -108,55 +130,61 @@ pub enum ConfigError {
     DirectoryUnavailable { dir_type: String },
 }
 
-/// Error type for logging-related operations.
-///
-/// This enum represents errors that can occur during logging
-/// initialization or operation.
-///
-/// **Note:** This enum is distinct from [`CoreError::LoggingInitialization`].
-/// `LoggingError` might be used for more specific logging operational failures
-/// if the logging system itself provides them, while `CoreError::LoggingInitialization`
-/// is specifically for failures during the setup process in `novade_core::logging`.
-#[derive(Error, Debug)]
-pub enum LoggingError {
-    /// Failed to initialize the logging system.
-    /// This variant is somewhat superseded by `CoreError::LoggingInitialization`
-    /// but is kept for potential specific uses or if `novade_core::logging::initialize_logging`
-    /// itself needs to return a more specific error before wrapping it.
-    #[error("Failed to initialize logging: {0}")]
-    InitializationError(String),
-
-    /// Failed to set or parse a log filter (e.g., from a configuration string).
-    #[error("Failed to set log filter: {0}")]
-    FilterError(String),
-
-    /// An I/O error occurred during logging, such as failing to write to a log file.
-    /// Wraps a `std::io::Error`.
-    #[error("Logging I/O error: {0}")]
-    IoError(#[from] io::Error),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Error as IoError, ErrorKind};
     use std::error::Error; // To use the .source() method
 
+    // --- ColorParseError Tests ---
+    #[test]
+    fn test_color_parse_error_display() {
+        assert_eq!(
+            format!("{}", ColorParseError::InvalidLength(5)),
+            "Invalid hex string length: expected 3, 4, 6, or 8 characters after '#', found 5"
+        );
+        assert_eq!(
+            format!("{}", ColorParseError::InvalidHexCharacter('X')),
+            "Invalid hex character: 'X'"
+        );
+        assert_eq!(
+            format!("{}", ColorParseError::MissingPrefix),
+            "Hex string must start with '#'"
+        );
+        assert_eq!(
+            format!("{}", ColorParseError::HexDecodingError("bad hex".to_string())),
+            "Failed to decode hex component: bad hex"
+        );
+    }
+
     // --- CoreError Tests ---
 
     #[test]
-    fn test_core_error_config_variant() {
+    fn test_core_error_config_from_config_error() {
         let original_config_err = ConfigError::ValidationError("Test validation".to_string());
-        let core_err = CoreError::Config(original_config_err);
-        
+        let core_err: CoreError = original_config_err.into(); // Test #[from]
+
         assert_eq!(format!("{}", core_err), "Configuration Error: Configuration validation failed: Test validation");
         assert!(core_err.source().is_some());
         match core_err.source().unwrap().downcast_ref::<ConfigError>() {
             Some(ConfigError::ValidationError(msg)) => assert_eq!(msg, "Test validation"),
-            _ => panic!("Incorrect source for CoreError::Config"),
+            _ => panic!("Incorrect source for CoreError::Config after conversion"),
         }
     }
 
+    #[test]
+    fn test_core_error_color_parse_from_color_parse_error() {
+        let original_color_err = ColorParseError::InvalidLength(5);
+        let core_err: CoreError = original_color_err.clone().into(); // Test #[from]
+
+        assert_eq!(format!("{}", core_err), "Color Parsing Error: Invalid hex string length: expected 3, 4, 6, or 8 characters after '#', found 5");
+        assert!(core_err.source().is_some());
+        match core_err.source().unwrap().downcast_ref::<ColorParseError>() {
+            Some(err) => assert_eq!(err, &original_color_err),
+            _ => panic!("Incorrect source for CoreError::ColorParse after conversion"),
+        }
+    }
+    
     #[test]
     fn test_core_error_logging_initialization_variant() {
         let err_msg = "Failed to init logger".to_string();
@@ -182,13 +210,28 @@ mod tests {
     }
 
     #[test]
-    fn test_core_error_io_variant() {
+    fn test_core_error_io_variant_and_from_io_error() {
         let io_err_source = IoError::new(ErrorKind::NotFound, "File not found for io");
-        let core_err = CoreError::Io(io_err_source); // Uses #[from]
+        // Test #[from] by converting IoError to CoreError
+        let core_err: CoreError = io_err_source.into(); 
 
         assert_eq!(format!("{}", core_err), "I/O Error: File not found for io");
         assert!(core_err.source().is_some());
-        assert_eq!(core_err.source().unwrap().downcast_ref::<IoError>().unwrap().kind(), ErrorKind::NotFound);
+        // The direct source of CoreError::Io is the IoError itself
+        match core_err.source().unwrap().downcast_ref::<IoError>() {
+             Some(src_io_err) => assert_eq!(src_io_err.kind(), ErrorKind::NotFound),
+             None => panic!("Source is not an IoError"),
+        }
+
+        // Also test direct instantiation if needed, though `#[from]` is the primary way
+        let direct_io_err_source = IoError::new(ErrorKind::Interrupted, "Operation interrupted");
+        let direct_core_err = CoreError::Io(direct_io_err_source);
+        assert_eq!(format!("{}", direct_core_err), "I/O Error: Operation interrupted");
+        assert!(direct_core_err.source().is_some());
+         match direct_core_err.source().unwrap().downcast_ref::<IoError>() {
+             Some(src_io_err) => assert_eq!(src_io_err.kind(), ErrorKind::Interrupted),
+             None => panic!("Source is not an IoError for direct instantiation"),
+        }
     }
     
     #[test]
@@ -227,19 +270,15 @@ mod tests {
 
     #[test]
     fn test_config_error_parse_error_variant() {
-        // Create a dummy toml::de::Error (this is a bit tricky as its fields are private)
-        // We'll parse an invalid TOML string to get a real one.
         let invalid_toml_content = "this is not valid toml";
-        let toml_err_source: toml::de::Error = toml::from_str(invalid_toml_content).unwrap_err();
-        let toml_err_display = format!("{}", toml_err_source); // Capture display before moving
+        let toml_err_source: toml::de::Error = toml::from_str::<toml::Value>(invalid_toml_content).unwrap_err();
+        let toml_err_display = format!("{}", toml_err_source); 
         
-        let config_err = ConfigError::ParseError(toml_err_source);
+        // Test #[from] by converting toml::de::Error to ConfigError
+        let config_err: ConfigError = toml_err_source.into(); 
         
         assert_eq!(format!("{}", config_err), format!("Failed to parse configuration file: {}", toml_err_display));
         assert!(config_err.source().is_some());
-        // Check if source is toml::de::Error by trying to downcast.
-        // The actual error might be wrapped further by thiserror if `#[source]` was also used with `#[from]`.
-        // Here, `#[from]` makes `toml::de::Error` the direct source.
         assert!(config_err.source().unwrap().is::<toml::de::Error>());
     }
 
@@ -270,33 +309,42 @@ mod tests {
         assert!(config_err.source().is_none());
     }
 
-    // --- LoggingError Tests ---
+     #[test]
+    fn test_core_error_from_config_error_conversion() {
+        let config_err = ConfigError::ValidationError("Test validation from ConfigError".to_string());
+        let core_error: CoreError = config_err.into(); // Explicit conversion
 
-    #[test]
-    fn test_logging_error_initialization_error_variant() {
-        let err_msg = "Failed to init subsystem".to_string();
-        let log_err = LoggingError::InitializationError(err_msg.clone());
-        
-        assert_eq!(format!("{}", log_err), format!("Failed to initialize logging: {}", err_msg));
-        assert!(log_err.source().is_none());
+        match core_error {
+            CoreError::Config(ref inner_err) => {
+                if let ConfigError::ValidationError(msg) = inner_err {
+                    assert_eq!(msg, "Test validation from ConfigError");
+                } else {
+                    panic!("Inner error is not ConfigError::ValidationError");
+                }
+            }
+            _ => panic!("CoreError is not CoreError::Config variant"),
+        }
+        assert_eq!(
+            format!("{}", core_error),
+            "Configuration Error: Configuration validation failed: Test validation from ConfigError"
+        );
     }
 
     #[test]
-    fn test_logging_error_filter_error_variant() {
-        let err_msg = "Invalid filter string".to_string();
-        let log_err = LoggingError::FilterError(err_msg.clone());
-        
-        assert_eq!(format!("{}", log_err), format!("Failed to set log filter: {}", err_msg));
-        assert!(log_err.source().is_none());
-    }
+    fn test_core_error_from_io_error_conversion() {
+        let io_err = IoError::new(ErrorKind::PermissionDenied, "Permission denied for direct conversion");
+        let core_error: CoreError = io_err.into(); // Explicit conversion
 
-    #[test]
-    fn test_logging_error_io_error_variant() {
-        let io_err_source = IoError::new(ErrorKind::BrokenPipe, "Logging pipe broken");
-        let log_err = LoggingError::IoError(io_err_source); // Uses #[from]
-
-        assert_eq!(format!("{}", log_err), "Logging I/O error: Logging pipe broken");
-        assert!(log_err.source().is_some());
-        assert_eq!(log_err.source().unwrap().downcast_ref::<IoError>().unwrap().kind(), ErrorKind::BrokenPipe);
+        match core_error {
+            CoreError::Io(ref inner_err) => {
+                assert_eq!(inner_err.kind(), ErrorKind::PermissionDenied);
+                assert_eq!(format!("{}", inner_err), "Permission denied for direct conversion");
+            }
+            _ => panic!("CoreError is not CoreError::Io variant"),
+        }
+        assert_eq!(
+            format!("{}", core_error),
+            "I/O Error: Permission denied for direct conversion"
+        );
     }
 }

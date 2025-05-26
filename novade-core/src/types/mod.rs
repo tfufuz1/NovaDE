@@ -1,30 +1,33 @@
-//! Core Data Types for NovaDE.
+//! Core data types used throughout NovaDE.
 //!
-//! This module aggregates various fundamental data types utilized across the NovaDE core library
-//! and potentially by other NovaDE components. It serves as a central point for accessing
-//! common structures related to geometry, color representation, application identification,
-//! status indication, and directional orientations.
-//!
-//! ## Submodules
-//!
-//! - [`geometry`]: Defines geometric primitives like points (`Point`), sizes (`Size`),
-//!   and rectangles (`Rect`, `RectInt`).
-//! - [`color`]: Provides color representations (`Color`), color formats (`ColorFormat`),
-//!   and associated error types for parsing (`ColorParseError`).
-//! - [`orientation`]: Includes types for representing screen orientation (`Orientation`)
-//!   and general direction (`Direction`).
-//! - [`application`]: Contains application-specific types such as unique identifiers
-//!   (`AppIdentifier`) and status enums (`Status`).
-//!
-//! Key types from these submodules are re-exported here for convenient access.
+//! This module consolidates common data structures like geometric primitives
+//! (`Point`, `Size`, `Rect`), color representations (`Color`), and various
+//! utility enums and identifiers.
 
-pub mod geometry;
+// Declare submodules
+pub mod app_identifier;
 pub mod color;
-pub mod orientation;
-pub mod application; // Added new module
+pub mod enums;
+pub mod geometry;
+pub mod status;
 
-// Re-export key types for convenience
-pub use geometry::{Point, Size, Rect, RectInt};
-pub use color::{Color, ColorFormat, ColorParseError}; // Added ColorParseError based on previous tasks
-pub use orientation::{Orientation, Direction};
-pub use application::{AppIdentifier, Status}; // Added new types
+// Re-export public types for easier access
+pub use app_identifier::AppIdentifier;
+pub use color::Color; // ColorParseError is now in crate::error
+pub use crate::error::ColorParseError; // Re-export ColorParseError from crate::error
+pub use enums::Orientation;
+pub use geometry::{Point, Rect, RectInt, Size};
+pub use status::Status;
+
+// Note on RectInt:
+// The re-export `pub use geometry::{Point, Size, Rect, RectInt};` assumes `RectInt` is a public type in `geometry.rs`.
+// `PointInt` and `SizeInt` are helper types for `RectInt` and are public within `geometry.rs` for `RectInt` to use,
+// but they are not re-exported at this `types` module level.
+//
+// Note on Serde:
+// Serde support for types like Point<T>, Size<T>, Rect<T> is conditional on the `serde` feature flag for the crate.
+// This module's re-exports make the types available; actual serde support is handled by derive attributes
+// within the respective struct/enum definitions, typically like:
+// #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+// The problem description implies serde is generally expected, so the derives in the files will reflect that.
+// The `serde(bound(...))` attribute is used for generic types.
