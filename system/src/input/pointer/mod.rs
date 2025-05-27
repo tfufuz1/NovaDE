@@ -7,3 +7,9 @@ pub use self::pointer_event_translator::{
     handle_pointer_axis_event,
     find_surface_and_coords_at_global_point
 };
+
+pub mod config;
+pub use config::{AccelProfile, PointerDeviceIdentifier};
+
+pub mod dnd_grab;
+pub use self::dnd_grab::{DndGrabStart, DndPointerGrab};
