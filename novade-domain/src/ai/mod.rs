@@ -1,110 +1,295 @@
-pub mod mcp;
-pub mod logic_service; // This was moved from ai_interaction_service/logic_service.rs
+//! AI module for the NovaDE domain layer.
+//!
+//! This module provides AI-related functionality for the NovaDE desktop environment,
+//! including consent management and AI interaction capabilities.
 
-#[cfg(test)]
-pub(crate) mod logic_service_tests; // Moved from ai_interaction_service/logic_service_tests.rs
+use std::collections::HashMap;
+use async_trait::async_trait;
+use uuid::Uuid;
+use serde::{Serialize, Deserialize};
+use crate::error::{DomainError, AIError};
+use crate::entities::value_objects::Timestamp;
 
-pub use logic_service::{AIInteractionLogicService, DefaultAIInteractionLogicService};
+/// Represents the consent status for AI features.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConsentStatus {
+    /// User has not yet made a decision
+    Undecided,
+    /// User has granted consent
+    Granted,
+    /// User has denied consent
+    Denied,
+    /// Consent has been revoked
+    Revoked,
+}
 
-// Re-export common/public types and services from the mcp submodule
-// These are items that users of `crate::ai::` would typically need.
-pub use mcp::types::{
-    MCPServerConfig, ClientCapabilities, ServerInfo, ServerCapabilities, ToolDefinition,
-    ResourceDefinition, PromptDefinition, JsonRpcRequest, JsonRpcResponse, JsonRpcError,
-    MCPError, ConnectionStatus, AIInteractionContext, AIModelProfile, AIDataCategory,
-    AIConsentStatus, AIConsent, AttachmentData, AIInteractionError,
-};
-pub use mcp::client_instance::MCPClientInstance; // The main client instance
-pub use mcp::connection_service::{MCPConnectionService, ServerId as ConnectionServiceServerId}; // Service to manage connections
-pub use mcp::consent_manager::MCPConsentManager; // Consent management
-pub use mcp::transport::IMCPTransport; // Core transport trait
+/// Represents a specific AI feature that requires consent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AIFeature {
+    /// Unique identifier for the feature
+    feature_id: String,
+    /// The feature name
+    name: String,
+    /// The feature description
+    description: String,
+    /// The data usage policy for this feature
+    data_usage_policy: String,
+    /// Whether this feature is required for core functionality
+    required: bool,
+}
 
-// The old DefaultAIInteractionService and DefaultConsentManager that were in novade-domain/src/ai/
-// are effectively replaced or encompassed by DefaultAIInteractionLogicService and MCPConsentManager (now in mcp::consent_manager).
-// If they were distinct and still needed, their module declarations (default_interaction_service.rs, default_consent_manager.rs)
-// would need to be handled (e.g. moved into logic_service or mcp, or kept here if they are general ai concepts).
-// Based on the previous refactoring, DefaultAIInteractionLogicService is the primary service implementation.
-// The files `default_consent_manager.rs` and `default_interaction_service.rs` seem to be older versions.
-// For now, I'm focusing on the structure based on the moved `ai_interaction_service` files.
-// If those older files are still relevant, they might need to be integrated or removed separately.
-// The prompt only specified moving files from `ai_interaction_service`.
-//
-// Listing the contents of novade-domain/src/ai/ again to be sure:
-// novade-domain/src/ai/default_consent_manager.rs
-// novade-domain/src/ai/default_interaction_service.rs
-// novade-domain/src/ai/logic_service.rs (newly moved)
-// novade-domain/src/ai/logic_service_tests.rs (newly moved)
-// novade-domain/src/ai/mcp/ (newly created dir)
-// novade-domain/src/ai/mod.rs (this file)
-//
-// It seems `default_interaction_service.rs` might be an older version of `logic_service.rs`.
-// And `default_consent_manager.rs` might be an older version of `mcp/consent_manager.rs`.
-// This restructuring might make them redundant.
-//
-// For this step, the `mod.rs` for `ai` should declare `mcp` and `logic_service`.
-// It should not declare `default_consent_manager` or `default_interaction_service`
-// if those files are now obsolete or effectively replaced by the moved/restructured code.
-// This subtask is about reflecting the *new* structure.
-//
-// The re-exports above are from the new `mcp` submodule.
-// `DefaultAIInteractionLogicService` is re-exported from `logic_service`.
+/// Represents a user's consent for a specific AI feature.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsentRecord {
+    /// Unique identifier for the consent record
+    consent_id: String,
+    /// The user ID
+    user_id: String,
+    /// The feature ID
+    feature_id: String,
+    /// The consent status
+    status: ConsentStatus,
+    /// The timestamp when consent was last updated
+    updated_at: Timestamp,
+    /// Additional notes or context for this consent
+    notes: Option<String>,
+}
 
-// To confirm current plan:
-// 1. `novade-domain/src/ai/mcp/mod.rs` - DONE
-// 2. `novade-domain/src/ai/mod.rs` - This file
-// 3. `novade-domain/src/lib.rs`
-// 4. Update imports in moved files.
+/// Interface for the AI consent manager.
+#[async_trait]
+pub trait ConsentManager: Send + Sync {
+    /// Registers a new AI feature.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The feature name
+    /// * `description` - The feature description
+    /// * `data_usage_policy` - The data usage policy
+    /// * `required` - Whether this feature is required
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the created feature ID.
+    async fn register_feature(
+        &self,
+        name: &str,
+        description: &str,
+        data_usage_policy: &str,
+        required: bool,
+    ) -> Result<String, DomainError>;
+    
+    /// Gets an AI feature by ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `feature_id` - The feature ID
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the feature if found.
+    async fn get_feature(&self, feature_id: &str) -> Result<AIFeature, DomainError>;
+    
+    /// Lists all AI features.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing a vector of all features.
+    async fn list_features(&self) -> Result<Vec<AIFeature>, DomainError>;
+    
+    /// Records a user's consent for a feature.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` - The user ID
+    /// * `feature_id` - The feature ID
+    /// * `status` - The consent status
+    /// * `notes` - Additional notes or context
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the created consent record ID.
+    async fn record_consent(
+        &self,
+        user_id: &str,
+        feature_id: &str,
+        status: ConsentStatus,
+        notes: Option<&str>,
+    ) -> Result<String, DomainError>;
+    
+    /// Gets a user's consent for a feature.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` - The user ID
+    /// * `feature_id` - The feature ID
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the consent record if found.
+    async fn get_consent(&self, user_id: &str, feature_id: &str) -> Result<ConsentRecord, DomainError>;
+    
+    /// Lists all consent records for a user.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` - The user ID
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing a vector of all consent records for the user.
+    async fn list_consents_for_user(&self, user_id: &str) -> Result<Vec<ConsentRecord>, DomainError>;
+    
+    /// Checks if a user has consented to a feature.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` - The user ID
+    /// * `feature_id` - The feature ID
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing true if the user has consented, false otherwise.
+    async fn has_consent(&self, user_id: &str, feature_id: &str) -> Result<bool, DomainError>;
+    
+    /// Revokes a user's consent for a feature.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` - The user ID
+    /// * `feature_id` - The feature ID
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or failure.
+    async fn revoke_consent(&self, user_id: &str, feature_id: &str) -> Result<(), DomainError>;
+    
+    /// Revokes all consents for a user.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` - The user ID
+    ///
+    /// # Returns
+    ///
+    /// A `Result` indicating success or failure.
+    async fn revoke_all_consents(&self, user_id: &str) -> Result<(), DomainError>;
+}
 
-// What about the old files `default_consent_manager.rs` and `default_interaction_service.rs`
-// that were already in `novade-domain/src/ai/`?
-// The prompt is about restructuring `ai_interaction_service`.
-// If these old files are truly obsolete, they should be deleted.
-// If they are not, their relationship with the new `mcp` and `logic_service` modules needs clarification.
-// For now, I will *not* declare them in this `mod.rs` to avoid conflicts if they are indeed old.
-// This `mod.rs` will only reflect the newly moved and structured components.
-// This means `novade-domain/src/ai/default_consent_manager.rs` and
-// `novade-domain/src/ai/default_interaction_service.rs` will become orphaned if not handled.
-//
-// Given the task description, I should focus on making the *moved* files work first.
-// If those old files are still needed, it's a separate concern.
-// The `AIInteractionLogicService` and `DefaultAIInteractionLogicService` are now in `ai/logic_service.rs`.
-// The `MCPConsentManager` is now in `ai/mcp/consent_manager.rs`.
-// These seem to be the active components.
+/// Represents an AI interaction request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AIRequest {
+    /// Unique identifier for the request
+    request_id: String,
+    /// The user ID
+    user_id: String,
+    /// The request type
+    request_type: String,
+    /// The request content
+    content: String,
+    /// The request timestamp
+    timestamp: Timestamp,
+    /// Additional parameters for the request
+    parameters: HashMap<String, String>,
+}
 
-// The re-exports from mcp::types::* are too broad.
-// Let's list them explicitly as per the prompt example.
-// pub use mcp::types::{MCPServerConfig, ClientCapabilities, ServerInfo, ServerCapabilities, ToolDefinition, ResourceDefinition, PromptDefinition, JsonRpcRequest, JsonRpcResponse, JsonRpcError, MCPError, ConnectionStatus, AIInteractionContext, AIModelProfile, AIDataCategory, AIConsentStatus, AIConsent, AttachmentData, AIInteractionError};
-// This is already handled by the `pub use mcp::types::{...}` block above.
-// The `ServerId` is also re-exported from `mcp::connection_service` as `ConnectionServiceServerId`.
-// It might be useful to re-export it as `ServerId` from `crate::ai::` as well.
-pub use mcp::connection_service::ServerId; // Re-export ServerId for convenience
-                                          // This conflicts with the alias ConnectionServiceServerId, let's choose one.
-                                          // The prompt used `ServerId as ConnectionServiceServerId` in mcp/mod.rs
-                                          // but then `pub use mcp::connection_service::MCPConnectionService;`
-                                          // Let's stick to `ConnectionServiceServerId` if that's the alias used in mcp/mod.rs
-                                          // Or, more simply, if `ServerId` is from `mcp::connection_service`,
-                                          // then `pub use mcp::connection_service::{MCPConnectionService, ServerId};`
-                                          // I'll assume `mcp/mod.rs` exports `ServerId` directly for now.
-                                          // Re-checking `mcp/mod.rs` content:
-                                          // `pub use connection_service::{MCPConnectionService, ServerId as ConnectionServiceServerId};`
-                                          // So, to re-export ServerId from `ai` module, it should be:
-                                          // `pub use mcp::ConnectionServiceServerId as ServerId;` (if we want to rename it back)
-                                          // Or just use `ConnectionServiceServerId`.
-                                          // For simplicity, if `mcp::connection_service::ServerId` is the type, use that path.
-                                          // The `mcp/mod.rs` already re-exports `ServerId as ConnectionServiceServerId`.
-                                          // The prompt for *this* file (`ai/mod.rs`) shows:
-                                          // `pub use mcp::connection_service::MCPConnectionService;`
-                                          // This implies `ServerId` is not directly re-exported from `ai`.
-                                          // If it's needed, it would be `crate::ai::mcp::ConnectionServiceServerId`.
-                                          // I will stick to the prompt's re-exports for `ai/mod.rs`.
-                                          // The prompt for `ai/mod.rs` did not show re-export of `ServerId`.
-                                          // The types re-exported are mostly data structures.
-                                          // `MCPClientInstance`, `MCPConnectionService`, `MCPConsentManager`, `IMCPTransport` are service/trait re-exports.
-                                          // `AIInteractionLogicService`, `DefaultAIInteractionLogicService` are re-exported from local `logic_service`.
-                                          // This seems correct.
-                                          //
-                                          // The files `default_consent_manager.rs` and `default_interaction_service.rs` in `novade-domain/src/ai/`
-                                          // are indeed problematic if they are old versions.
-                                          // The current structure makes `ai::logic_service` and `ai::mcp::consent_manager` the primary ones.
-                                          // I will proceed without declaring the old files in this `mod.rs`.
-                                          // If they need to be deleted, that would be a separate step/subtask.
+/// Represents an AI interaction response.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AIResponse {
+    /// Unique identifier for the response
+    response_id: String,
+    /// The request ID this response is for
+    request_id: String,
+    /// The response content
+    content: String,
+    /// The response timestamp
+    timestamp: Timestamp,
+    /// The response status
+    status: AIResponseStatus,
+    /// Additional metadata for the response
+    metadata: HashMap<String, String>,
+}
+
+/// Represents the status of an AI response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AIResponseStatus {
+    /// The response was successful
+    Success,
+    /// The response contains a warning
+    Warning,
+    /// The response contains an error
+    Error,
+}
+
+/// Interface for the AI interaction service.
+#[async_trait]
+pub trait AIInteractionService: Send + Sync {
+    /// Sends a request to the AI service.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` - The user ID
+    /// * `request_type` - The request type
+    /// * `content` - The request content
+    /// * `parameters` - Additional parameters for the request
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the AI response.
+    async fn send_request(
+        &self,
+        user_id: &str,
+        request_type: &str,
+        content: &str,
+        parameters: HashMap<String, String>,
+    ) -> Result<AIResponse, DomainError>;
+    
+    /// Gets a request by ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `request_id` - The request ID
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the request if found.
+    async fn get_request(&self, request_id: &str) -> Result<AIRequest, DomainError>;
+    
+    /// Gets a response by ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `response_id` - The response ID
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the response if found.
+    async fn get_response(&self, response_id: &str) -> Result<AIResponse, DomainError>;
+    
+    /// Lists all requests for a user.
+    ///
+    /// # Arguments
+    ///
+    /// * `user_id` - The user ID
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing a vector of all requests for the user.
+    async fn list_requests_for_user(&self, user_id: &str) -> Result<Vec<AIRequest>, DomainError>;
+    
+    /// Gets the response for a request.
+    ///
+    /// # Arguments
+    ///
+    /// * `request_id` - The request ID
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the response if found.
+    async fn get_response_for_request(&self, request_id: &str) -> Result<AIResponse, DomainError>;
+}
+
+mod default_consent_manager;
+mod default_interaction_service;
+
+pub use default_consent_manager::DefaultConsentManager;
+pub use default_interaction_service::DefaultAIInteractionService;

@@ -165,77 +165,6 @@ impl Display for DefaultApplicationsSettingPath {
     }
 }
 
-// --- Window Management Path Enum ---
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum WindowManagementSettingPath {
-    TilingMode,
-    PlacementStrategy,
-    // Gaps
-    GapsScreenOuterHorizontal,
-    GapsScreenOuterVertical,
-    GapsWindowInner,
-    // Snapping
-    SnappingSnapToScreenEdges,
-    SnappingSnapToOtherWindows,
-    SnappingSnapToWorkspaceGaps,
-    SnappingSnapDistancePx,
-    // Focus
-    FocusFocusFollowsMouse,
-    FocusClickToFocus,
-    FocusNewWindowsOnCreation,
-    FocusNewWindowsOnWorkspaceSwitch,
-    FocusFocusStealingPrevention,
-    // Grouping
-    GroupingEnableManualGrouping,
-}
-
-impl Display for WindowManagementSettingPath {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", match self {
-            WindowManagementSettingPath::TilingMode => "tiling-mode",
-            WindowManagementSettingPath::PlacementStrategy => "placement-strategy",
-            WindowManagementSettingPath::GapsScreenOuterHorizontal => "gaps.screen-outer-horizontal",
-            WindowManagementSettingPath::GapsScreenOuterVertical => "gaps.screen-outer-vertical",
-            WindowManagementSettingPath::GapsWindowInner => "gaps.window-inner",
-            WindowManagementSettingPath::SnappingSnapToScreenEdges => "snapping.snap-to-screen-edges",
-            WindowManagementSettingPath::SnappingSnapToOtherWindows => "snapping.snap-to-other-windows",
-            WindowManagementSettingPath::SnappingSnapToWorkspaceGaps => "snapping.snap-to-workspace-gaps",
-            WindowManagementSettingPath::SnappingSnapDistancePx => "snapping.snap-distance-px",
-            WindowManagementSettingPath::FocusFocusFollowsMouse => "focus.focus-follows-mouse",
-            WindowManagementSettingPath::FocusClickToFocus => "focus.click-to-focus",
-            WindowManagementSettingPath::FocusNewWindowsOnCreation => "focus.focus-new-windows-on-creation",
-            WindowManagementSettingPath::FocusNewWindowsOnWorkspaceSwitch => "focus.focus-new-windows-on-workspace-switch",
-            WindowManagementSettingPath::FocusFocusStealingPrevention => "focus.focus-stealing-prevention",
-            WindowManagementSettingPath::GroupingEnableManualGrouping => "grouping.enable-manual-grouping",
-        })
-    }
-}
-
-impl FromStr for WindowManagementSettingPath {
-    type Err = SettingPathParseError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "tiling-mode" => Ok(WindowManagementSettingPath::TilingMode),
-            "placement-strategy" => Ok(WindowManagementSettingPath::PlacementStrategy),
-            "gaps.screen-outer-horizontal" => Ok(WindowManagementSettingPath::GapsScreenOuterHorizontal),
-            "gaps.screen-outer-vertical" => Ok(WindowManagementSettingPath::GapsScreenOuterVertical),
-            "gaps.window-inner" => Ok(WindowManagementSettingPath::GapsWindowInner),
-            "snapping.snap-to-screen-edges" => Ok(WindowManagementSettingPath::SnappingSnapToScreenEdges),
-            "snapping.snap-to-other-windows" => Ok(WindowManagementSettingPath::SnappingSnapToOtherWindows),
-            "snapping.snap-to-workspace-gaps" => Ok(WindowManagementSettingPath::SnappingSnapToWorkspaceGaps),
-            "snapping.snap-distance-px" => Ok(WindowManagementSettingPath::SnappingSnapDistancePx),
-            "focus.focus-follows-mouse" => Ok(WindowManagementSettingPath::FocusFocusFollowsMouse),
-            "focus.click-to-focus" => Ok(WindowManagementSettingPath::FocusClickToFocus),
-            "focus.focus-new-windows-on-creation" => Ok(WindowManagementSettingPath::FocusNewWindowsOnCreation),
-            "focus.focus-new-windows-on-workspace-switch" => Ok(WindowManagementSettingPath::FocusNewWindowsOnWorkspaceSwitch),
-            "focus.focus-stealing-prevention" => Ok(WindowManagementSettingPath::FocusFocusStealingPrevention),
-            "grouping.enable-manual-grouping" => Ok(WindowManagementSettingPath::GroupingEnableManualGrouping),
-            _ => Err(SettingPathParseError(format!("Ungültiger WindowManagementSettingPath: {}", s))),
-        }
-    }
-}
 
 // --- Top-Level SettingPath Enum ---
 
@@ -260,8 +189,8 @@ pub enum SettingPath {
     InputBehavior(InputBehaviorSettingPath),
     PowerManagementPolicy(PowerManagementPolicySettingPath),
     DefaultApplications(DefaultApplicationsSettingPath),
-    Application(ApplicationSettingPath),
-    WindowManagement(WindowManagementSettingPath), // New Variant
+    Application(ApplicationSettingPath), // New variant
+    // Add future top-level categories here
 }
 
 impl Display for SettingPath {
@@ -273,7 +202,6 @@ impl Display for SettingPath {
             SettingPath::PowerManagementPolicy(sub_path) => write!(f, "power-management-policy.{}", sub_path),
             SettingPath::DefaultApplications(sub_path) => write!(f, "default-applications.{}", sub_path),
             SettingPath::Application(app_path) => write!(f, "application.{}.{}", app_path.app_id, app_path.key),
-            SettingPath::WindowManagement(sub_path) => write!(f, "window-management.{}", sub_path),
         }
     }
 }
@@ -430,10 +358,6 @@ impl FromStr for SettingPath {
                     app_id: app_id.to_string(),
                     key: key.to_string(),
                 }))
-            }
-            "window-management" => {
-                let sub_path_str = s.strip_prefix("window-management.").ok_or_else(|| SettingPathParseError("Unvollständiger WindowManagement-Pfad".to_string()))?;
-                Ok(SettingPath::WindowManagement(WindowManagementSettingPath::from_str(sub_path_str)?))
             }
             _ => Err(SettingPathParseError(format!("Unbekannter Top-Level-Pfad: {}", top_level))),
         }

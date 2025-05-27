@@ -9,14 +9,11 @@ mod tests {
 
     use crate::global_settings_management::{
         service::{GlobalSettingsService, DefaultGlobalSettingsService},
-        types::{GlobalSettingsEvent, SettingChangedEvent, SettingsLoadedEvent, SettingsSavedEvent, GlobalDesktopSettings, ApplicationSettingGroup, MouseAccelerationProfile, WindowManagementSettings}, // Explicit imports
-        paths::*, // Includes SettingPath, ApplicationSettingPath, WindowManagementSettingPath
+        types::{GlobalSettingsEvent, SettingChangedEvent, SettingsLoadedEvent, SettingsSavedEvent, GlobalDesktopSettings, ApplicationSettingGroup, MouseAccelerationProfile}, // Explicit imports
+        paths::*, // Includes SettingPath, ApplicationSettingPath
         errors::GlobalSettingsError,
         persistence_iface::SettingsPersistenceProvider,
     };
-    use crate::window_management_policy::types::{
-        TilingMode, NewWindowPlacementStrategy, GapSettings, WindowSnappingPolicy, FocusPolicy, WindowGroupingPolicy, FocusStealingPreventionLevel
-    }; // Added
     use novade_core::errors::CoreError; // For mock persistence provider
 
     // --- Mock SettingsPersistenceProvider ---
@@ -644,144 +641,5 @@ mod tests {
         assert_eq!(mock_provider.get_save_called_count().await, save_count_before_reset + 1);
         let persisted_settings = mock_provider.settings.read().await.clone();
         assert!(persisted_settings.application_settings.is_empty());
-    }
-
-    // --- Window Management Settings Service Tests ---
-
-    #[tokio::test]
-    async fn test_get_default_window_management_settings() {
-        let (service, _) = create_and_load_test_service(None).await;
-        let default_wm_settings = WindowManagementSettings::default();
-
-        // Test TilingMode
-        let path_tiling_mode = SettingPath::WindowManagement(WindowManagementSettingPath::TilingMode);
-        let expected_tiling_mode = json!(default_wm_settings.tiling_mode);
-        assert_eq!(service.get_setting(&path_tiling_mode).unwrap(), expected_tiling_mode);
-
-        // Test GapsScreenOuterHorizontal
-        let path_gaps_outer_h = SettingPath::WindowManagement(WindowManagementSettingPath::GapsScreenOuterHorizontal);
-        let expected_gaps_outer_h = json!(default_wm_settings.gaps.screen_outer_horizontal);
-        assert_eq!(service.get_setting(&path_gaps_outer_h).unwrap(), expected_gaps_outer_h);
-
-        // Test FocusFocusFollowsMouse
-        let path_focus_follows = SettingPath::WindowManagement(WindowManagementSettingPath::FocusFocusFollowsMouse);
-        let expected_focus_follows = json!(default_wm_settings.focus.focus_follows_mouse);
-        assert_eq!(service.get_setting(&path_focus_follows).unwrap(), expected_focus_follows);
-        
-        // Test SnappingSnapDistancePx
-        let path_snap_dist = SettingPath::WindowManagement(WindowManagementSettingPath::SnappingSnapDistancePx);
-        let expected_snap_dist = json!(default_wm_settings.snapping.snap_distance_px);
-        assert_eq!(service.get_setting(&path_snap_dist).unwrap(), expected_snap_dist);
-
-        // Test PlacementStrategy
-        let path_placement = SettingPath::WindowManagement(WindowManagementSettingPath::PlacementStrategy);
-        let expected_placement = json!(default_wm_settings.placement_strategy);
-        assert_eq!(service.get_setting(&path_placement).unwrap(), expected_placement);
-
-        // Test GroupingEnableManualGrouping
-        let path_grouping = SettingPath::WindowManagement(WindowManagementSettingPath::GroupingEnableManualGrouping);
-        let expected_grouping = json!(default_wm_settings.grouping.enable_manual_grouping);
-        assert_eq!(service.get_setting(&path_grouping).unwrap(), expected_grouping);
-    }
-
-    #[tokio::test]
-    async fn test_update_and_get_window_management_settings() {
-        let (service, mock_provider) = create_and_load_test_service(None).await;
-        let mut event_rx = service.subscribe_to_events();
-        let _ = event_rx.recv().await.unwrap(); // Consume initial SettingsLoaded
-
-        // 1. Test TilingMode (Enum)
-        let path_tiling = SettingPath::WindowManagement(WindowManagementSettingPath::TilingMode);
-        let new_tiling_mode = TilingMode::Spiral;
-        let new_tiling_value = json!(new_tiling_mode);
-        service.update_setting(path_tiling.clone(), new_tiling_value.clone()).await.expect("Update TilingMode failed");
-        assert_eq!(service.get_setting(&path_tiling).unwrap(), new_tiling_value);
-        assert_eq!(service.get_current_settings().unwrap().window_management.tiling_mode, new_tiling_mode);
-        // Consume SettingChanged and SettingsSaved events
-        let _ = event_rx.recv().await.unwrap(); 
-        let _ = event_rx.recv().await.unwrap(); 
-
-        // 2. Test FocusFocusFollowsMouse (Boolean)
-        let path_focus_follows = SettingPath::WindowManagement(WindowManagementSettingPath::FocusFocusFollowsMouse);
-        let new_focus_follows = true; // Default is false
-        let new_focus_follows_value = json!(new_focus_follows);
-        service.update_setting(path_focus_follows.clone(), new_focus_follows_value.clone()).await.expect("Update FocusFollowsMouse failed");
-        assert_eq!(service.get_setting(&path_focus_follows).unwrap(), new_focus_follows_value);
-        assert_eq!(service.get_current_settings().unwrap().window_management.focus.focus_follows_mouse, new_focus_follows);
-        let _ = event_rx.recv().await.unwrap(); 
-        let _ = event_rx.recv().await.unwrap(); 
-
-        // 3. Test GapsWindowInner (Numeric u16)
-        let path_gaps_inner = SettingPath::WindowManagement(WindowManagementSettingPath::GapsWindowInner);
-        let new_gaps_inner: u16 = 15;
-        let new_gaps_inner_value = json!(new_gaps_inner);
-        service.update_setting(path_gaps_inner.clone(), new_gaps_inner_value.clone()).await.expect("Update GapsWindowInner failed");
-        assert_eq!(service.get_setting(&path_gaps_inner).unwrap(), new_gaps_inner_value);
-        assert_eq!(service.get_current_settings().unwrap().window_management.gaps.window_inner, new_gaps_inner);
-        let _ = event_rx.recv().await.unwrap(); 
-        let _ = event_rx.recv().await.unwrap(); 
-
-        // 4. Test PlacementStrategy (Enum)
-        let path_placement = SettingPath::WindowManagement(WindowManagementSettingPath::PlacementStrategy);
-        let new_placement = NewWindowPlacementStrategy::Center;
-        let new_placement_value = json!(new_placement);
-        service.update_setting(path_placement.clone(), new_placement_value.clone()).await.expect("Update PlacementStrategy failed");
-        assert_eq!(service.get_setting(&path_placement).unwrap(), new_placement_value);
-        assert_eq!(service.get_current_settings().unwrap().window_management.placement_strategy, new_placement);
-        let _ = event_rx.recv().await.unwrap(); 
-        let _ = event_rx.recv().await.unwrap(); 
-
-        // Check persistence (4 updates = 4 saves, plus initial load if it saved - mock starts save_count at 0)
-        // create_and_load_test_service does not save after load. So 4 saves.
-        assert_eq!(mock_provider.get_save_called_count().await, 4);
-        let persisted_settings = mock_provider.settings.read().await.clone();
-        assert_eq!(persisted_settings.window_management.tiling_mode, new_tiling_mode);
-        assert_eq!(persisted_settings.window_management.focus.focus_follows_mouse, new_focus_follows);
-        assert_eq!(persisted_settings.window_management.gaps.window_inner, new_gaps_inner);
-        assert_eq!(persisted_settings.window_management.placement_strategy, new_placement);
-    }
-
-    #[tokio::test]
-    async fn test_update_window_management_setting_invalid_value() {
-        let (service, _) = create_and_load_test_service(None).await;
-        
-        // Test invalid GapsWindowInner
-        let path_gaps = SettingPath::WindowManagement(WindowManagementSettingPath::GapsWindowInner);
-        let invalid_gaps_value = json!(1000); // Exceeds validation limit (50)
-        
-        let result_gaps = service.update_setting(path_gaps.clone(), invalid_gaps_value).await;
-        assert!(result_gaps.is_err());
-        match result_gaps.err().unwrap() {
-            GlobalSettingsError::ValidationError { path: err_path, reason } => {
-                assert_eq!(err_path, path_gaps);
-                assert!(reason.contains("Window inner gap cannot exceed 50"));
-            }
-            e => panic!("Unexpected error type for invalid gaps: {:?}", e),
-        }
-        // Check that the setting was not updated
-        let default_wm_settings = WindowManagementSettings::default();
-        assert_eq!(
-            service.get_setting(&path_gaps).unwrap(),
-            json!(default_wm_settings.gaps.window_inner)
-        );
-
-        // Test invalid SnappingSnapDistancePx
-        let path_snap = SettingPath::WindowManagement(WindowManagementSettingPath::SnappingSnapDistancePx);
-        let invalid_snap_value = json!(0); // Cannot be 0
-        
-        let result_snap = service.update_setting(path_snap.clone(), invalid_snap_value).await;
-        assert!(result_snap.is_err());
-        match result_snap.err().unwrap() {
-            GlobalSettingsError::ValidationError { path: err_path, reason } => {
-                assert_eq!(err_path, path_snap);
-                assert!(reason.contains("Snap distance cannot be 0"));
-            }
-            e => panic!("Unexpected error type for invalid snap distance: {:?}", e),
-        }
-        // Check that the setting was not updated
-        assert_eq!(
-            service.get_setting(&path_snap).unwrap(),
-            json!(default_wm_settings.snapping.snap_distance_px)
-        );
     }
 }
