@@ -1,0 +1,256 @@
+use crate::compositor::core::state::DesktopState;
+use crate::compositor::xdg_shell::types::ManagedWindow; // Assuming this is your Window type for Space
+use smithay::desktop::{Window, WindowSurfaceType};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::{Logical, Point, Rectangle};
+use smithay::wayland::compositor::with_states; // For accessing SurfaceData/input_region
+use crate::compositor::surface_management::SurfaceData; // Path to your SurfaceData
+use std::sync::Arc; // For SurfaceData if stored in Arc<Mutex<...>>
+
+use smithay::backend::input::{
+    LibinputInputBackend, PointerAxisEvent, PointerButtonEvent,
+    PointerMotionEvent, PointerMotionAbsoluteEvent, ButtonState as LibinputButtonState,
+};
+use smithay::input::pointer::{PointerHandle, ButtonState as SmithayButtonState, AxisSource};
+use smithay::input::Seat;
+use smithay::reexports::wayland_protocols::wayland::server::protocol::wl_pointer; // For wl_pointer::Axis enum
+
+// Helper function to find the surface and its local coordinates at a given global point.
+pub fn find_surface_and_coords_at_global_point(
+    desktop_state: &DesktopState,
+    global_pos: Point<f64, Logical>,
+) -> (Option<WlSurface>, Point<f64, Logical>) {
+    for window_arc in desktop_state.space.elements_under(global_pos).rev() {
+        let window: &ManagedWindow = &(*window_arc);
+
+        if !window.is_mapped() {
+            continue;
+        }
+
+        let window_loc = desktop_state.space.element_location(window_arc).unwrap_or_default();
+        let window_geom = window.geometry();
+        
+        let window_total_geometry = Rectangle::from_loc_and_size(window_loc, window_geom.size);
+
+        if !window_total_geometry.to_f64().contains(global_pos) {
+            continue;
+        }
+
+        if let Some(surface) = window.wl_surface() {
+            let surface_local_pos = global_pos - window_loc.to_f64();
+            let mut found_in_input_region = false;
+            with_states(&surface, |states| {
+                if let Some(surface_data_arc) = states.data_map.get::<Arc<std::sync::Mutex<SurfaceData>>>() {
+                    let surface_data_guard = surface_data_arc.lock().unwrap();
+                    if let Some(input_region_surface_local) = &surface_data_guard.input_region_surface_local {
+                        if input_region_surface_local.contains(surface_local_pos.to_i32_round()) {
+                            found_in_input_region = true;
+                        }
+                    } else {
+                        let surface_bounds = Rectangle::from_loc_and_size(Point::from((0,0)), window_geom.size);
+                        if surface_bounds.to_f64().contains(surface_local_pos){
+                            found_in_input_region = true;
+                        }
+                    }
+                } else {
+                    let surface_attributes = states.cached_state.current::<smithay::wayland::compositor::SurfaceAttributes>();
+                    let surface_size = surface_attributes.buffer_dimensions.map(|dims| dims.to_logical(surface_attributes.buffer_scale, surface_attributes.buffer_transform)).unwrap_or(window_geom.size);
+                    let surface_bounds = Rectangle::from_loc_and_size(Point::from((0,0)), surface_size);
+                     if surface_bounds.to_f64().contains(surface_local_pos){
+                        found_in_input_region = true;
+                    }
+                }
+            });
+
+            if found_in_input_region {
+                return (Some(surface.clone()), surface_local_pos);
+            }
+        }
+    }
+    (None, global_pos)
+}
+
+pub fn handle_pointer_motion_event(
+    desktop_state: &mut DesktopState,
+    seat: &Seat<DesktopState>,
+    event: PointerMotionEvent<LibinputInputBackend>,
+) {
+    let pointer_handle = match seat.get_pointer() {
+        Some(h) => h,
+        None => return,
+    };
+
+    desktop_state.pointer_location += event.delta();
+    // Optional: Clamp pointer_location to output boundaries here
+
+    let (new_focus_surface_option, surface_local_coords) =
+        find_surface_and_coords_at_global_point(desktop_state, desktop_state.pointer_location);
+
+    pointer_handle.motion(
+        desktop_state,
+        new_focus_surface_option.as_ref(),
+        event.serial(),
+        desktop_state.pointer_location,
+        surface_local_coords,
+        event.time(),
+        Some(tracing::Span::current()),
+    );
+    
+    desktop_state.active_input_surface = new_focus_surface_option.map(|s| s.downgrade());
+}
+
+pub fn handle_pointer_motion_absolute_event(
+    desktop_state: &mut DesktopState,
+    seat: &Seat<DesktopState>,
+    event: PointerMotionAbsoluteEvent<LibinputInputBackend>,
+) {
+    let pointer_handle = match seat.get_pointer() {
+        Some(h) => h,
+        None => return,
+    };
+
+    let output_geometry = desktop_state.space.outputs()
+        .next()
+        .map(|o| desktop_state.space.output_geometry(o).unwrap_or_else(|| Rectangle::from_loc_and_size((0,0), (1920, 1080))))
+        .unwrap_or_else(|| Rectangle::from_loc_and_size((0,0), (1920, 1080)));
+
+    // Transform absolute coordinates (potentially normalized or per-output) to global logical coordinates
+    // The event.absolute_x_transformed() and y_transformed() methods scale normalized (0-1) coordinates
+    // to the provided width/height. If the event provides coordinates in a different system,
+    // this part might need adjustment (e.g., if they are already in a global device space).
+    let global_x = event.absolute_x_transformed(output_geometry.size.w as u32) + output_geometry.loc.x as f64;
+    let global_y = event.absolute_y_transformed(output_geometry.size.h as u32) + output_geometry.loc.y as f64;
+    
+    desktop_state.pointer_location = Point::from((global_x, global_y));
+    // Optional: Clamp pointer_location to output boundaries here
+
+    let (new_focus_surface_option, surface_local_coords) =
+        find_surface_and_coords_at_global_point(desktop_state, desktop_state.pointer_location);
+
+    pointer_handle.motion(
+        desktop_state,
+        new_focus_surface_option.as_ref(),
+        event.serial(),
+        desktop_state.pointer_location, // Global coordinates
+        surface_local_coords,        // Surface-local coordinates
+        event.time(),
+        Some(tracing::Span::current()),
+    );
+    desktop_state.active_input_surface = new_focus_surface_option.map(|s| s.downgrade());
+}
+
+pub fn handle_pointer_button_event(
+    desktop_state: &mut DesktopState,
+    seat: &Seat<DesktopState>,
+    event: PointerButtonEvent<LibinputInputBackend>,
+) {
+    let pointer_handle = match seat.get_pointer() {
+        Some(h) => h,
+        None => return,
+    };
+
+    let serial = event.serial();
+    let time = event.time();
+    
+    let smithay_button_state = match event.button_state() {
+        LibinputButtonState::Pressed => SmithayButtonState::Pressed,
+        LibinputButtonState::Released => SmithayButtonState::Released,
+    };
+
+    pointer_handle.button(
+        desktop_state,
+        event.button(),
+        smithay_button_state,
+        serial,
+        time,
+        Some(tracing::Span::current()),
+    );
+
+    if smithay_button_state == SmithayButtonState::Pressed {
+        let (focused_surface_option, _coords) = 
+            find_surface_and_coords_at_global_point(desktop_state, desktop_state.pointer_location);
+
+        if let Some(surface_to_focus) = focused_surface_option {
+            // Assuming ManagedWindow has a method like `is_focusable_toplevel`
+            // or check can be done via space.window_for_surface and its properties.
+            let window_can_focus = desktop_state.space.window_for_surface(&surface_to_focus, WindowSurfaceType::TOPLEVEL)
+                .map_or(false, |w| w.is_mapped()); // Simplified: any mapped toplevel can get focus
+                                                   // A more specific `w.can_receive_focus()` would be better.
+
+            if window_can_focus {
+                 match crate::input::keyboard::focus::set_keyboard_focus(desktop_state, seat.name(), Some(&surface_to_focus), serial) {
+                    Ok(_) => tracing::debug!("Keyboard focus set to surface {:?} due to pointer click.", surface_to_focus.id()),
+                    Err(e) => tracing::error!("Failed to set keyboard focus on click: {:?}", e),
+                }
+            } else if desktop_state.space.window_for_surface(&surface_to_focus, WindowSurfaceType::POPUP).is_some() {
+                tracing::debug!("Click on a popup surface {:?}, keyboard focus not changed.", surface_to_focus.id());
+            }
+        } else {
+            match crate::input::keyboard::focus::set_keyboard_focus(desktop_state, seat.name(), None, serial) {
+                Ok(_) => tracing::debug!("Keyboard focus cleared due to click on empty space."),
+                Err(e) => tracing::error!("Failed to clear keyboard focus on click: {:?}", e),
+            }
+        }
+    }
+}
+
+pub fn handle_pointer_axis_event(
+    desktop_state: &mut DesktopState,
+    seat: &Seat<DesktopState>,
+    event: PointerAxisEvent<LibinputInputBackend>,
+) {
+    let pointer_handle = match seat.get_pointer() {
+        Some(h) => h,
+        None => return,
+    };
+
+    // axis_values_discrete gives (Option<f64>, Option<f64>) for (Horizontal, Vertical)
+    let (h_discrete_opt, v_discrete_opt) = event.axis_values_discrete();
+    let horizontal_amount_discrete = h_discrete_opt.unwrap_or(0.0);
+    let vertical_amount_discrete = v_discrete_opt.unwrap_or(0.0);
+
+    // axis_value gives f64 for a single axis
+    let horizontal_amount_continuous = if horizontal_amount_discrete == 0.0 { event.axis_value(smithay::reexports::input::event::pointer::Axis::Horizontal) } else { 0.0 };
+    let vertical_amount_continuous = if vertical_amount_discrete == 0.0 { event.axis_value(smithay::reexports::input::event::pointer::Axis::Vertical) } else { 0.0 };
+    
+    let source = match event.axis_source() {
+        Some(s) => match s {
+            smithay::reexports::input::event::pointer::AxisSource::Wheel => AxisSource::Wheel,
+            smithay::reexports::input::event::pointer::AxisSource::Finger => AxisSource::Finger,
+            smithay::reexports::input::event::pointer::AxisSource::Continuous => AxisSource::Continuous,
+            // Smithay 0.3.0 AxisSource enum also has WheelTilt.
+            // Libinput's AxisSource enum might have more variants that need mapping.
+            _ => AxisSource::Wheel, // Fallback for other libinput sources
+        },
+        None => AxisSource::Wheel, // Default if libinput provides no source
+    };
+
+    let time = event.time();
+    let serial = event.serial();
+
+    if vertical_amount_discrete.abs() > 1e-6 || vertical_amount_continuous.abs() > 1e-6 {
+        pointer_handle.axis(
+            desktop_state,
+            wl_pointer::Axis::VerticalScroll,
+            source,
+            vertical_amount_discrete,
+            vertical_amount_continuous,
+            serial,
+            time,
+            Some(tracing::Span::current()),
+        );
+    }
+
+    if horizontal_amount_discrete.abs() > 1e-6 || horizontal_amount_continuous.abs() > 1e-6 {
+        pointer_handle.axis(
+            desktop_state,
+            wl_pointer::Axis::HorizontalScroll,
+            source,
+            horizontal_amount_discrete,
+            horizontal_amount_continuous,
+            serial,
+            time,
+            Some(tracing::Span::current()),
+        );
+    }
+}
