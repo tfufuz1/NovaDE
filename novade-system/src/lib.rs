@@ -14,7 +14,8 @@ pub mod compositor;
 pub mod input;
 pub mod dbus;
 pub mod audio;
-pub mod mcp;
+// pub mod mcp; // Old MCP service, replaced by mcp_client_service
+pub mod mcp_client_service; // New service for managing MCP client processes
 pub mod portals;
 pub mod power_management;
 
@@ -24,7 +25,8 @@ pub use error::SystemError;
 pub use input::{InputService, DefaultInputService};
 pub use dbus::{DBusService, DefaultDBusService};
 pub use audio::{AudioService, DefaultAudioService};
-pub use mcp::{McpService, DefaultMcpService};
+// pub use mcp::{McpService, DefaultMcpService}; // Old MCP service
+pub use mcp_client_service::{IMCPClientService, DefaultMCPClientService, StdioProcess}; // New MCP client service
 pub use portals::{PortalsService, DefaultPortalsService};
 pub use power_management::{SystemPowerService, DefaultSystemPowerService};
 
@@ -53,7 +55,8 @@ pub async fn initialize(
     Arc<DefaultInputService>,
     Arc<DefaultDBusService>,
     Arc<DefaultAudioService>,
-    Arc<DefaultMcpService>,
+    // Arc<DefaultMcpService>, // Old MCP service
+    Arc<DefaultMCPClientService>, // New MCP client service, assuming it needs to be initialized here
     // Arc<DefaultPortalsService>, // Commented out as it depends on CompositorService
     Arc<DefaultSystemPowerService>,
 ), SystemError> {
@@ -92,11 +95,10 @@ pub async fn initialize(
     // Initialize audio service
     let audio_service = Arc::new(DefaultAudioService::new()?);
     
-    // Initialize MCP service
-    let mcp_service = Arc::new(DefaultMcpService::new(
-        _ai_service.clone(),
-        _consent_manager.clone(),
-    )?);
+    // Initialize MCP service (New one)
+    // DefaultMCPClientService::new() doesn't take arguments according to its current definition.
+    // If it needs domain services, its constructor and this call will need to be updated.
+    let mcp_client_service = Arc::new(DefaultMCPClientService::new());
     
     // // Initialize portals service (Commented out)
     // let portals_service = Arc::new(DefaultPortalsService::new(
@@ -114,7 +116,7 @@ pub async fn initialize(
         input_service,
         dbus_service,
         audio_service,
-        mcp_service,
+        mcp_client_service, // New MCP client service
         // portals_service,
         system_power_service,
     ))
