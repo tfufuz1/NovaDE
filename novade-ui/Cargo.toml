@@ -5,23 +5,21 @@ edition = "2021"
 description = "UI layer for the NovaDE desktop environment"
 authors = ["NovaDE Team"]
 license = "MIT"
-repository = "https://github.com/novade/novade"
-rust-version = "1.87.0"
 
 [dependencies]
 novade-core = { path = "../novade-core" }
 novade-domain = { path = "../novade-domain" }
 novade-system = { path = "../novade-system" }
-tokio = { version = "1.28.0", features = ["full"] }
+tokio = { version = "1.28", features = ["full"] }
 async-trait = "0.1.68"
 thiserror = "1.0.40"
 tracing = "0.1.37"
-serde = { version = "1.0.219", features = ["derive"] }
+serde = { version = "1.0.163", features = ["derive"] }
 serde_json = "1.0.96"
-iced = { version = "0.10.0", features = ["tokio", "image", "svg", "canvas"] }
+iced = { version = "0.9.0", features = ["tokio", "image", "svg", "canvas"] }
 iced_native = "0.10.0"
-iced_style = "0.10.0"
-iced_futures = "0.10.0"
+iced_style = "0.8.0"
+iced_futures = "0.6.0"
 image = "0.24.6"
 rfd = "0.11.3"
 chrono = { version = "0.4.24", features = ["serde"] }
@@ -30,6 +28,9 @@ once_cell = "1.17.1"
 parking_lot = "0.12.1"
 futures = "0.3.28"
 anyhow = "1.0.71"
+gtk4 = "*"
+glib = "*"
+gtk4-layer-shell = "*"
 dirs = "5.0.1"
 notify = "5.1.0"
 fontconfig = "0.7.0"
@@ -38,3 +39,7 @@ svg = "0.13.1"
 resvg = "0.35.0"
 usvg = "0.35.0"
 tiny-skia = "0.10.0"
+
+[[bin]]
+name = "novade-ui-shelltest"
+path = "src/main.rs"

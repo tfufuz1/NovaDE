@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::global_settings_management::types::*;
+    use crate::window_management_policy::types::{GapSettings, WindowSnappingPolicy, TilingMode}; // Added
     use serde_json::{self, json, Value as JsonValue};
     use std::collections::HashMap;
     use toml;
@@ -45,7 +46,8 @@ mod tests {
         test_serde_default_for_type::<InputBehaviorSettings>();
         test_serde_default_for_type::<PowerManagementPolicySettings>();
         test_serde_default_for_type::<DefaultApplicationsSettings>();
-        test_serde_default_for_type::<ApplicationSettingGroup>(); // Added
+        test_serde_default_for_type::<ApplicationSettingGroup>();
+        test_serde_default_for_type::<WindowManagementSettings>(); // Added
         test_serde_default_for_type::<GlobalDesktopSettings>();
     }
 
@@ -242,6 +244,7 @@ mod tests {
     fn test_global_desktop_settings_validation_recursive() {
         let mut settings = GlobalDesktopSettings::default();
         // Populate with valid settings for all sub-structs
+        // (WindowManagementSettings defaults are valid, so no need to change them for basic pass)
         settings.appearance.active_theme_name = "TestTheme".to_string();
         settings.appearance.accent_color_token = "test-accent".to_string();
         settings.appearance.font_settings.default_font_family = "Sans".to_string();
@@ -296,5 +299,77 @@ mod tests {
             validation_result.err().unwrap(),
             "Application settings for 'app.id.two': Application setting key cannot be empty."
         );
+
+        // Test validation of window_management settings within global_settings
+        settings.application_settings.remove("app.id.two"); // Remove previous invalid entry
+        assert!(settings.validate_recursive().is_ok()); // Should be ok now
+
+        settings.window_management.gaps.window_inner = 200; // Invalid value for window_inner
+        let wm_validation_result = settings.validate_recursive();
+        assert!(wm_validation_result.is_err());
+        assert_eq!(
+            wm_validation_result.err().unwrap(),
+            "Window management settings: Gaps: Window inner gap cannot exceed 50."
+        );
+        settings.window_management.gaps.window_inner = GapSettings::default().window_inner; // Reset
+        assert!(settings.validate_recursive().is_ok()); // Back to valid
+    }
+
+    // --- Window Management Settings Validation Tests ---
+    #[test]
+    fn test_gap_settings_validation() {
+        let mut gaps = GapSettings::default(); // Defaults are valid
+        assert!(gaps.validate().is_ok());
+
+        gaps.screen_outer_horizontal = 101;
+        assert_eq!(gaps.validate().err().unwrap(), "Screen outer horizontal gap cannot exceed 100.");
+        gaps.screen_outer_horizontal = GapSettings::default().screen_outer_horizontal;
+
+        gaps.screen_outer_vertical = 101;
+        assert_eq!(gaps.validate().err().unwrap(), "Screen outer vertical gap cannot exceed 100.");
+        gaps.screen_outer_vertical = GapSettings::default().screen_outer_vertical;
+        
+        gaps.window_inner = 51;
+        assert_eq!(gaps.validate().err().unwrap(), "Window inner gap cannot exceed 50.");
+        gaps.window_inner = GapSettings::default().window_inner;
+        assert!(gaps.validate().is_ok());
+    }
+
+    #[test]
+    fn test_window_snapping_policy_validation() {
+        let mut snapping = WindowSnappingPolicy::default(); // Defaults are valid
+        assert!(snapping.validate().is_ok());
+
+        snapping.snap_distance_px = 0;
+        assert_eq!(snapping.validate().err().unwrap(), "Snap distance cannot be 0.");
+        
+        snapping.snap_distance_px = 51;
+        assert_eq!(snapping.validate().err().unwrap(), "Snap distance cannot exceed 50px.");
+        snapping.snap_distance_px = WindowSnappingPolicy::default().snap_distance_px;
+        assert!(snapping.validate().is_ok());
+    }
+
+    #[test]
+    fn test_window_management_settings_validate_valid() {
+        let settings = WindowManagementSettings::default(); // Defaults are valid
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn test_window_management_settings_validate_invalid_gap() {
+        let mut settings = WindowManagementSettings::default();
+        settings.gaps.window_inner = 100; // Invalid
+        let result = settings.validate();
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), "Gaps: Window inner gap cannot exceed 50.");
+    }
+
+    #[test]
+    fn test_window_management_settings_validate_invalid_snap() {
+        let mut settings = WindowManagementSettings::default();
+        settings.snapping.snap_distance_px = 0; // Invalid
+        let result = settings.validate();
+        assert!(result.is_err());
+        assert_eq!(result.err().unwrap(), "Snapping: Snap distance cannot be 0.");
     }
 }
