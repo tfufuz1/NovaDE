@@ -4,6 +4,7 @@ pub mod libinput_handler; // Ensure this line is present and uncommented
 pub mod keyboard;
 pub mod pointer;
 pub mod touch;
+pub mod tablet; // ADDED
 // pub mod gestures;
 
 pub use errors::InputError;
