@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-async-trait = "0.1" # Ensure this is present
+async-trait = "0.1"
+thiserror = "1.0"
+# Use gtk4-gio for gio::MenuModel, assuming it's sufficient and lighter than full gtk4
+gtk4-gio = { version = "0.8", package = "gtk4-gio" } # Or specific version for your gtk4 setup
 
 [dev-dependencies]
 # Add any development dependencies here, e.g., for testing

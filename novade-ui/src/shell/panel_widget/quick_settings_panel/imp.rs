@@ -1,6 +1,7 @@
-use gtk::glib;
+use gtk::glib; // Added for glib::Propagation
 use gtk::subclass::prelude::*;
 use gtk::{Box, Label, Button, Switch, Scale, Spinner, CompositeTemplate, Orientation, Adjustment, Align, prelude::*};
+use tracing; // Import tracing for logging
 
 #[derive(CompositeTemplate, Default)]
 #[template(string = "")] 
@@ -39,12 +40,17 @@ impl ObjectImpl for QuickSettingsPanelWidget {
 
         // --- Dark Mode Section ---
         let dark_mode_box = Box::new(Orientation::Horizontal, 6);
-        dark_mode_box.set_halign(Align::Fill); // Ensure horizontal box fills width
+        dark_mode_box.set_halign(Align::Fill); 
         let dark_mode_label = Label::new(Some("Dark Mode"));
-        dark_mode_label.set_halign(Align::Start); // Align label to the start
-        dark_mode_label.set_hexpand(true); // Allow label to expand
+        dark_mode_label.set_halign(Align::Start); 
+        dark_mode_label.set_hexpand(true); 
         let dark_mode_switch = Switch::new();
-        dark_mode_switch.set_halign(Align::End); // Align switch to the end
+        dark_mode_switch.set_halign(Align::End); 
+        // Connect signal for Dark Mode Switch
+        dark_mode_switch.connect_state_set(|_switch, active| {
+            tracing::info!("Dark Mode Switch toggled: {}", active);
+            glib::Propagation::Stop 
+        });
         
         dark_mode_box.append(&dark_mode_label);
         dark_mode_box.append(&dark_mode_switch);
@@ -55,12 +61,15 @@ impl ObjectImpl for QuickSettingsPanelWidget {
         volume_box.set_halign(Align::Fill);
         let volume_label = Label::new(Some("Volume"));
         volume_label.set_halign(Align::Start);
-        // volume_label.set_hexpand(true); // Don't let label expand too much if scale is present
         let volume_adjustment = Adjustment::new(50.0, 0.0, 100.0, 1.0, 10.0, 0.0);
         let volume_scale = Scale::new(Orientation::Horizontal, Some(&volume_adjustment));
-        volume_scale.set_hexpand(true); // Scale should take available space
+        volume_scale.set_hexpand(true); 
         volume_scale.set_halign(Align::Fill);
-        volume_scale.set_draw_value(false); // Common for volume sliders to not show numeric value on slider
+        volume_scale.set_draw_value(false); 
+        // Connect signal for Volume Scale
+        volume_scale.connect_value_changed(|scale| {
+            tracing::info!("Volume Scale changed: {}", scale.value());
+        });
 
         volume_box.append(&volume_label);
         volume_box.append(&volume_scale);
@@ -71,14 +80,17 @@ impl ObjectImpl for QuickSettingsPanelWidget {
         wifi_box.set_halign(Align::Fill);
         let wifi_label = Label::new(Some("WiFi"));
         wifi_label.set_halign(Align::Start);
-        wifi_label.set_hexpand(true); // Allow label to expand
+        wifi_label.set_hexpand(true); 
         
-        let wifi_status_box = Box::new(Orientation::Horizontal, 6); // To group spinner and button
+        let wifi_status_box = Box::new(Orientation::Horizontal, 6); 
         let wifi_spinner = Spinner::new();
-        // wifi_spinner.start(); // Start spinner for visual effect if desired
         let wifi_button = Button::with_label("Select Network...");
+        // Connect signal for WiFi Button
+        wifi_button.connect_clicked(|_button| {
+            tracing::info!("WiFi 'Select Network...' button clicked");
+        });
         
-        wifi_status_box.append(&wifi_spinner); // Spinner might be hidden/shown based on state later
+        wifi_status_box.append(&wifi_spinner); 
         wifi_status_box.append(&wifi_button);
         wifi_status_box.set_halign(Align::End);
 
@@ -86,7 +98,6 @@ impl ObjectImpl for QuickSettingsPanelWidget {
         wifi_box.append(&wifi_status_box);
         obj.append(&wifi_box);
         
-        // Set a minimum width for the popover content to ensure it's not too cramped
         obj.set_width_request(280); 
     }
 }

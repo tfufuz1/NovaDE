@@ -1,20 +1,23 @@
-use gtk::glib;
+use gtk::glib::{self, subclass::Signal}; // Added subclass::Signal
 use gtk::subclass::prelude::*;
 use gtk::{Box, Label, Button, CompositeTemplate, Orientation, Align, prelude::*};
 use std::cell::RefCell;
+use once_cell::sync::Lazy; // Added once_cell for static SIGNALS
+
+static SIGNALS: Lazy<Vec<Signal>> = Lazy::new(|| {
+    vec![Signal::builder("closed")
+        .action() // Indicates it's an action signal
+        .build(),
+    ]
+});
 
 #[derive(CompositeTemplate, Default)]
-#[template(string = "")] // No template for now
+#[template(string = "")] 
 pub struct NotificationWidgetStub {
-    // Store labels to set their text in new() via a method
-    #[template_child(id = "app_name_label")] // Example if using CompositeTemplate string
+    #[template_child] 
     pub app_name_label: TemplateChild<Label>,
-    #[template_child(id = "summary_label")]
+    #[template_child]
     pub summary_label: TemplateChild<Label>,
-
-    // If not using CompositeTemplate string for children, define them as RefCell<Option<Label>>
-    // pub app_name_label_manual: RefCell<Option<Label>>,
-    // pub summary_label_manual: RefCell<Option<Label>>,
 }
 
 #[glib::object_subclass]
@@ -23,17 +26,9 @@ impl ObjectSubclass for NotificationWidgetStub {
     type Type = super::NotificationWidgetStub;
     type ParentType = gtk::Box;
 
-    // If not using CompositeTemplate string for children, need a new() for RefCells
-    // fn new() -> Self {
-    //     Self {
-    //         app_name_label_manual: RefCell::new(None),
-    //         summary_label_manual: RefCell::new(None),
-    //     }
-    // }
-
     fn class_init(klass: &mut Self::Class) {
-        // NotificationWidgetStub::bind_template(klass); // If using CompositeTemplate string
         klass.set_css_name("notificationwidgetstub");
+        klass.install_signals(&SIGNALS); // Install the custom signal
     }
 
     fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {
@@ -44,7 +39,7 @@ impl ObjectSubclass for NotificationWidgetStub {
 impl ObjectImpl for NotificationWidgetStub {
     fn constructed(&self) {
         self.parent_constructed();
-        let obj = self.obj(); // This is the NotificationWidgetStub (gtk::Box)
+        let obj = self.obj(); 
 
         obj.set_orientation(Orientation::Vertical);
         obj.set_spacing(6);
@@ -52,30 +47,7 @@ impl ObjectImpl for NotificationWidgetStub {
         obj.set_margin_bottom(6);
         obj.set_margin_start(6);
         obj.set_margin_end(6);
-        
-        // Add a CSS class for styling the whole notification item
         obj.add_css_class("notification-item");
-
-
-        // If not using CompositeTemplate string for children, create them manually:
-        let app_name_label_manual = Label::new(Some("App Name")); // Default text
-        app_name_label_manual.set_halign(Align::Start);
-        app_name_label_manual.add_css_class("notification-app-name"); // For styling
-        // self.app_name_label_manual.replace(Some(app_name_label_manual.clone()));
-        // self.app_name_label.set_inner(&app_name_label_manual); // If TemplateChild is used for manual setup
-
-        let summary_label_manual = Label::new(Some("Notification summary...")); // Default text
-        summary_label_manual.set_halign(Align::Start);
-        summary_label_manual.set_wrap(true); // Allow summary to wrap
-        summary_label_manual.add_css_class("notification-summary");
-        // self.summary_label_manual.replace(Some(summary_label_manual.clone()));
-        // self.summary_label.set_inner(&summary_label_manual);
-
-        // For this stub, we will use TemplateChild to refer to children defined in `mod.rs`'s `new` method.
-        // So, the labels are expected to be set up by the TemplateChild mechanism
-        // by virtue of being fields in the struct.
-        // However, since we are NOT using a template string, we must manually assign them.
-        // The TemplateChild fields will be bound to manually created children.
         
         let app_name_label = self.app_name_label.get();
         app_name_label.set_halign(Align::Start);
@@ -87,11 +59,14 @@ impl ObjectImpl for NotificationWidgetStub {
         summary_label.add_css_class("notification-summary");
 
         let close_button = Button::with_label("Close");
-        close_button.set_halign(Align::End); // Align button to the right
+        close_button.set_halign(Align::End); 
         close_button.add_css_class("notification-close-button");
-        close_button.connect_clicked(|_btn| {
-            // In a real app, this would emit a signal or call a method to remove the notification
-            tracing::info!("Notification Close button clicked (stub).");
+        
+        // Emit the "closed" signal when the button is clicked
+        let self_obj = obj.clone(); // Clone for the closure
+        close_button.connect_clicked(move |_btn| {
+            tracing::info!("Close button clicked on a notification stub, emitting 'closed' signal.");
+            self_obj.emit_by_name::<()>("closed", &[]);
         });
         
         obj.append(&app_name_label);
@@ -102,17 +77,3 @@ impl ObjectImpl for NotificationWidgetStub {
 
 impl WidgetImpl for NotificationWidgetStub {}
 impl BoxImpl for NotificationWidgetStub {}
-
-// If app_name_label and summary_label were RefCell<Option<Label>>, add methods like this:
-// impl NotificationWidgetStub {
-//     pub fn set_app_name(&self, name: &str) {
-//         if let Some(label) = self.app_name_label_manual.borrow().as_ref() {
-//             label.set_text(name);
-//         }
-//     }
-//     pub fn set_summary(&self, summary: &str) {
-//         if let Some(label) = self.summary_label_manual.borrow().as_ref() {
-//             label.set_text(summary);
-//         }
-//     }
-// }

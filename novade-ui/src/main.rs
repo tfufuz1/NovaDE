@@ -11,7 +11,11 @@ use novade_domain::workspaces::{StubWorkspaceManager, WorkspaceManager};
 use novade_ui::shell::domain_workspace_connector::DomainWorkspaceConnector;
 use novade_ui::shell::panel_widget::workspace_indicator_widget::types::WorkspaceInfo as UiWorkspaceInfo; 
 // System Info Provider import
-use novade_system::window_info_provider::StubSystemWindowInfoProvider; // Import the stub
+use novade_system::window_info_provider::StubSystemWindowInfoProvider; 
+// DBusMenuProvider import
+use novade_system::dbus_menu_provider::StubDBusMenuProvider; // Import the stub
+// AppMenuService import
+use novade_ui::shell::app_menu_service::AppMenuService; // Import AppMenuService
 
 use std::sync::Arc; 
 use gtk::gio::{self, SimpleAction}; 
@@ -67,13 +71,18 @@ fn build_ui(app: &Application, tokio_handle: tokio::runtime::Handle) {
     // --- SystemWindowInfoProvider Setup ---
     let system_window_provider = Arc::new(StubSystemWindowInfoProvider::new());
 
-    // --- ActiveWindowService for AppMenuButton ---
-    // Pass the system_window_provider to ActiveWindowService constructor
+    // --- ActiveWindowService for AppMenuButton (for app_id, title, icon) ---
     let active_window_service = Rc::new(
         novade_ui::shell::active_window_service::ActiveWindowService::new(system_window_provider.clone())
     );
+
+    // --- DBusMenuProvider and AppMenuService Setup (for menu_model) ---
+    let dbus_menu_provider = Arc::new(StubDBusMenuProvider::new());
+    let app_menu_service = Rc::new(AppMenuService::new(dbus_menu_provider.clone()));
+
     let app_menu_button = AppMenuButton::new();
     app_menu_button.set_active_window_service(active_window_service.clone());
+    app_menu_button.set_app_menu_service(app_menu_service.clone()); // Set the new AppMenuService
 
     // --- Domain Workspace Management Setup ---
     let domain_workspace_manager: Arc<dyn WorkspaceManager> = Arc::new(StubWorkspaceManager::new());
