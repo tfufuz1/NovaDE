@@ -20,6 +20,6 @@ once_cell = "1.17.1"
 tokio = { version = "1.28.0", features = ["full"] }
 
 [dev-dependencies]
-anyhow = "1.0"
-tempfile = "3.5"
-mockall = "0.11"
+# Add any development-specific dependencies here, e.g., for testing
+# For example, if you need a specific version of a crate for tests:
+# criterion = "0.3"
