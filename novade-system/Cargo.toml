@@ -21,5 +21,11 @@ khronos-egl = "6.0.0" # For EGL context management
 # libloading is often a transitive dependency of khronos-egl for dynamic loading of EGL symbols
 # but can be added explicitly if specific version is needed or direct use is planned.
 
+async-trait = "0.1"
+thiserror = "1.0"
+# Use gtk4-gio for gio::MenuModel, assuming it's sufficient and lighter than full gtk4
+gtk4-gio = { version = "0.8", package = "gtk4-gio" } # Or specific version for your gtk4 setup
+
+
 # novade-core = { path = "../novade-core" } # Assuming these are local sibling crates
 # novade-domain = { path = "../novade-domain" } # Adjust paths as necessary

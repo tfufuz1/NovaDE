@@ -313,6 +313,7 @@ impl SurfaceSwapchain {
     pub fn image_views(&self) -> &[vk::ImageView] { &self.image_views }
     pub fn format(&self) -> vk::Format { self.format }
     pub fn extent(&self) -> vk::Extent2D { self.extent }
+    pub fn physical_device_handle(&self) -> vk::PhysicalDevice { self.physical_device } // Added getter
 
 }
 

@@ -1,7 +1,8 @@
-use gtk::glib;
+use gtk::glib; // Ensure glib is imported for closure_local!
 use gtk::subclass::prelude::*;
-use gtk::{Box, CompositeTemplate, Orientation, prelude::*}; // Removed Label, added prelude
-use super::notification_widget_stub::NotificationWidgetStub; // Import the stub
+use gtk::{Box, CompositeTemplate, Orientation, prelude::*};
+use super::notification_widget_stub::NotificationWidgetStub; 
+use tracing; // Ensure tracing is imported for logging
 
 #[derive(CompositeTemplate, Default)]
 #[template(string = "")] 
@@ -32,42 +33,36 @@ impl ObjectImpl for NotificationCenterPanelWidget {
         obj.set_orientation(Orientation::Vertical);
         obj.set_spacing(6); 
         
-        // Margins for the overall popover content
         obj.set_margin_top(10);
         obj.set_margin_bottom(10);
         obj.set_margin_start(10);
         obj.set_margin_end(10);
         
-        // Set a minimum width for the popover content
-        obj.set_width_request(300); // Slightly wider for notifications
+        obj.set_width_request(300); 
 
-        // Container for notification items
-        // The NotificationCenterPanelWidget itself is already a Box, so we can append directly to it.
-        // If we wanted a scrollable area, we'd add a ScrolledWindow here, then a Box inside that.
-        // For now, direct appending is fine.
+        // Add dummy NotificationWidgetStub instances and connect to their "closed" signal
+        let notifications_data = vec![
+            ("System Update", "Updates are available. Click to install."),
+            ("Email Client", "You have 3 new messages from John Doe."),
+            ("Calendar", "Reminder: Team Meeting in 15 minutes."),
+        ];
 
-        // Add dummy NotificationWidgetStub instances
-        let notification1 = NotificationWidgetStub::new(
-            "System Update",
-            "Updates are available. Click to install.",
-        );
-        obj.append(&notification1);
+        for (app_name, summary) in notifications_data {
+            let stub_instance = NotificationWidgetStub::new(app_name, summary);
+            
+            let container_box = obj.clone(); // Clone obj (NotificationCenterPanelWidget) for the closure
+            stub_instance.connect_closure(
+                "closed",
+                false, // after = false
+                glib::closure_local!(move |stub: super::notification_widget_stub::NotificationWidgetStub| {
+                    tracing::info!("'closed' signal received for notification: '{}'", stub.imp().app_name_label.text());
+                    container_box.remove(&stub);
+                })
+            );
+            obj.append(&stub_instance);
+        }
 
-        let notification2 = NotificationWidgetStub::new(
-            "Email Client",
-            "You have 3 new messages from John Doe.",
-        );
-        obj.append(&notification2);
-        
-        let notification3 = NotificationWidgetStub::new(
-            "Calendar",
-            "Reminder: Team Meeting in 15 minutes.",
-        );
-        obj.append(&notification3);
-
-        // If no notifications, a label should ideally be shown.
-        // For now, we always show these stubs. A more advanced implementation
-        // would clear these and show "No Notifications" label if the list is empty.
+        // Future: Logic to show "No Notifications" label if the container_box becomes empty.
     }
 }
 

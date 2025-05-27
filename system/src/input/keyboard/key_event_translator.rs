@@ -1,375 +1,273 @@
-use crate::{
-    compositor::core::state::DesktopState,
-    input::keyboard::{focus::set_keyboard_focus, XkbKeyboardData}, // XkbKeyboardData might be directly passed to repeat handler
-};
-use smithay::{
-    backend::input::{KeyState, KeyboardKeyEvent, LibinputInputBackend},
-    input::{keyboard::KeyboardHandle, Seat},
-    reexports::{
-        calloop::LoopHandle, // For scheduling repeat timer
-        wayland_server::{protocol::wl_surface::WlSurface, DisplayHandle, Serial}, // For serials
-    },
-    utils::SERIAL_COUNTER as WSERIAL_COUNTER, // For generating new serials
-};
-use std::{sync::Arc, time::Duration}; // For Arc, Duration
+use crate::compositor::core::state::DesktopState;
+// use crate::input::errors::InputError; // Not directly used in this file's functions
+use crate::input::keyboard::xkb_config::XkbKeyboardData; // For type reference
+use smithay::backend::input::{KeyState, KeyboardKeyEvent, LibinputInputBackend};
+use smithay::input::{keyboard::{FilterResult, KeyboardHandle}, Seat};
+use smithay::utils::{Serial, Clock}; // Clock for current time
+use xkbcommon::xkb; // For xkb::Keycode type
+use std::time::Duration; // For timer
+use std::sync::{Arc, Mutex}; // For Arc<Mutex<XkbKeyboardData>>
 
-const KEY_REPEAT_DELAY_MS: u64 = 200; // Default key repeat delay
-const KEY_REPEAT_RATE_HZ: u64 = 25; // Default key repeat rate (keys per second)
+const RAW_KEYCODE_OFFSET: u32 = 8; // libinput to XKB offset
 
-/// Handles a raw keyboard key event from an input backend.
-///
-/// This function translates the raw key event into XKB state changes,
-/// sends appropriate Wayland keyboard events to clients, and manages key repetition.
-///
-/// # Arguments
-///
-/// * `desktop_state`: Mutable reference to the global `DesktopState`.
-/// * `seat`: The `Seat` to which this keyboard event belongs.
-/// * `event`: The `KeyboardKeyEvent` received from the backend.
-/// * `seat_name`: The name of the seat.
 pub fn handle_keyboard_key_event(
     desktop_state: &mut DesktopState,
     seat: &Seat<DesktopState>,
     event: KeyboardKeyEvent<LibinputInputBackend>,
     seat_name: &str,
 ) {
+    let raw_keycode = event.key_code();
+    let xkb_keycode: xkb::Keycode = (raw_keycode + RAW_KEYCODE_OFFSET).into(); // Convert to xkb::Keycode type
+    let key_state = event.state();
+    let serial = event.serial();
+    let time = event.time();
+
     let keyboard_handle = match seat.get_keyboard() {
-        Some(kh) => kh,
+        Some(h) => h,
         None => {
-            tracing::error!("Received keyboard event for seat '{}' which has no keyboard handle.", seat_name);
+            tracing::warn!("Kein Keyboard-Handle für Seat '{}' bei Key-Event.", seat_name);
             return;
         }
     };
 
-    let xkb_data_arc = match desktop_state.keyboard_data_map.get(seat_name) {
-        Some(data) => data.clone(), // Clone Arc to use
+    let xkb_data_arc_mutex = match desktop_state.keyboard_data_map.get(seat_name) {
+        Some(data_mutex) => data_mutex.clone(), // Clone Arc<Mutex<XkbKeyboardData>>
         None => {
-            tracing::error!("XkbKeyboardData not found for seat '{}' during key event.", seat_name);
+            tracing::error!("Keine XKB-Daten für Seat '{}' bei Key-Event.", seat_name);
             return;
         }
     };
+    
+    // This lock should be short-lived
+    let mut xkb_data_guard = match xkb_data_arc_mutex.lock() {
+        Ok(guard) => guard,
+        Err(poison_err) => {
+            tracing::error!("XkbKeyboardData Mutex vergiftet für Seat '{}': {}. Stoppe Verarbeitung.", seat_name, poison_err);
+            // Depending on policy, might try to reinitialize XkbKeyboardData or clear the poisoned state.
+            return; 
+        }
+    };
 
-    // Update XKB state and get current modifiers
-    // `update_xkb_state_and_get_modifiers` takes `&self` on XkbKeyboardData
-    let smithay_mods_state = xkb_data_arc.update_xkb_state_and_get_modifiers(&event);
+    let xkb_key_direction = match key_state {
+        KeyState::Pressed => xkb::KeyDirection::Down,
+        KeyState::Released => xkb::KeyDirection::Up,
+    };
+    xkb_data_guard.state.update_key(xkb_keycode, xkb_key_direction);
 
-    // Inform Smithay's KeyboardHandle about modifier changes.
-    // This will send wl_keyboard.modifiers to the focused client if state changed.
-    keyboard_handle.modifiers(
-        event.serial(),
-        smithay_mods_state.clone(), // Clone if needed later for repeat
-        Some(tracing::Span::current()),
-    );
+    let current_smithay_mods: smithay::input::keyboard::ModifiersState = (&xkb_data_guard.state).into(); // From<&xkb::State> for ModifiersState
+    
+    // Notify Smithay's KeyboardHandle about the modifier update.
+    // The KeyboardHandle will then send wl_keyboard.modifiers to the client if changed.
+    keyboard_handle.modifiers(serial, current_smithay_mods.clone(), Some(tracing::Span::current()));
 
-    let xkb_keycode = event.key_code() + 8; // Convert libinput to XKB keycode
+    // Let Smithay's KeyboardHandle process the key event.
+    // It will use its own XKB state (derived from the keymap provided when keyboard capability was added)
+    // to translate the raw_keycode into keysyms and utf8 for the client.
+    let filter_result = keyboard_handle.input(raw_keycode, key_state, serial, time, |filter_desktop_state, _filter_xkb_state, _filter_handle| {
+        // This is the filter closure. It's called by Smithay *before* the event is sent to the client.
+        // It allows us to intercept and potentially consume the event.
+        // 'filter_xkb_state' here is &xkb::State from KeyboardHandle's internal view.
+        // 'filter_desktop_state' is &mut DesktopState.
+        // For now, we don't consume any keys, so return FilterResult::Forward.
+        // This is where one might implement compositor-level keybindings.
+        // Example: if check_compositor_binding(filter_desktop_state, filter_xkb_state, raw_keycode, key_state) { FilterResult::Consumed } else { FilterResult::Forward }
+        
+        // The prompt mentions updating XkbKeyboardData's modifiers if Smithay's internal state changed them.
+        // This is tricky because our xkb_data_guard is locked here.
+        // Smithay's KeyboardHandle has its own xkb::State. If it diverges from ours,
+        // and we want ours to follow Smithay's, we'd need to update it.
+        // However, our xkb_data_guard.state.update_key was just called, making it the most current.
+        // The ModifiersState sent to keyboard_handle.modifiers() was derived from this.
+        // So, they should be in sync unless the filter_closure itself modifies filter_xkb_state
+        // in a way that should reflect back to our XkbKeyboardData. This is not typical.
+        // For now, assume our XkbKeyboardData.state is the source of truth for modifiers we track.
+        FilterResult::Forward
+    });
 
-    match event.state() {
-        KeyState::Pressed => {
-            tracing::debug!(
-                "Key pressed: libinput_keycode={}, xkb_keycode={}, time={}",
-                event.key_code(), xkb_keycode, event.time()
-            );
+    if filter_result == FilterResult::Consumed {
+        tracing::debug!("Key event {:?} consumed by compositor filter.", raw_keycode);
+        // If consumed, typically no key repeat.
+        if let Some(timer) = xkb_data_guard.repeat_timer.take() {
+            timer.cancel();
+        }
+        xkb_data_guard.repeat_info = None;
+        xkb_data_guard.repeat_key_serial = None;
+        return;
+    }
 
-            // Send key press event to client
-            keyboard_handle.key(
-                event.serial(),
-                event.time(),
-                xkb_keycode, // Smithay expects XKB keycode
-                KeyState::Pressed,
-                Some(tracing::Span::current()),
-            );
+    // Key repeat handling
+    if key_state == KeyState::Pressed {
+        // Cancel any existing timer (e.g., if another key was being repeated or this key was pressed again)
+        if let Some(timer) = xkb_data_guard.repeat_timer.take() {
+            timer.cancel();
+        }
+        xkb_data_guard.repeat_info = None; // Clear previous repeat info
 
-            // Handle key repetition
-            // Cancel any existing repeat timer for this XKB data
-            if let Some(timer) = xkb_data_arc.repeat_timer.lock().unwrap().take() {
-                timer.cancel();
-            }
-            *xkb_data_arc.repeat_info.lock().unwrap() = None;
+        // Check if the pressed key should repeat
+        // keyboard_handle.is_repeating(xkb_keycode) uses the XKB keycode.
+        if keyboard_handle.is_repeating(xkb_keycode) {
+            let (delay, rate) = keyboard_handle.repeat_info(); // Returns (Duration, Duration)
+            
+            if rate.as_millis() > 0 { // Ensure rate is valid for repetition
+                xkb_data_guard.repeat_info = Some((
+                    raw_keycode,
+                    xkb_keycode, // Store for reference, not strictly needed for repeat logic using raw_keycode
+                    current_smithay_mods, // Store the modifiers active at the time of the press
+                    delay,
+                    rate,
+                ));
+                xkb_data_guard.repeat_key_serial = Some(serial);
 
-            if keyboard_handle.is_repeating(xkb_keycode) {
-                let (delay, rate_duration) = match keyboard_handle.repeat_info() {
-                    Some((delay_ms, rate_hz)) if rate_hz > 0 => {
-                        (Duration::from_millis(delay_ms as u64), Duration::from_millis(1000 / rate_hz as u64))
-                    }
-                    _ => (Duration::from_millis(KEY_REPEAT_DELAY_MS), Duration::from_millis(1000 / KEY_REPEAT_RATE_HZ)),
-                };
-
-                tracing::info!(
-                    "Starting key repetition for xkb_keycode {} on seat '{}': delay={:?}, rate={:?}",
-                    xkb_keycode, seat_name, delay, rate_duration
+                let timer_seat_name = seat_name.to_string();
+                // loop_handle is taken from desktop_state within the closure
+                
+                let timer_result = desktop_state.loop_handle.insert_timer(
+                    delay, // Initial delay
+                    // The closure receives &mut DesktopState as its argument directly from calloop
+                    // This allows access to the most current DesktopState, including loop_handle for rescheduling.
+                    move |ds: &mut DesktopState| { 
+                        handle_keyboard_repeat(ds, &timer_seat_name);
+                    },
                 );
 
-                *xkb_data_arc.repeat_info.lock().unwrap() = Some((
-                    event.key_code(), // Store original libinput keycode for consistency if needed
-                    xkb_keycode,
-                    smithay_mods_state, // Store current modifiers for repeat
-                    delay,
-                    rate_duration,
-                ));
-                *xkb_data_arc.repeat_key_serial.lock().unwrap() = Some(event.serial());
-
-                // Create a clone of necessary Arcs/data for the timer callback
-                let repeat_xkb_data_arc = xkb_data_arc.clone();
-                let repeat_loop_handle = desktop_state.loop_handle.clone();
-                let repeat_seat_name = seat_name.to_string();
-                let repeat_display_handle = desktop_state.display_handle.clone(); // For generating serials
-
-                let timer = desktop_state.loop_handle.insert_timer(
-                    delay,
-                    move |_event_data, _timer_shared_data, _main_shared_data| { // main_shared_data is &mut DesktopState
-                        // This callback needs access to DesktopState to get the seat and then keyboard handle.
-                        // Or, pass KeyboardHandle directly if possible (it's not Clone or Send/Sync easily).
-                        // The `_main_shared_data` in `insert_timer` is `&mut D`, where `D` is `DesktopState`.
-                        // So, we can access `_main_shared_data` (which is `desktop_state`).
-                        // However, the closure for insert_timer is `FnOnce(Event, &mut TimerSharedData, &mut D)`.
-                        // The `_main_shared_data` is not what we expect here.
-                        // calloop::LoopHandle::insert_timer takes F: FnOnce(T, &mut S) where T is event, S is shared data.
-                        // The shared data for the timer itself is usually (). The global shared data is DesktopState.
-                        // Let's re-check calloop timer API.
-                        // `LoopHandle<D>::insert_timer<F, T>(duration, data: T, callback: F)`
-                        // where `F: FnOnce(T, &mut D) + 'static`.
-                        // So, `data` is `T` (our event data), and `callback` gets `(T, &mut DesktopState)`.
-                        // We can pass `(repeat_xkb_data_arc, repeat_seat_name, repeat_display_handle)` as `T`.
-
-                        // This closure needs `&mut DesktopState` for `loop_handle` again to reschedule.
-                        // The callback for `insert_timer` is `FnOnce(T, &mut LoopSharedData<D>)`.
-                        // `LoopSharedData<D>` is not `&mut D`.
-                        // The callback signature is `F: FnOnce(T, &mut S, &mut D) -> Option<Duration>` for `Generic::new_timer`.
-                        // For `LoopHandle::insert_timer`, it's `F: FnMut(T, &mut D) -> Option<Duration>`.
-                        // This is simpler. `T` is our event data, `&mut D` is `&mut DesktopState`.
-
-                        // The closure needs to be `FnMut` for rescheduling.
-                        // Let's reconstruct what we need for the repeat handler.
-                        // `handle_key_repeat(desktop_state, seat_name_str, xkb_data_arc_clone)`
-                        // This requires `desktop_state` to be passed into the closure.
-                        // The closure signature is `F: FnMut(T, &mut D) -> Option<Duration>`.
-                        // `T` is our `event_data` which can be `()` if we capture everything.
-                        // `&mut D` is `&mut DesktopState`.
-
-                        // This is the data for one repeat tick.
-                        handle_key_repeat(
-                            repeat_xkb_data_arc, // Arc<XkbKeyboardData>
-                            repeat_loop_handle,  // LoopHandle<DesktopState>
-                            repeat_seat_name,    // String
-                            repeat_display_handle, // DisplayHandle
-                        );
-                        // Rescheduling is handled within handle_key_repeat
-                    },
-                ).expect("Failed to insert key repeat timer"); // Should handle error better
-
-                *xkb_data_arc.repeat_timer.lock().unwrap() = Some(timer);
-            }
-        }
-        KeyState::Released => {
-            tracing::debug!(
-                "Key released: libinput_keycode={}, xkb_keycode={}, time={}",
-                event.key_code(), xkb_keycode, event.time()
-            );
-
-            // Send key release event to client
-            keyboard_handle.key(
-                event.serial(),
-                event.time(),
-                xkb_keycode, // Smithay expects XKB keycode
-                KeyState::Released,
-                Some(tracing::Span::current()),
-            );
-
-            // Cancel key repetition if the released key was the one being repeated
-            let mut repeat_info_guard = xkb_data_arc.repeat_info.lock().unwrap();
-            if let Some((_libinput_kc, r_xkb_kc, _, _, _)) = *repeat_info_guard {
-                if r_xkb_kc == xkb_keycode {
-                    tracing::info!("Key repetition canceled for xkb_keycode {} on seat '{}' due to key release.", xkb_keycode, seat_name);
-                    if let Some(timer) = xkb_data_arc.repeat_timer.lock().unwrap().take() {
-                        timer.cancel();
+                match timer_result {
+                    Ok(handle) => {
+                        xkb_data_guard.repeat_timer = Some(handle);
+                        tracing::debug!("Key repeat timer started for raw_keycode {}, delay {:?}, rate {:?}", raw_keycode, delay, rate);
                     }
-                    *repeat_info_guard = None;
-                    *xkb_data_arc.repeat_key_serial.lock().unwrap() = None;
+                    Err(e) => {
+                        tracing::error!("Fehler beim Erstellen des Key-Repeat-Timers: {}", e);
+                        xkb_data_guard.repeat_info = None; // Clear info if timer failed
+                    }
                 }
+            } else {
+                tracing::trace!("Taste (XKB: {}) wiederholt nicht (Rate ist 0).", xkb_keycode);
+            }
+        } else {
+             tracing::trace!("Taste (XKB: {}) wiederholt nicht (is_repeating ist false).", xkb_keycode);
+        }
+    } else { // KeyState::Released
+        // If the released key is the one being repeated, cancel the timer
+        if let Some((repeated_raw_kc, _, _, _, _)) = xkb_data_guard.repeat_info {
+            if repeated_raw_kc == raw_keycode {
+                if let Some(timer) = xkb_data_guard.repeat_timer.take() {
+                    timer.cancel();
+                    tracing::debug!("Key repeat timer cancelled for raw_keycode {}.", raw_keycode);
+                }
+                xkb_data_guard.repeat_info = None;
+                xkb_data_guard.repeat_key_serial = None;
             }
         }
     }
 }
 
-/// Handles a key repetition tick.
-///
-/// This function is called by a `calloop` timer when a key repeat event is due.
-/// It sends the repeated key press to the client and reschedules the timer for the next repeat.
-///
-/// # Arguments (captured by the timer closure)
-///
-/// * `xkb_data_arc`: An `Arc` to the `XkbKeyboardData` for the relevant seat.
-/// * `loop_handle`: A `LoopHandle` to reschedule the timer.
-/// * `seat_name`: The name of the seat.
-/// * `display_handle`: A `DisplayHandle` for generating new serials.
-fn handle_key_repeat(
-    xkb_data_arc: Arc<XkbKeyboardData>,
-    loop_handle: LoopHandle<'static, DesktopState>, // LoopHandle to reschedule
-    seat_name: String, // For logging and potentially getting seat if needed
-    display_handle: DisplayHandle, // For generating serials
-) {
-    let mut repeat_info_guard = xkb_data_arc.repeat_info.lock().unwrap();
-
-    // Check if repetition should continue (focus might have changed, or info cleared)
-    if repeat_info_guard.is_none() {
-        tracing::debug!("Repeat info cleared, stopping key repetition for seat '{}'.", seat_name);
-        if let Some(timer) = xkb_data_arc.repeat_timer.lock().unwrap().take() {
-            timer.cancel(); // Ensure timer is definitely cancelled
+// This function is called by the timer closure from handle_keyboard_key_event
+fn handle_keyboard_repeat(desktop_state: &mut DesktopState, seat_name: &str) {
+    let keyboard_handle = match desktop_state.seat_state.seats().find(|s| s.name() == seat_name).and_then(|s| s.get_keyboard()) {
+        Some(h) => h,
+        None => {
+            tracing::warn!("Wiederholung: Keyboard-Handle für Seat '{}' nicht mehr verfügbar. Stoppe Wiederholung.", seat_name);
+            if let Some(xkb_data_arc_mutex) = desktop_state.keyboard_data_map.get(seat_name) {
+                if let Ok(mut xkb_data_guard) = xkb_data_arc_mutex.lock() {
+                    if let Some(timer) = xkb_data_guard.repeat_timer.take() { timer.cancel(); }
+                    xkb_data_guard.repeat_info = None;
+                }
+            }
+            return;
         }
+    };
+
+    let xkb_data_arc_mutex = match desktop_state.keyboard_data_map.get(seat_name) {
+        Some(data_mutex) => data_mutex.clone(),
+        None => {
+            tracing::error!("Wiederholung: Keine XKB-Daten für Seat '{}'. Stoppe Wiederholung.", seat_name);
+            return;
+        }
+    };
+    
+    let mut xkb_data_guard = match xkb_data_arc_mutex.lock() {
+        Ok(guard) => guard,
+        Err(poison_err) => {
+            tracing::error!("Wiederholung: XkbKeyboardData Mutex vergiftet für Seat '{}': {}. Stoppe Wiederholung.", seat_name, poison_err);
+            return;
+        }
+    };
+
+    if xkb_data_guard.repeat_info.is_none() {
+        tracing::debug!("Wiederholung: Keine Wiederholungsinformationen für Seat '{}', Timer wird möglicherweise fälschlicherweise ausgelöst oder bereits abgebrochen.", seat_name);
+        if let Some(timer) = xkb_data_guard.repeat_timer.take() { timer.cancel(); } // Ensure it's cancelled
+        return;
+    }
+
+    // Check if focus is still valid for this keyboard
+    // Compare the surface ID stored in XkbKeyboardData with the current focus of KeyboardHandle
+    let current_kbd_focus_surface_ref = keyboard_handle.current_focus(); // Option<&WlSurface>
+    let expected_focus_surface_weak_opt = xkb_data_guard.focused_surface_on_seat.clone(); // Option<Weak<WlSurface>>
+    
+    let focus_matches = match (current_kbd_focus_surface_ref, expected_focus_surface_weak_opt.as_ref().and_then(|wk| wk.upgrade())) {
+        (Some(focused_surf), Some(expected_surf)) => focused_surf.id() == expected_surf.id(),
+        (None, None) => true, // Both are None, focus is consistent (cleared)
+        _ => false, // One is Some, the other is None, or different surfaces
+    };
+
+    if !focus_matches {
+        tracing::debug!("Wiederholung: Keyboard-Fokus hat sich geändert oder ist verloren gegangen. Breche Wiederholung für Seat '{}' ab. Erwartet: {:?}, Aktuell: {:?}", 
+            seat_name,
+            expected_focus_surface_weak_opt.as_ref().and_then(|wk| wk.upgrade().map(|s| s.id())), 
+            current_kbd_focus_surface_ref.map(|s| s.id())
+        );
+        if let Some(timer) = xkb_data_guard.repeat_timer.take() { timer.cancel(); }
+        xkb_data_guard.repeat_info = None;
+        xkb_data_guard.repeat_key_serial = None;
         return;
     }
     
-    // Check if focused surface still exists for this seat
-    // If XkbKeyboardData.focused_surface_on_seat.lock().unwrap().as_ref().and_then(|wk| wk.upgrade()).is_none() {
-    // This check should be done by DesktopState or a focus manager.
-    // For now, assume if repeat_info is Some, focus is still valid for repeat.
-    // A more robust check would involve querying DesktopState for current focus on this seat.
-    // This function doesn't have &mut DesktopState, so it cannot directly query seat focus easily.
-    // This is a limitation of making the timer callback not have access to DesktopState.
-
-    // The timer callback for LoopHandle::insert_timer *does* get &mut DesktopState if it's the shared data.
-    // Let's re-evaluate the timer callback signature for `LoopHandle::insert_timer`.
-    // `insert_timer<T, F>(duration, data: T, callback: F)` where `F: FnMut(T, &mut D) -> Option<Duration>`.
-    // So, the callback *can* take `&mut DesktopState`.
-    // This means `handle_key_repeat` can be a method on `DesktopState` or a free function
-    // that takes `&mut DesktopState`.
-
-    // The closure passed to `insert_timer` in `handle_keyboard_key_event` needs to be adjusted.
-    // It should capture `seat_name` (String) and `xkb_data_arc` (Arc<XkbKeyboardData>).
-    // The closure itself will be `FnMut((String, Arc<XkbKeyboardData>), &mut DesktopState) -> Option<Duration>`.
-    // The `handle_key_repeat` function itself would then be:
-    // `fn handle_key_repeat_tick(event_data: (String, Arc<XkbKeyboardData>), desktop_state: &mut DesktopState) -> Option<Duration>`
-    // This is much cleaner.
-
-    // --- This function `handle_key_repeat` will be the body of that improved closure. ---
-    // --- It will be called from within the `FnMut` that `insert_timer` gets. ---
-    // --- For now, simulate that by using the captured variables. ---
-
-    let (_libinput_kc, r_xkb_kc, ref r_mods, _delay, r_rate) = match *repeat_info_guard {
-        Some(ref data) => data.clone(), // Clone the contents for use
-        None => { // Should be caught by the check above, but as a safeguard
-             if let Some(timer) = xkb_data_arc.repeat_timer.lock().unwrap().take() {
-                timer.cancel();
-            }
+    // Clone repeat_info for use.
+    let (raw_keycode, _xkb_keycode, stored_mods, _delay, rate) = match xkb_data_guard.repeat_info.clone() {
+        Some(info) => info,
+        None => { // Should have been caught by the earlier check
+            if let Some(timer) = xkb_data_guard.repeat_timer.take() { timer.cancel(); }
             return;
         }
     };
+    
+    let new_serial = Serial::now(); // Generate a new serial for the repeated event
+    let time = desktop_state.clock.now().as_millis() as u32; // Current time for the event
 
+    // Drop the guard before calling keyboard_handle.input if the filter closure might re-lock.
+    // However, the filter is simple (FilterResult::Forward).
+    // For this specific case, holding the lock might be fine.
+    // Let's keep it locked to update repeat_key_serial and timer handle.
 
-    // Get KeyboardHandle from DesktopState (this is where &mut DesktopState would be needed)
-    // This is a conceptual problem if handle_key_repeat is a standalone function without DesktopState.
-    // For now, assume we can get it. In the real timer callback, we'd use desktop_state.seat.get_keyboard().
-    // This function, as standalone, cannot get the KeyboardHandle without DesktopState.
-    // This implies the timer callback MUST call a method on DesktopState or a function that receives it.
+    // Send modifiers first, then the key
+    keyboard_handle.modifiers(new_serial, stored_mods, Some(tracing::Span::current()));
+    
+    let _filter_result = keyboard_handle.input(raw_keycode, KeyState::Pressed, new_serial, time, |_ds, _filter_xkb_state, _filter_handle| {
+        FilterResult::Forward // Repeated keys are generally not consumed by compositor bindings
+    });
+    
+    xkb_data_guard.repeat_key_serial = Some(new_serial); // Update with the latest serial
 
-    // Let's assume this function is called by a closure that *has* desktop_state:
-    // fn actual_timer_callback(desktop_state: &mut DesktopState, seat_name_str: &str, xkb_data_arc_clone: Arc<XkbKeyboardData>) { ... }
-    // And inside that, it calls this or similar logic.
+    // Reschedule the timer
+    let timer_seat_name_clone = seat_name.to_string();
+    // desktop_state.loop_handle is available from the &mut DesktopState parameter
+    let next_timer_result = desktop_state.loop_handle.insert_timer(
+        rate, // Use the repeat rate for subsequent calls
+        move |ds: &mut DesktopState| { // ds is &mut DesktopState
+            handle_keyboard_repeat(ds, &timer_seat_name_clone);
+        },
+    );
 
-    // For the purpose of this function signature (without &mut DesktopState):
-    // This function cannot proceed without KeyboardHandle.
-    // This highlights that the timer callback needs to be structured to have access to DesktopState.
-    // The `handle_key_repeat` function will be simplified and its content moved to the timer lambda.
-
-    // --- Refactoring: The logic of handle_key_repeat will be inside the lambda in handle_keyboard_key_event ---
-    // --- This standalone `handle_key_repeat` function will be removed. ---
-    // --- The `handle_keyboard_repeat` in `keyboard/mod.rs` will be the entry point for the timer. ---
-    tracing::error!("handle_key_repeat standalone function should not be called. Logic moved to timer lambda.");
-}
-
-
-/// Entry point for handling a key repeat event, typically called from a timer.
-///
-/// This function should be invoked by the calloop timer scheduled for key repetition.
-/// It retrieves necessary information from `DesktopState` and `XkbKeyboardData`
-/// to send a repeated key event and then reschedules itself if repetition should continue.
-///
-/// # Arguments
-///
-/// * `desktop_state`: Mutable reference to the global `DesktopState`.
-/// * `seat_name`: The name of the seat for which repetition is occurring.
-/// * `xkb_data_for_seat_arc`: An `Arc` to the `XkbKeyboardData` for this seat.
-///
-/// # Returns
-///
-/// * `Option<Duration>`: If `Some(duration)`, the timer will be rescheduled with this duration.
-///   If `None`, the timer will not be rescheduled (repetition stops).
-pub fn handle_keyboard_repeat( // This is the function the timer will effectively call (via a lambda)
-    desktop_state: &mut DesktopState,
-    seat_name: &str, // seat_name is a String in the closure
-    xkb_data_for_seat_arc: Arc<XkbKeyboardData>, // This Arc is cloned into the closure
-) -> Option<Duration> { // Return Option<Duration> for rescheduling
-    let mut repeat_info_guard = xkb_data_for_seat_arc.repeat_info.lock().unwrap();
-
-    // Check if focused surface still exists for this seat
-    let focused_surface_exists = xkb_data_for_seat_arc.focused_surface_on_seat.lock().unwrap().as_ref()
-        .and_then(|wk| wk.upgrade()).is_some();
-
-    if !focused_surface_exists || repeat_info_guard.is_none() {
-        tracing::info!("Key repetition stopped for seat '{}': No focus or repeat info cleared.", seat_name);
-        *repeat_info_guard = None; // Ensure it's cleared
-        *xkb_data_for_seat_arc.repeat_timer.lock().unwrap() = None; // Clear stored timer handle
-        return None; // Stop timer
-    }
-
-    let (_libinput_kc, r_xkb_kc, r_mods, _delay, r_rate) = match *repeat_info_guard {
-        Some(ref data) => data.clone(), // Clone needed data
-        None => return None, // Should not happen due to check above
-    };
-
-    let keyboard_handle = match desktop_state.seat.get_keyboard() {
-        Some(kh) if desktop_state.seat.name() == seat_name => kh,
-        _ => {
-            tracing::error!("Keyboard handle not found for seat '{}' during key repeat. Stopping.", seat_name);
-            *repeat_info_guard = None;
-            *xkb_data_for_seat_arc.repeat_timer.lock().unwrap() = None;
-            return None; // Stop timer
+    match next_timer_result {
+        Ok(handle) => {
+            xkb_data_guard.repeat_timer = Some(handle); // Store the new timer handle
+            tracing::trace!("Key repeat timer rescheduled for raw_keycode {}, rate {:?}", raw_keycode, rate);
         }
-    };
-
-    let new_serial = WSERIAL_COUNTER.next_serial();
-    let time = event_time_msec(); // Get current time in msec for the event
-
-    tracing::debug!(
-        "Repeating key press: xkb_keycode={}, time={}, serial={:?} for seat '{}'",
-        r_xkb_kc, time, new_serial, seat_name
-    );
-
-    // Send modifiers state first
-    keyboard_handle.modifiers(new_serial, r_mods, Some(tracing::Span::current()));
-    // Send key press event
-    keyboard_handle.key(
-        new_serial,
-        time,
-        r_xkb_kc,
-        KeyState::Pressed,
-        Some(tracing::Span::current()),
-    );
-
-    // Update the serial for this repeating key
-    *xkb_data_for_seat_arc.repeat_key_serial.lock().unwrap() = Some(new_serial);
-
-    // Reschedule the timer with the rate
-    Some(r_rate)
-}
-
-// Helper to get current time in milliseconds (compatible with libinput event times)
-fn event_time_msec() -> u32 {
-    // Using std::time::SystemTime for a monotonic-like source if available through Instant.
-    // This needs to be compatible with what clients expect for event times.
-    // Libinput uses `clock_gettime(CLOCK_MONOTONIC, ...)`
-    // For simplicity, if not available, can use Instant relative to a start time.
-    // Smithay examples sometimes use `SystemTime::now().duration_since(UNIX_EPOCH)`
-    // but that's wall-clock time. For events, monotonic is better.
-    // Calloop's LoopHandle has `now()` which is usually based on CLOCK_MONOTONIC.
-    // However, we don't have LoopHandle here directly.
-    // For now, a placeholder. This should ideally come from the event loop's clock.
-    // This is a known challenge. Let's use a simple Instant for now assuming it's okay.
-    // This part requires careful consideration in a full compositor.
-    // For now, let's use a simple incrementing counter or a coarse time.
-    // Using Duration::as_millis on Instant::now() is not what libinput does.
-    // This is a placeholder.
-    static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-    let start_time = START_TIME.get_or_init(std::time::Instant::now);
-    start_time.elapsed().as_millis() as u32
+        Err(e) => {
+            tracing::error!("Fehler beim Neusetzen des Key-Repeat-Timers: {}", e);
+            xkb_data_guard.repeat_timer = None; // Stop repeating if timer fails
+            xkb_data_guard.repeat_info = None;
+            xkb_data_guard.repeat_key_serial = None;
+        }
+    }
 }

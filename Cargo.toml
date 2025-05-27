@@ -9,8 +9,10 @@ edition = "2021"
 vulkanalia = { version = "0.12.0", features = ["libloading", "window"] }
 raw-window-handle = "0.5"
 log = "0.4"
-image = "0.24"
+image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
 vk-mem-rs = "0.2.3" # Added as per error.rs, though not directly in instance.rs
+memoffset = "0.9" # For Vertex struct field offsets
+glam = "0.24" # For matrix math
 # Add other dependencies as needed by other modules
 [features]
 default = []

@@ -7,18 +7,20 @@ use std::cell::RefCell;
 use std::cell::RefCell;
 use std::rc::Rc; // For Rc<ActiveWindowService>
 
-// Correct the path to ActiveWindowService based on its new location
-// Assuming active_window_service.rs is in novade-ui/src/shell/
+// Correct the path to ActiveWindowService 
 use crate::shell::active_window_service::ActiveWindowService;
+// Import AppMenuService
+use crate::shell::app_menu_service::AppMenuService;
 
 
 #[derive(CompositeTemplate, Default)]
-#[template(string = "")] // No template for now
+#[template(string = "")] 
 pub struct AppMenuButton {
     pub active_app_id: RefCell<Option<String>>,
     pub active_window_title: RefCell<Option<String>>,
     pub active_icon_name: RefCell<Option<String>>,
-    pub service: RefCell<Option<Rc<ActiveWindowService>>>,
+    pub active_window_service: RefCell<Option<Rc<ActiveWindowService>>>, // Renamed from 'service' for clarity
+    pub app_menu_service: RefCell<Option<Rc<AppMenuService>>>, // New service field
 }
 
 #[glib::object_subclass]
@@ -32,7 +34,8 @@ impl ObjectSubclass for AppMenuButton {
             active_app_id: RefCell::new(None),
             active_window_title: RefCell::new(None),
             active_icon_name: RefCell::new(None),
-            service: RefCell::new(None), // Initialize the service field
+            active_window_service: RefCell::new(None), 
+            app_menu_service: RefCell::new(None), // Initialize new service field
         }
     }
 
@@ -77,18 +80,17 @@ use gtk::gio; // Ensure gio is imported for MenuModel
 impl AppMenuButton {
     pub(super) fn update_active_window_info_impl(
         &self,
-        app_id: Option<String>,
+        app_id: Option<String>, // app_id is mainly for internal state tracking now
         window_title: Option<String>,
         icon_name: Option<String>,
-        menu_model: Option<&gio::MenuModel>, // Added menu_model parameter
+        // menu_model parameter is removed from here, will be set asynchronously
     ) {
         let obj = self.obj();
 
-        // Store new state (if needed, but menu_model is set directly on widget)
+        // Store new state for app_id, title, icon
         self.active_app_id.replace(app_id.clone());
         self.active_window_title.replace(window_title.clone());
         self.active_icon_name.replace(icon_name.clone());
-        // menu_model is not stored in imp struct fields, it's applied directly to the GTK widget
 
         // Update Icon
         if let Some(icon_name_str) = icon_name.as_ref() {
@@ -101,12 +103,13 @@ impl AppMenuButton {
         if let Some(title_str) = window_title.as_ref() {
             obj.set_label(title_str);
         } else if let Some(app_id_str) = app_id.as_ref() {
+            // Fallback to app_id for label if title is None
             obj.set_label(app_id_str);
         } else {
             obj.set_label("Apps"); // Default label
         }
         
-        // Update Menu Model
-        obj.set_menu_model(menu_model);
+        // Menu Model is no longer set directly here.
+        // It's set by refresh_display in mod.rs after fetching from AppMenuService.
     }
 }
