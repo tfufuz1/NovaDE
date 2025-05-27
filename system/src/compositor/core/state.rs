@@ -16,10 +16,12 @@ use smithay::{
         shell::xdg::{XdgShellState, XdgShellHandler, XdgToplevelSurfaceData, XdgPopupSurfaceData, ToplevelSurface, PopupSurface, XdgWmBaseClientData, XdgPositionerUserData, XdgSurfaceUserData, XdgActivationState, XdgActivationHandler},
         seat::Seat,
     },
-    input::{SeatHandler as SmithaySeatHandler, SeatState, pointer::CursorImageStatus, keyboard::KeyboardHandle}, // Renamed SeatHandler to SmithaySeatHandler, added SeatState, CursorImageStatus, KeyboardHandle
-    utils::{Point, Size, Rectangle, Logical, Physical, Serial, Transform},
+    input::{SeatHandler, SeatState, pointer::CursorImageStatus, keyboard::KeyboardHandle, touch::TouchHandle, TouchSlot}, // Use SeatHandler directly, added TouchHandle and TouchSlot
+    utils::{Point, Size, Rectangle, Logical, Physical, Serial, Transform, Clock}, // Added Clock
 };
-use std::{time::Duration, collections::HashMap, sync::{Arc, Mutex, Weak}}; // Added Mutex, Weak
+use std::{time::Duration, collections::HashMap, sync::{Arc, Mutex, Weak}}; // Mutex is already here
+// Ensure wl_surface is specifically available if not covered by wildcard
+use smithay::reexports::wayland_server::protocol::wl_surface;
 use uuid::Uuid;
 use crate::{
     compositor::{
@@ -27,7 +29,7 @@ use crate::{
         xdg_shell::types::ManagedWindow,
         display_loop::client_data::ClientData,
     },
-    input::{keyboard::XkbKeyboardData, touch::TouchFocusData},
+    input::{keyboard::XkbKeyboardData}, // Removed TouchFocusData
     outputs::manager::OutputManager,
 };
 use smithay::{
@@ -58,7 +60,7 @@ pub struct DesktopState {
     pub display_handle: DisplayHandle,
     pub loop_handle: LoopHandle<'static, Self>, // 'static might need adjustment based on main loop
     pub loop_signal: LoopSignal,
-    // pub clock: Clock, // Assuming Clock will be defined or imported
+    pub clock: Clock<u64>, // ADDED/UNCOMMENTED
 
     // Smithay states
     pub compositor_state: CompositorState,
@@ -77,11 +79,12 @@ pub struct DesktopState {
     pub seat_state: SeatState<Self>, // Smithay's manager for seat Wayland objects
     pub seat: Seat<Self>,            // Smithay's core Seat object
     pub seat_name: String,           // Name of the primary seat, e.g., "seat0"
-    pub keyboard_data_map: HashMap<String, Arc<XkbKeyboardData>>, // XKB data per seat name
+    pub keyboard_data_map: HashMap<String, Arc<Mutex<XkbKeyboardData>>>, // MODIFIED type
     pub current_cursor_status: Arc<Mutex<CursorImageStatus>>, // For renderer to observe
     pub pointer_location: Point<f64, Logical>, // Global pointer coordinates
-    pub active_input_surface: Option<Weak<WlSurface>>,
-    pub touch_focus_data: TouchFocusData,
+    pub active_input_surface: Option<Weak<WlSurface>>, // General purpose, might be kb focus
+    // pub touch_focus_data: TouchFocusData, // REMOVED
+    pub active_touch_targets: HashMap<TouchSlot, Weak<wl_surface::WlSurface>>, // Per-slot touch targets
 
     // --- Output Related State ---
     pub output_manager_state: OutputManagerState, // Smithay's manager for output Wayland objects
@@ -108,6 +111,7 @@ impl DesktopState {
         // SeatState::new_seat is not a method. Seat::new is typical.
         // The wl_seat global is created later via seat_state.new_wl_seat().
         let mut seat = Seat::new(&display_handle, seat_name.clone(), None); // Logger can be added
+        let clock = Clock::new(None); // ADDED/UNCOMMENTED initialization, using None for span for now
 
         // Store SeatState in the seat's user data if SeatState itself needs to be accessed via Seat later.
         // Or, more commonly, SeatState is owned by DesktopState directly.
@@ -118,6 +122,7 @@ impl DesktopState {
             display_handle: display_handle.clone(),
             loop_handle,
             loop_signal,
+            clock, // ADDED/UNCOMMENTED
             compositor_state: CompositorState::new(),
             shm_state: ShmState::new(Vec::new(), None),
             xdg_shell_state: XdgShellState::new(&display_handle, PopupManager::new(None), None),
@@ -131,11 +136,12 @@ impl DesktopState {
             seat_state, // Initialize SeatState
             seat,       // Initialize Seat
             seat_name,  // Initialize seat_name
-            keyboard_data_map: HashMap::new(),
+            keyboard_data_map: HashMap::new(), // Initialization is fine, type already changed
             current_cursor_status: Arc::new(Mutex::new(CursorImageStatus::Default)),
             pointer_location: Point::from((0.0, 0.0)),
             active_input_surface: None,
-            touch_focus_data: TouchFocusData::default(),
+            // touch_focus_data: TouchFocusData::default(), // REMOVED
+            active_touch_targets: HashMap::new(), // Initialize new field
 
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle), // Initialize with XDG support
             output_manager: Arc::new(Mutex::new(OutputManager::new())),
@@ -146,51 +152,56 @@ impl DesktopState {
 smithay::delegate_client_handler!(DesktopState);
 
 // --- SeatHandler Implementation ---
-impl SmithaySeatHandler for DesktopState {
+impl SeatHandler for DesktopState {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
-    type TouchFocus = WlSurface; // Added TouchFocus
+    type TouchFocus = WlSurface; // Or WlSurface if touch focus is on a surface
 
     fn seat_state(&mut self) -> &mut SeatState<Self> {
         &mut self.seat_state
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Self::KeyboardFocus>) {
-        tracing::info!(seat_name = %seat.name(), "Keyboard focus changed to: {:?}", focused.map(|s| s.id()));
+        tracing::debug!(
+            seat_name = %seat.name(),
+            new_focus_surface_id = ?focused.map(|s| s.id()),
+            "SeatHandler::focus_changed (keyboard) triggered by Smithay."
+        );
 
-        if let Some(surface) = focused {
-            self.active_input_surface = Some(surface.downgrade());
-            // TODO: Notify domain layer about the focus change.
-            // e.g., self.domain_notifier.keyboard_focus_changed(surface.id());
-        } else {
-            self.active_input_surface = None;
-            // TODO: Notify domain layer about loss of focus.
-            // e.g., self.domain_notifier.keyboard_focus_lost();
-        }
-        // Additionally, if you have per-window state that needs updating on focus change (e.g. borders)
-        // you might iterate through self.windows or use self.space to find the relevant ManagedWindow
-        // and update its visual state.
+        // This method is called when Smithay's KeyboardHandle::set_focus changes the focus.
+        // Its primary role here is to update any internal compositor state that depends on the keyboard focus.
+        // For example, if we have a specific field in DesktopState to track the focused window's domain ID.
+
+        let new_focused_wl_surface_weak = focused.map(|s| s.downgrade());
+        self.active_input_surface = new_focused_wl_surface_weak;
+
+        // Example of notifying a domain service (conceptual, actual call might differ)
+        // if let Some(surface) = focused {
+        //     if let Some(window) = self.space.window_for_surface(surface, WindowSurfaceType::TOPLEVEL) {
+        //         let domain_id = window.user_data().get::<crate::compositor::xdg_shell::types::DomainWindowIdentifierWrapper>().map(|w| w.0.clone());
+        //         if let Some(id) = domain_id {
+        //             tracing::info!("Keyboard focus changed to domain window: {:?}", id);
+        //             // self.workspace_manager_service.notify_keyboard_focus_changed(Some(id)); // Assuming async call handled elsewhere or made sync
+        //         }
+        //     }
+        // } else {
+        //     tracing::info!("Keyboard focus lost.");
+        //     // self.workspace_manager_service.notify_keyboard_focus_changed(None);
+        // }
+        
+        // The actual wl_keyboard.enter/leave events are sent by Smithay's KeyboardHandle.
     }
 
-    fn cursor_image(&mut self, seat: &Seat<Self>, image: CursorImageStatus) {
-        tracing::trace!(seat_name = %seat.name(), "Cursor image status updated: {:?}", image);
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        // tracing::trace!(seat_name = %seat.name(), status = ?image, "SeatHandler::cursor_image request received.");
+        // The cursor image status is stored in DesktopState and read by the renderer.
+        // The renderer also needs the pointer_location from DesktopState.
         *self.current_cursor_status.lock().unwrap() = image;
-        // The renderer will observe self.current_cursor_status to draw the cursor.
-        // Signal the event loop to redraw if the cursor change requires it.
-        // self.loop_signal.wakeup(); // Might be too frequent; cursor updates are often part of overall render loop.
+        // No direct action needed here other than updating the state.
+        // The renderer will pick this up in its drawing cycle.
     }
-
-    // Optional methods for more detailed seat management, can be added if needed:
-    // fn new_capability(_seat: &Seat<Self>, _capability: Capability) {}
-    // fn remove_capability(_seat: &Seat<Self>, _capability: Capability) {}
-    // fn new_keyboard(_seat: &Seat<Self>, _keyboard: KeyboardHandle<Self>) {}
-    // fn new_pointer(_seat: &Seat<Self>, _pointer: PointerHandle<Self>) {}
-    // fn new_touch(_seat: &Seat<Self>, _touch: TouchHandle<Self>) {}
-    // fn remove_keyboard(_seat: &Seat<Self>) {}
-    // fn remove_pointer(_seat: &Seat<Self>) {}
-    // fn remove_touch(_seat: &Seat<Self>) {}
 }
-smithay::delegate_seat_handler!(DesktopState);
+smithay::delegate_seat_handler!(DesktopState); // Ensures DesktopState delegates SeatHandler calls correctly
 
 // --- OutputHandler Implementation ---
 impl OutputHandler for DesktopState {
