@@ -39,6 +39,7 @@ pub enum VulkanError {
     SubmitError(String),
     AcquireNextImageError(vulkanalia::vk::Result),
     PresentError(vulkanalia::vk::Result),
+    ShaderLoadingError(String), // Added for shader loading errors
 }
 
 impl fmt::Display for VulkanError {
@@ -71,6 +72,7 @@ impl fmt::Display for VulkanError {
             VulkanError::SubmitError(ref msg) => write!(f, "Submit error: {}", msg),
             VulkanError::AcquireNextImageError(ref err) => write!(f, "Acquire next image error: {}", err),
             VulkanError::PresentError(ref err) => write!(f, "Present error: {}", err),
+            VulkanError::ShaderLoadingError(ref msg) => write!(f, "Shader loading error: {}", msg),
         }
     }
 }
