@@ -181,42 +181,13 @@ impl DefaultWorkspaceManager {
         internal_state: &mut WorkspaceManagerInternalState,
         new_active_id: Option<WorkspaceId>, // Option to handle cases like last workspace deletion
     ) {
-        let old_active_id = internal_state.active_workspace_id.replace(new_active_id.unwrap_or_else(|| {
-            // If new_active_id is None (e.g. last workspace deleted and no fallback),
-            // try to set first available as active.
-            // This logic might need to be more robust depending on desired behavior when no workspaces exist.
-            // For now, if new_active_id is None, active_workspace_id becomes None.
-            // The prompt for delete_workspace implies setting a new active one if current is deleted.
-            // This internal helper takes Option to allow clearing active_id if absolutely no ws left.
-            // However, delete_workspace logic should prevent deleting the last one.
-            warn!("internal_set_active_workspace_locked called with None, clearing active workspace ID.");
-            return None; // This line is problematic, replace was already called.
-        }.unwrap_or_else(|| {
-             // This block is for when new_active_id itself is None.
-             // If we're clearing the active ID (e.g., no workspaces left), then old_active_id is taken,
-             // and active_workspace_id becomes None.
-             // The logic in delete_workspace should ensure it doesn't reach a state of 0 workspaces
-             // if "CannotDeleteLastWorkspace" is enforced.
-             // If new_active_id is actually None, then this is fine.
-             if internal_state.workspaces.is_empty() {
-                 None
-             } else {
-                 // This case should ideally not be hit if new_active_id is None and workspaces exist.
-                 // Caller should provide a valid ID or None if truly clearing.
-                 // For safety, if workspaces exist but None was passed, pick first.
-                 // This makes the None input to this function less about clearing and more about "auto-pick".
-                 // Let's refine this. The caller of this function should decide the new active ID.
-                 // This function's job is to set it and emit event.
-                 // So, if new_active_id is None, it means we are explicitly clearing it.
-                 None
-             }
-        }));
+        let old_active_id = internal_state.active_workspace_id.take(); // Take current value, leaving None
+        internal_state.active_workspace_id = new_active_id; // Set the new value (can be None)
 
-
-        if old_active_id != new_active_id { // Only send event if it actually changed
+        if old_active_id != internal_state.active_workspace_id { // Compare with the new state
             if let Err(e) = internal_state.event_publisher.send(WorkspaceEvent::ActiveWorkspaceChanged {
-                old_id: old_active_id,
-                new_id: new_active_id.expect("New active ID must be Some to send ActiveWorkspaceChanged"), // This expect is risky if None is valid
+                old_id: old_active_id, // This is Option<WorkspaceId>
+                new_id: internal_state.active_workspace_id, // This is also Option<WorkspaceId>
             }) {
                 warn!("Failed to send ActiveWorkspaceChanged event: {}", e);
             }

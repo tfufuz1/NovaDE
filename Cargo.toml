@@ -1,3 +1,4 @@
+workspace = { members = ["clock_mcp_server", "power_mcp_server"] }
 [package]
 name = "vulkan_renderer"
 version = "0.1.0"

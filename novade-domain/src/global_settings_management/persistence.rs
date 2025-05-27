@@ -3,8 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::warn; // For logging warnings
 
-use novade_core::config::ConfigServiceAsync;
-use novade_core::errors::CoreError;
+use crate::ports::config_service::ConfigServiceAsync; // Corrected path
+use novade_core::CoreError; // Corrected path
 
 use super::types::GlobalDesktopSettings;
 use super::errors::GlobalSettingsError;

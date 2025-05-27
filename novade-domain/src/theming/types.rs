@@ -408,12 +408,14 @@ mod tests {
     
     #[test]
     fn raw_token_serde_name_alias() {
-        let json_with_name = r#"{
+        // Constructing the JSON programmatically to avoid potential raw string literal issues
+        let json_value = serde_json::json!({
             "name": "token-alias",
             "value": { "color": "#FF0000" },
             "description": "Test alias"
-        }"#;
-        let deserialized: RawToken = serde_json::from_str(json_with_name).unwrap();
+        });
+        let json_with_name = serde_json::to_string(&json_value).unwrap();
+        let deserialized: RawToken = serde_json::from_str(&json_with_name).unwrap();
         assert_eq!(deserialized.id, TokenIdentifier::new("token-alias"));
         assert_eq!(deserialized.value, TokenValue::Color("#FF0000".to_string()));
         assert_eq!(deserialized.description, Some("Test alias".to_string()));
