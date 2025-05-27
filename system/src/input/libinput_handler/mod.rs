@@ -12,9 +12,11 @@ use smithay::backend::input::{
     PointerMotionEvent, TouchDownEvent, TouchUpEvent, TouchMotionEvent, TouchFrameEvent,
     TouchCancelEvent,
 };
-use smithay::reexports::input::Libinput;
+use smithay::reexports::input::{Libinput, Device as LibinputDevice, AccelProfile as LibinputAccelProfile}; // Libinput types
 use smithay::reexports::input::event::EventTrait; // For event.time()
+use smithay::reexports::input::event::device::DeviceEventTrait; // For device.name()
 use smithay::reexports::calloop::{LoopHandle, RegistrationToken}; // Add RegistrationToken
+use crate::input::pointer::config::{AccelProfile, PointerDeviceIdentifier}; // New types
 use std::rc::Rc;
 use std::cell::RefCell;
 use tracing::{error, info, warn, trace}; // For logging
@@ -189,4 +191,122 @@ pub fn register_libinput_event_source(
 
     tracing::info!("Libinput-Ereignisquelle erfolgreich für Seat '{}' registriert.", seat_name);
     Ok(registration_token)
+}
+
+// Helper to find a device. In a real setup, LibinputInputBackend might be stored in DesktopState.
+// For this example, we pass &mut Libinput directly.
+// A more robust way would be to get the LibinputInputBackend from DesktopState.
+fn find_libinput_device_mut<'a>(
+    libinput_context: &'a mut Libinput, // Needs mutable for config_accel_set_*
+    identifier: &PointerDeviceIdentifier,
+) -> Option<LibinputDevice<'a>> {
+    libinput_context.dispatch().unwrap(); // Process any pending events to update device list
+    let mut devices = libinput_context.clone_devices(); // Iterates over available devices
+    devices.find(|dev| {
+        // Match by syspath if available and unique, otherwise by name.
+        // Note: dev.syspath() is not directly available, but dev.udev_tags() or similar might be.
+        // For simplicity, we'll use name() here. A real implementation needs a more robust way.
+        // The `identifier` should ideally come from how libinput enumerates them.
+        dev.name() == identifier.name
+        // A more robust check might involve dev.sysname() or other unique properties.
+        // For instance, if PointerDeviceIdentifier stored a sysname:
+        // dev.sysname() == identifier.syspath 
+        // (assuming syspath in identifier is actually the sysname)
+    })
+}
+
+#[allow(dead_code)] // To be called from a higher-level service
+pub fn get_available_accel_profiles(
+    libinput_context: &mut Libinput, // Needs mut to ensure device list is current via dispatch
+    device_identifier: &PointerDeviceIdentifier,
+) -> Result<Vec<AccelProfile>, InputError> {
+    let device = find_libinput_device_mut(libinput_context, device_identifier)
+        .ok_or_else(|| InputError::DeviceNotFound(device_identifier.name.clone()))?;
+
+    if !device.config_accel_is_available() {
+        return Ok(vec![]); // Acceleration configuration not available for this device
+    }
+
+    let mut profiles = Vec::new();
+    if device.config_accel_has_profile(LibinputAccelProfile::Flat) {
+        profiles.push(AccelProfile::Flat);
+    }
+    if device.config_accel_has_profile(LibinputAccelProfile::Adaptive) {
+        profiles.push(AccelProfile::Adaptive);
+    }
+    Ok(profiles)
+}
+
+#[allow(dead_code)]
+pub fn get_current_accel_profile(
+    libinput_context: &mut Libinput,
+    device_identifier: &PointerDeviceIdentifier,
+) -> Result<Option<AccelProfile>, InputError> {
+    let device = find_libinput_device_mut(libinput_context, device_identifier)
+        .ok_or_else(|| InputError::DeviceNotFound(device_identifier.name.clone()))?;
+    
+    if !device.config_accel_is_available() {
+        return Ok(None);
+    }
+    Ok(Some(device.config_accel_get_profile().into()))
+}
+
+#[allow(dead_code)]
+pub fn set_accel_profile(
+    libinput_context: &mut Libinput, // Needs to be mutable
+    device_identifier: &PointerDeviceIdentifier,
+    profile: AccelProfile,
+) -> Result<(), InputError> {
+    let mut device = find_libinput_device_mut(libinput_context, device_identifier)
+        .ok_or_else(|| InputError::DeviceNotFound(device_identifier.name.clone()))?;
+
+    if !device.config_accel_is_available() {
+        return Err(InputError::InternalError(format!("Acceleration config not available for {}", device_identifier.name)));
+    }
+    
+    let libinput_profile: LibinputAccelProfile = profile.into();
+    if !device.config_accel_has_profile(libinput_profile) {
+         return Err(InputError::InternalError(format!("Profile {:?} not supported by {}", profile, device_identifier.name)));
+    }
+
+    device.config_accel_set_profile(libinput_profile)
+        .map_err(|e| InputError::InternalError(format!("Failed to set accel profile for {}: {:?}", device_identifier.name, e)))?;
+    tracing::info!("Acceleration profile for device '{}' set to {:?}.", device_identifier.name, profile);
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn get_accel_speed(
+    libinput_context: &mut Libinput,
+    device_identifier: &PointerDeviceIdentifier,
+) -> Result<Option<f64>, InputError> { // Speed is a float between -1.0 and 1.0
+    let device = find_libinput_device_mut(libinput_context, device_identifier)
+        .ok_or_else(|| InputError::DeviceNotFound(device_identifier.name.clone()))?;
+
+    if !device.config_accel_is_available() {
+        return Ok(None);
+    }
+    Ok(Some(device.config_accel_get_speed()))
+}
+
+#[allow(dead_code)]
+pub fn set_accel_speed(
+    libinput_context: &mut Libinput, // Needs to be mutable
+    device_identifier: &PointerDeviceIdentifier,
+    speed: f64, // Value between -1.0 (slowest) and 1.0 (fastest)
+) -> Result<(), InputError> {
+    let mut device = find_libinput_device_mut(libinput_context, device_identifier)
+        .ok_or_else(|| InputError::DeviceNotFound(device_identifier.name.clone()))?;
+
+    if !device.config_accel_is_available() {
+        return Err(InputError::InternalError(format!("Acceleration config not available for {}", device_identifier.name)));
+    }
+
+    // Clamp speed to libinput's expected range [-1.0, 1.0]
+    let clamped_speed = speed.clamp(-1.0, 1.0);
+
+    device.config_accel_set_speed(clamped_speed)
+        .map_err(|e| InputError::InternalError(format!("Failed to set accel speed for {}: {:?}", device_identifier.name, e)))?;
+    tracing::info!("Acceleration speed for device '{}' set to {}.", device_identifier.name, clamped_speed);
+    Ok(())
 }

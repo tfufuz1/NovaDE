@@ -19,9 +19,11 @@ use smithay::{
     input::{SeatHandler, SeatState, pointer::CursorImageStatus, keyboard::KeyboardHandle, touch::TouchHandle, TouchSlot}, // Use SeatHandler directly, added TouchHandle and TouchSlot
     utils::{Point, Size, Rectangle, Logical, Physical, Serial, Transform, Clock}, // Added Clock
 };
-use std::{time::Duration, collections::HashMap, sync::{Arc, Mutex, Weak}}; // Mutex is already here
+use std::{time::Duration, collections::HashMap, sync::{Arc, Mutex, Weak}, env}; // Mutex is already here, Added env
 // Ensure wl_surface is specifically available if not covered by wildcard
 use smithay::reexports::wayland_server::protocol::wl_surface;
+use smithay::wayland::cursor::{CursorTheme, load_theme}; // ADDED for themed cursors
+use smithay::wayland::compositor::CompositorToken; // For create_surface
 use uuid::Uuid;
 use crate::{
     compositor::{
@@ -86,6 +88,11 @@ pub struct DesktopState {
     // pub touch_focus_data: TouchFocusData, // REMOVED
     pub active_touch_targets: HashMap<TouchSlot, Weak<wl_surface::WlSurface>>, // Per-slot touch targets
 
+    // --- Cursor Theming State ---
+    pub loaded_theme: Arc<CursorTheme>,
+    pub cursor_surface: wl_surface::WlSurface, // Dedicated surface for compositor-drawn cursors
+    pub pointer_hotspot: Point<i32, Logical>, // Hotspot for the compositor-drawn cursor
+
     // --- Output Related State ---
     pub output_manager_state: OutputManagerState, // Smithay's manager for output Wayland objects
     pub output_manager: Arc<Mutex<OutputManager>>, // Our manager for OutputDevice instances
@@ -112,6 +119,28 @@ impl DesktopState {
         // The wl_seat global is created later via seat_state.new_wl_seat().
         let mut seat = Seat::new(&display_handle, seat_name.clone(), None); // Logger can be added
         let clock = Clock::new(None); // ADDED/UNCOMMENTED initialization, using None for span for now
+        
+        let mut compositor_state = CompositorState::new();
+        let shm_state = ShmState::new(vec![], None); // Assuming tracing::Span::current() would be passed if enabled for ShmState
+
+        // Initialize Cursor Theme and Surface
+        let theme_name = env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".to_string());
+        let theme_size = env::var("XCURSOR_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(24);
+        
+        let loaded_theme = Arc::new(load_theme(
+            Some(&theme_name),
+            theme_size,
+            shm_state.wl_shm()
+        ));
+
+        let cursor_surface = compositor_state.create_surface_with_data(
+            &display_handle,
+            smithay::wayland::compositor::SurfaceAttributes::default(),
+            (), // No specific user data for the cursor surface itself initially
+        );
+        // It's good practice to set an input region for the cursor surface if it's to be interactive,
+        // but for a simple display cursor, it might not be strictly necessary.
+        // For now, we'll assume it's just for display.
 
         // Store SeatState in the seat's user data if SeatState itself needs to be accessed via Seat later.
         // Or, more commonly, SeatState is owned by DesktopState directly.
@@ -123,8 +152,8 @@ impl DesktopState {
             loop_handle,
             loop_signal,
             clock, // ADDED/UNCOMMENTED
-            compositor_state: CompositorState::new(),
-            shm_state: ShmState::new(Vec::new(), None),
+            compositor_state, // Initialized above
+            shm_state,       // Initialized above
             xdg_shell_state: XdgShellState::new(&display_handle, PopupManager::new(None), None),
             xdg_activation_state: XdgActivationState::new(&display_handle, seat.clone(), None), // XdgActivationState needs the Seat
             space: Space::new(None),
@@ -142,6 +171,10 @@ impl DesktopState {
             active_input_surface: None,
             // touch_focus_data: TouchFocusData::default(), // REMOVED
             active_touch_targets: HashMap::new(), // Initialize new field
+            
+            loaded_theme, // ADDED
+            cursor_surface, // ADDED
+            pointer_hotspot: (0,0).into(), // ADDED initialization
 
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle), // Initialize with XDG support
             output_manager: Arc::new(Mutex::new(OutputManager::new())),
@@ -167,38 +200,83 @@ impl SeatHandler for DesktopState {
             new_focus_surface_id = ?focused.map(|s| s.id()),
             "SeatHandler::focus_changed (keyboard) triggered by Smithay."
         );
-
-        // This method is called when Smithay's KeyboardHandle::set_focus changes the focus.
-        // Its primary role here is to update any internal compositor state that depends on the keyboard focus.
-        // For example, if we have a specific field in DesktopState to track the focused window's domain ID.
-
         let new_focused_wl_surface_weak = focused.map(|s| s.downgrade());
         self.active_input_surface = new_focused_wl_surface_weak;
-
-        // Example of notifying a domain service (conceptual, actual call might differ)
-        // if let Some(surface) = focused {
-        //     if let Some(window) = self.space.window_for_surface(surface, WindowSurfaceType::TOPLEVEL) {
-        //         let domain_id = window.user_data().get::<crate::compositor::xdg_shell::types::DomainWindowIdentifierWrapper>().map(|w| w.0.clone());
-        //         if let Some(id) = domain_id {
-        //             tracing::info!("Keyboard focus changed to domain window: {:?}", id);
-        //             // self.workspace_manager_service.notify_keyboard_focus_changed(Some(id)); // Assuming async call handled elsewhere or made sync
-        //         }
-        //     }
-        // } else {
-        //     tracing::info!("Keyboard focus lost.");
-        //     // self.workspace_manager_service.notify_keyboard_focus_changed(None);
-        // }
-        
-        // The actual wl_keyboard.enter/leave events are sent by Smithay's KeyboardHandle.
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
-        // tracing::trace!(seat_name = %seat.name(), status = ?image, "SeatHandler::cursor_image request received.");
-        // The cursor image status is stored in DesktopState and read by the renderer.
-        // The renderer also needs the pointer_location from DesktopState.
-        *self.current_cursor_status.lock().unwrap() = image;
-        // No direct action needed here other than updating the state.
-        // The renderer will pick this up in its drawing cycle.
+        let mut current_status_guard = self.current_cursor_status.lock().unwrap();
+        
+        match image {
+            CursorImageStatus::Named(name) => {
+                if let Some(cursor_image_buffer) = self.loaded_theme.get_cursor(&name) {
+                    self.cursor_surface.attach(Some(cursor_image_buffer.buffer()), 0, 0);
+                    if self.cursor_surface.send_pending_events().is_ok() { // Check if surface is alive
+                        self.cursor_surface.damage_buffer(0, 0, cursor_image_buffer.width() as i32, cursor_image_buffer.height() as i32);
+                        self.cursor_surface.commit();
+                        self.pointer_hotspot = (cursor_image_buffer.hotspot_x() as i32, cursor_image_buffer.hotspot_y() as i32).into();
+                        *current_status_guard = CursorImageStatus::Surface(self.cursor_surface.clone());
+                        tracing::debug!("Cursor set to themed: '{}'", name);
+                    } else {
+                        *current_status_guard = CursorImageStatus::Default; // Fallback if surface is dead
+                        tracing::warn!("Failed to set themed cursor '{}': cursor_surface is not alive.", name);
+                    }
+                } else {
+                    tracing::warn!("Cursor name '{}' not found in theme, using default.", name);
+                    // Try to load "left_ptr" as a fallback default
+                    if let Some(default_cursor_buffer) = self.loaded_theme.get_cursor("left_ptr")
+                        .or_else(|| self.loaded_theme.cursors().get(0).cloned()) // Absolute fallback
+                    {
+                        self.cursor_surface.attach(Some(default_cursor_buffer.buffer()), 0, 0);
+                        if self.cursor_surface.send_pending_events().is_ok() {
+                             self.cursor_surface.damage_buffer(0, 0, default_cursor_buffer.width() as i32, default_cursor_buffer.height() as i32);
+                             self.cursor_surface.commit();
+                             self.pointer_hotspot = (default_cursor_buffer.hotspot_x() as i32, default_cursor_buffer.hotspot_y() as i32).into();
+                            *current_status_guard = CursorImageStatus::Surface(self.cursor_surface.clone());
+                             tracing::debug!("Cursor set to fallback default theme cursor ('left_ptr' or first available).");
+                        } else {
+                            *current_status_guard = CursorImageStatus::Hidden; // Fallback if surface is dead
+                            tracing::warn!("Failed to set fallback themed cursor: cursor_surface is not alive.");
+                        }
+                    } else {
+                        *current_status_guard = CursorImageStatus::Hidden; // Ultimate fallback
+                        tracing::error!("Could not load any default cursor from the theme.");
+                    }
+                }
+            }
+            CursorImageStatus::Surface(surface) => {
+                // Client provides the surface. Renderer handles hotspot based on client data.
+                *current_status_guard = CursorImageStatus::Surface(surface);
+                 tracing::debug!("Cursor set to client-provided surface.");
+            }
+            CursorImageStatus::Hidden => {
+                *current_status_guard = CursorImageStatus::Hidden;
+                tracing::debug!("Cursor set to hidden.");
+            }
+            CursorImageStatus::Default => {
+                // This case might be hit if Smithay itself decides to revert to default.
+                // Similar to Named("default") or a specific default cursor like "left_ptr"
+                if let Some(cursor_image_buffer) = self.loaded_theme.get_cursor("left_ptr")
+                    .or_else(|| self.loaded_theme.get_cursor("default"))
+                    .or_else(|| self.loaded_theme.cursors().get(0).cloned())
+                {
+                    self.cursor_surface.attach(Some(cursor_image_buffer.buffer()), 0, 0);
+                     if self.cursor_surface.send_pending_events().is_ok() {
+                        self.cursor_surface.damage_buffer(0, 0, cursor_image_buffer.width() as i32, cursor_image_buffer.height() as i32);
+                        self.cursor_surface.commit();
+                        self.pointer_hotspot = (cursor_image_buffer.hotspot_x() as i32, cursor_image_buffer.hotspot_y() as i32).into();
+                        *current_status_guard = CursorImageStatus::Surface(self.cursor_surface.clone());
+                        tracing::debug!("Cursor set to default theme cursor (via Default status).");
+                    } else {
+                        *current_status_guard = CursorImageStatus::Hidden; // Fallback if surface is dead
+                         tracing::warn!("Failed to set default themed cursor (via Default status): cursor_surface is not alive.");
+                    }
+                } else {
+                    *current_status_guard = CursorImageStatus::Hidden; // Ultimate fallback
+                    tracing::error!("Could not load any default cursor from the theme (via Default status).");
+                }
+            }
+        }
     }
 }
 smithay::delegate_seat_handler!(DesktopState); // Ensures DesktopState delegates SeatHandler calls correctly

@@ -36,38 +36,51 @@ pub fn find_surface_and_coords_at_global_point(
             continue;
         }
 
-        if let Some(surface) = window.wl_surface() {
-            let surface_local_pos = global_pos - window_loc.to_f64();
-            let mut found_in_input_region = false;
-            with_states(&surface, |states| {
+        // Calculate position relative to the window's origin
+        let point_relative_to_window_origin = global_pos - window_loc.to_f64();
+
+        // Use Window::surface_under() to find the most specific surface (main, subsurface, or popup).
+        // WindowSurfaceType::ALL ensures we check all types.
+        if let Some((target_surface, location_on_target_surface)) = 
+            window.surface_under(point_relative_to_window_origin, WindowSurfaceType::ALL)
+        {
+            // Now, verify input region for this specific target_surface.
+            // The location_on_target_surface is already relative to this target_surface.
+            let mut is_within_input_region = false;
+            with_states(&target_surface, |states| {
+                // Check if the surface has specific SurfaceData with an input region.
                 if let Some(surface_data_arc) = states.data_map.get::<Arc<std::sync::Mutex<SurfaceData>>>() {
                     let surface_data_guard = surface_data_arc.lock().unwrap();
-                    if let Some(input_region_surface_local) = &surface_data_guard.input_region_surface_local {
-                        if input_region_surface_local.contains(surface_local_pos.to_i32_round()) {
-                            found_in_input_region = true;
+                    if let Some(input_region_local_to_target) = &surface_data_guard.input_region_surface_local {
+                        // location_on_target_surface is Point<f64, Logical>
+                        // input_region_local_to_target is Region<Logical> which typically stores i32.
+                        if input_region_local_to_target.contains(location_on_target_surface.to_i32_round()) {
+                            is_within_input_region = true;
                         }
+                        // If input_region is Some but doesn't contain the point, is_within_input_region remains false.
                     } else {
-                        let surface_bounds = Rectangle::from_loc_and_size(Point::from((0,0)), window_geom.size);
-                        if surface_bounds.to_f64().contains(surface_local_pos){
-                            found_in_input_region = true;
-                        }
+                        // No specific input region defined in SurfaceData, so the entire surface is considered.
+                        is_within_input_region = true;
                     }
                 } else {
-                    let surface_attributes = states.cached_state.current::<smithay::wayland::compositor::SurfaceAttributes>();
-                    let surface_size = surface_attributes.buffer_dimensions.map(|dims| dims.to_logical(surface_attributes.buffer_scale, surface_attributes.buffer_transform)).unwrap_or(window_geom.size);
-                    let surface_bounds = Rectangle::from_loc_and_size(Point::from((0,0)), surface_size);
-                     if surface_bounds.to_f64().contains(surface_local_pos){
-                        found_in_input_region = true;
-                    }
+                    // No custom SurfaceData found, assume the entire surface accepts input.
+                    // This is a fallback; ideally, all relevant surfaces would have SurfaceData.
+                    is_within_input_region = true;
                 }
             });
 
-            if found_in_input_region {
-                return (Some(surface.clone()), surface_local_pos);
+            if is_within_input_region {
+                return (Some(target_surface.clone()), location_on_target_surface);
             }
+            // If not within the input region of the specific surface found by surface_under,
+            // we don't return this surface and let the loop continue to check other windows below.
+            // This implements click-through for areas outside a surface's defined input region.
         }
+        // If surface_under returned None but we are within the window's bounding box,
+        // it means the point is on the window's "decorations" or an area not covered by any wl_surface.
+        // In this case, we also don't return a surface and let the loop continue.
     }
-    (None, global_pos)
+    (None, global_pos) // No suitable surface found among all windows.
 }
 
 pub fn handle_pointer_motion_event(
