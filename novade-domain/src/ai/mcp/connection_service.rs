@@ -1,6 +1,11 @@
-use crate::ai_interaction_service::{
-    MCPServerConfig, ClientCapabilities, MCPClientInstance, StdioTransportHandler, IMCPTransport, MCPError,
-};
+use super::types::{MCPServerConfig, ClientCapabilities, MCPError}; // Use super for types within the same mcp module
+use super::client_instance::MCPClientInstance; // Use super for client_instance
+use super::transport::StdioTransportHandler; // Use super for transport
+// IMCPTransport is also from super::transport, but often traits are imported directly if re-exported by mod.rs
+// Let's assume mcp/mod.rs re-exports IMCPTransport directly from transport.
+// If not, it would be super::transport::IMCPTransport.
+// Checking mcp/mod.rs: `pub use transport::{IMCPTransport, StdioTransportHandler};` - so `super::IMCPTransport` is fine.
+use super::IMCPTransport;
 use novade_system::mcp_client_service::IMCPClientService as SystemIMCPClientService; // For spawning processes
 use std::collections::HashMap;
 use std::sync::Arc;

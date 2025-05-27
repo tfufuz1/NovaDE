@@ -1,5 +1,5 @@
-use crate::ai_interaction_service::types::{
-    AIDataCategory, AIConsentStatus, AIInteractionError, AIConsent, // Added AIConsent
+use super::types::{ // Updated path
+    AIDataCategory, AIConsentStatus, AIInteractionError, AIConsent,
 };
 use async_trait::async_trait;
 use std::collections::HashMap; // For potential future use (e.g., storing consents)
