@@ -51,7 +51,14 @@ pub use global_settings_management::{
     LidCloseAction,
     WorkspaceSwitchingBehavior,
 };
-pub use ai::{ConsentManager, AIInteractionService, DefaultConsentManager, DefaultAIInteractionService};
+// Updated re-exports for the AI module to reflect new structure
+pub use ai::{
+    AIInteractionLogicService, DefaultAIInteractionLogicService, // Core logic service
+    MCPConnectionService, MCPConsentManager, // Key MCP services from ai::mcp
+    MCPServerConfig, ClientCapabilities, ServerInfo, ServerCapabilities, // Common MCP types from ai::mcp::types
+    AIInteractionContext, AIModelProfile, AIDataCategory, AIConsentStatus, AIConsent, AttachmentData, AIInteractionError, // AI specific types from ai::mcp::types
+    IMCPTransport // Transport trait from ai::mcp::transport
+};
 pub use notification::{NotificationManager, DefaultNotificationManager, NotificationCategory, NotificationUrgency};
 pub use window_management::{WindowPolicyManager, DefaultWindowPolicyManager, WindowAction, WindowType, WindowState};
 pub use power_management::{PowerManagementService, DefaultPowerManagementService, PowerState, BatteryState, BatteryInfo};
@@ -67,8 +74,12 @@ pub use power_management::{PowerManagementService, DefaultPowerManagementService
 pub async fn initialize() -> Result<(
     std::sync::Arc<DefaultWorkspaceService>,
     std::sync::Arc<DefaultThemeManager>,
-    std::sync::Arc<DefaultConsentManager>,
-    std::sync::Arc<DefaultAIInteractionService>,
+    // std::sync::Arc<DefaultConsentManager>, // Old
+    // std::sync::Arc<DefaultAIInteractionService>, // Old
+    // Replace with new AI services. DefaultAIInteractionLogicService now depends on MCPConsentManager and MCPConnectionService.
+    // MCPConsentManager is simple. MCPConnectionService needs SystemIMCPClientService.
+    std::sync::Arc<ai::MCPConsentManager>, // New
+    std::sync::Arc<ai::DefaultAIInteractionLogicService>, // New
     std::sync::Arc<DefaultNotificationManager>,
     std::sync::Arc<DefaultWindowPolicyManager>,
     std::sync::Arc<DefaultPowerManagementService>,
@@ -81,11 +92,28 @@ pub async fn initialize() -> Result<(
     // Initialize theme manager
     let theme_manager = Arc::new(DefaultThemeManager::new()?);
     
-    // Initialize consent manager
-    let consent_manager = Arc::new(DefaultConsentManager::new());
+    // Initialize new AI services
+    // MCPConsentManager is straightforward.
+    let mcp_consent_manager = Arc::new(ai::MCPConsentManager::new());
+
+    // MCPConnectionService needs a SystemIMCPClientService.
+    // Assuming novade_system::mcp_client_service::DefaultMCPClientService is available
+    // and can be instantiated here. This implies novade-system is a dependency.
+    let system_mcp_service = Arc::new(novade_system::mcp_client_service::DefaultMCPClientService::new());
     
-    // Initialize AI interaction service
-    let ai_service = Arc::new(DefaultAIInteractionService::new());
+    // Default client capabilities for MCPConnectionService
+    let default_client_capabilities = ai::ClientCapabilities { supports_streaming: false }; // Example
+    
+    let mcp_connection_service = Arc::new(ai::MCPConnectionService::new(
+        default_client_capabilities,
+        system_mcp_service,
+    ));
+    
+    // DefaultAIInteractionLogicService now takes MCPConnectionService and MCPConsentManager
+    let ai_logic_service = Arc::new(ai::DefaultAIInteractionLogicService::new(
+        mcp_connection_service,
+        mcp_consent_manager.clone(), // Clone the Arc for MCPConsentManager
+    ));
     
     // Initialize notification manager
     let notification_manager = Arc::new(DefaultNotificationManager::new());
@@ -99,8 +127,8 @@ pub async fn initialize() -> Result<(
     Ok((
         workspace_service,
         theme_manager,
-        consent_manager,
-        ai_service,
+        mcp_consent_manager, // Return the new MCPConsentManager instance
+        ai_logic_service,    // Return the new DefaultAIInteractionLogicService instance
         notification_manager,
         window_policy_manager,
         power_management_service,

@@ -1,16 +1,24 @@
 #![cfg(test)]
 
-use crate::ai_interaction_service::{
-    client_instance::MCPClientInstance, // Used by MCPConnectionService
-    connection_service::MCPConnectionService,
-    consent_manager::MCPConsentManager,
-    logic_service::{AIInteractionLogicService, DefaultAIInteractionLogicService},
-    // StdioTransportHandler is used internally by MCPConnectionService when creating MCPClientInstance
-    types::{
-        AIDataCategory, AIConsent, AIConsentStatus, AIInteractionError, MCPServerConfig,
-        ClientCapabilities, ConnectionStatus, // For assertions
-    },
+// logic_service_tests.rs is in novade-domain/src/ai/
+// It tests AIInteractionLogicService and DefaultAIInteractionLogicService from super (ai/logic_service.rs)
+use super::logic_service::{AIInteractionLogicService, DefaultAIInteractionLogicService};
+
+// Items from the mcp submodule (novade-domain/src/ai/mcp/) are accessed via crate::ai::mcp::
+// or via re-exports from crate::ai (if ai/mod.rs re-exports them)
+use crate::ai::{ // These are re-exported by novade-domain/src/ai/mod.rs
+    MCPConnectionService,
+    MCPConsentManager,
+    MCPServerConfig,
+    ClientCapabilities,
+    ConnectionStatus, // For assertions
+    AIDataCategory, AIConsent, AIConsentStatus, AIInteractionError,
+    // MCPClientInstance is also re-exported by ai/mod.rs but might not be directly used here
+    // if MCPConnectionService abstracts it away.
 };
+// StdioTransportHandler and specific JSON-RPC types are not directly used in these tests,
+// as they are abstracted by MCPConnectionService and DefaultAIInteractionLogicService.
+// MCPClientInstance is used by MCPConnectionService, but tests here interact with LogicService.
 // Use the mock that spawns the real mcp-echo-server
 use novade_system::mcp_client_service::{
     IMCPClientService as SystemIMCPClientService, // Alias to avoid name clash

@@ -1,4 +1,4 @@
-use crate::ai_interaction_service::types::{JsonRpcRequest, JsonRpcResponse, MCPError};
+use crate::ai::mcp::types::{JsonRpcRequest, JsonRpcResponse, MCPError}; // Updated path
 use novade_system::mcp_client_service::StdioProcess; // From novade-system
 use async_trait::async_trait;
 use serde_json::Value;

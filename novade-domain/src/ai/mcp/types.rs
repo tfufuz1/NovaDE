@@ -233,6 +233,7 @@ mod tests {
         let original = ServerInfo {
             name: "TestServer".to_string(),
             version: "1.0.0".to_string(),
+            protocol_version: Some("1.0".to_string()), // Corrected test data
         };
         let json_string = serde_json::to_string(&original).unwrap();
         let deserialized: ServerInfo = serde_json::from_str(&json_string).unwrap();
@@ -393,7 +394,7 @@ mod tests {
         let original = AIModelProfile {
             model_id: "model-123".to_string(),
             server_id: "server-abc".to_string(),
-            server_info: ServerInfo { name: "AI Server".to_string(), version: "v2".to_string() },
+            server_info: ServerInfo { name: "AI Server".to_string(), version: "v2".to_string(), protocol_version: Some("2.0".to_string()) }, // Corrected test data
             mcp_server_config: MCPServerConfig { host: "mcp.example.com".to_string(), port: 9000 },
             name: "Super Model".to_string(),
             description: Some("The best model ever.".to_string()),
