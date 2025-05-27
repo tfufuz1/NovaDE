@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use crate::window_management_policy::types::{
+    TilingMode, NewWindowPlacementStrategy, GapSettings, WindowSnappingPolicy, FocusPolicy, WindowGroupingPolicy
+};
 
 // --- Enums ---
 
@@ -165,6 +168,41 @@ pub struct GlobalDesktopSettings {
     pub application_settings: HashMap<String, ApplicationSettingGroup>,
     // pub notifications: NotificationSettings, // Example for future extension
     // pub privacy: PrivacySettings,           // Example for future extension
+    pub window_management: WindowManagementSettings, // Added
+}
+
+// --- Window Management Settings ---
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowManagementSettings {
+    pub tiling_mode: TilingMode,
+    pub placement_strategy: NewWindowPlacementStrategy,
+    pub gaps: GapSettings,
+    pub snapping: WindowSnappingPolicy,
+    pub focus: FocusPolicy,
+    pub grouping: WindowGroupingPolicy,
+}
+
+impl Default for WindowManagementSettings {
+    fn default() -> Self {
+        Self {
+            tiling_mode: TilingMode::default(),
+            placement_strategy: NewWindowPlacementStrategy::default(),
+            gaps: GapSettings::default(),
+            snapping: WindowSnappingPolicy::default(),
+            focus: FocusPolicy::default(),
+            grouping: WindowGroupingPolicy::default(),
+        }
+    }
+}
+
+impl WindowManagementSettings {
+    pub fn validate(&self) -> Result<(), String> {
+        self.gaps.validate().map_err(|e| format!("Gaps: {}", e))?;
+        self.snapping.validate().map_err(|e| format!("Snapping: {}", e))?;
+        // Add validation for other fields if necessary in the future
+        Ok(())
+    }
 }
 
 // --- Validation Methods ---
@@ -339,6 +377,7 @@ impl GlobalDesktopSettings {
         self.input_behavior.validate().map_err(|e| format!("Input behavior settings: {}", e))?;
         self.power_management_policy.validate().map_err(|e| format!("Power management policy settings: {}", e))?;
         self.default_applications.validate().map_err(|e| format!("Default applications settings: {}", e))?;
+        self.window_management.validate().map_err(|e| format!("Window management settings: {}", e))?;
         for (app_id, app_setting_group) in &self.application_settings {
             app_setting_group.validate().map_err(|e| format!("Application settings for '{}': {}", app_id, e))?;
         }

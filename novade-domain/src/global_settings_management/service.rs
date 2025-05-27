@@ -12,6 +12,7 @@ use super::persistence_iface::SettingsPersistenceProvider;
 use super::paths::{
     SettingPath, ApplicationSettingPath, AppearanceSettingPath, FontSettingPath, WorkspaceSettingPath,
     InputBehaviorSettingPath, PowerManagementPolicySettingPath, DefaultApplicationsSettingPath,
+    WindowManagementSettingPath, // Added
 };
 
 
@@ -254,7 +255,24 @@ fn update_field_in_settings(
             app_settings_group
                 .settings
                 .insert(app_path.key.clone(), value);
-        } // Add future top-level categories here
+        }
+        SettingPath::WindowManagement(wm_path) => match wm_path {
+            WindowManagementSettingPath::TilingMode => settings.window_management.tiling_mode = deserialize_field(path, value)?,
+            WindowManagementSettingPath::PlacementStrategy => settings.window_management.placement_strategy = deserialize_field(path, value)?,
+            WindowManagementSettingPath::GapsScreenOuterHorizontal => settings.window_management.gaps.screen_outer_horizontal = deserialize_field(path, value)?,
+            WindowManagementSettingPath::GapsScreenOuterVertical => settings.window_management.gaps.screen_outer_vertical = deserialize_field(path, value)?,
+            WindowManagementSettingPath::GapsWindowInner => settings.window_management.gaps.window_inner = deserialize_field(path, value)?,
+            WindowManagementSettingPath::SnappingSnapToScreenEdges => settings.window_management.snapping.snap_to_screen_edges = deserialize_field(path, value)?,
+            WindowManagementSettingPath::SnappingSnapToOtherWindows => settings.window_management.snapping.snap_to_other_windows = deserialize_field(path, value)?,
+            WindowManagementSettingPath::SnappingSnapToWorkspaceGaps => settings.window_management.snapping.snap_to_workspace_gaps = deserialize_field(path, value)?,
+            WindowManagementSettingPath::SnappingSnapDistancePx => settings.window_management.snapping.snap_distance_px = deserialize_field(path, value)?,
+            WindowManagementSettingPath::FocusFocusFollowsMouse => settings.window_management.focus.focus_follows_mouse = deserialize_field(path, value)?,
+            WindowManagementSettingPath::FocusClickToFocus => settings.window_management.focus.click_to_focus = deserialize_field(path, value)?,
+            WindowManagementSettingPath::FocusNewWindowsOnCreation => settings.window_management.focus.focus_new_windows_on_creation = deserialize_field(path, value)?,
+            WindowManagementSettingPath::FocusNewWindowsOnWorkspaceSwitch => settings.window_management.focus.focus_new_windows_on_workspace_switch = deserialize_field(path, value)?,
+            WindowManagementSettingPath::FocusFocusStealingPrevention => settings.window_management.focus.focus_stealing_prevention = deserialize_field(path, value)?,
+            WindowManagementSettingPath::GroupingEnableManualGrouping => settings.window_management.grouping.enable_manual_grouping = deserialize_field(path, value)?,
+        },
     }
     Ok(())
 }
@@ -333,6 +351,23 @@ fn get_field_from_settings(
             // However, the error types are compatible.
             // For direct JsonValue, no further serde_json::to_value is needed.
         }
+        SettingPath::WindowManagement(wm_path) => match wm_path {
+            WindowManagementSettingPath::TilingMode => serde_json::to_value(&settings.window_management.tiling_mode),
+            WindowManagementSettingPath::PlacementStrategy => serde_json::to_value(&settings.window_management.placement_strategy),
+            WindowManagementSettingPath::GapsScreenOuterHorizontal => serde_json::to_value(&settings.window_management.gaps.screen_outer_horizontal),
+            WindowManagementSettingPath::GapsScreenOuterVertical => serde_json::to_value(&settings.window_management.gaps.screen_outer_vertical),
+            WindowManagementSettingPath::GapsWindowInner => serde_json::to_value(&settings.window_management.gaps.window_inner),
+            WindowManagementSettingPath::SnappingSnapToScreenEdges => serde_json::to_value(&settings.window_management.snapping.snap_to_screen_edges),
+            WindowManagementSettingPath::SnappingSnapToOtherWindows => serde_json::to_value(&settings.window_management.snapping.snap_to_other_windows),
+            WindowManagementSettingPath::SnappingSnapToWorkspaceGaps => serde_json::to_value(&settings.window_management.snapping.snap_to_workspace_gaps),
+            WindowManagementSettingPath::SnappingSnapDistancePx => serde_json::to_value(&settings.window_management.snapping.snap_distance_px),
+            WindowManagementSettingPath::FocusFocusFollowsMouse => serde_json::to_value(&settings.window_management.focus.focus_follows_mouse),
+            WindowManagementSettingPath::FocusClickToFocus => serde_json::to_value(&settings.window_management.focus.click_to_focus),
+            WindowManagementSettingPath::FocusNewWindowsOnCreation => serde_json::to_value(&settings.window_management.focus.focus_new_windows_on_creation),
+            WindowManagementSettingPath::FocusNewWindowsOnWorkspaceSwitch => serde_json::to_value(&settings.window_management.focus.focus_new_windows_on_workspace_switch),
+            WindowManagementSettingPath::FocusFocusStealingPrevention => serde_json::to_value(&settings.window_management.focus.focus_stealing_prevention),
+            WindowManagementSettingPath::GroupingEnableManualGrouping => serde_json::to_value(&settings.window_management.grouping.enable_manual_grouping),
+        },
     };
     value.map_err(|e| GlobalSettingsError::serialization_error(Some(path.to_string()), e))
 }

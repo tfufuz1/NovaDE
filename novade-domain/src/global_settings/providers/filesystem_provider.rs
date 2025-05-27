@@ -122,22 +122,35 @@ mod tests {
     use crate::global_settings::providers::filesystem_provider::core_error_mock::CoreErrorType as MockCoreErrorType; // Use the mock
 
 
+    use crate::window_management_policy::types::{WindowManagementSettings, TilingMode, GapSettings, NewWindowPlacementStrategy, FocusPolicy, WindowSnappingPolicy, FocusStealingPreventionLevel, WindowGroupingPolicy}; // Added for tests
+
     // Mock ConfigServiceAsync
     #[derive(Default)]
     struct MockConfigService {
-        files: std::collections::HashMap<String, String>,
+        files: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, String>>>, // Made thread-safe for async access
         force_read_error: Option<MockCoreError>,
         force_write_error: Option<MockCoreError>,
     }
 
     impl MockConfigService {
         fn new() -> Self {
-            Self::default()
+            Self {
+                files: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+                force_read_error: None,
+                force_write_error: None,
+            }
         }
 
         #[allow(dead_code)] // Used in tests
-        fn set_file_content(&mut self, key: &str, content: String) {
-            self.files.insert(key.to_string(), content);
+        async fn set_file_content(&self, key: &str, content: String) {
+            let mut files_guard = self.files.write().await;
+            files_guard.insert(key.to_string(), content);
+        }
+        
+        #[allow(dead_code)] // Used in tests
+        async fn get_file_content(&self, key: &str) -> Option<String> {
+            let files_guard = self.files.read().await;
+            files_guard.get(key).cloned()
         }
         
         #[allow(dead_code)] // Used in tests
@@ -157,7 +170,8 @@ mod tests {
              if let Some(ref err) = self.force_read_error {
                 return Err(err.clone());
             }
-            self.files.get(key)
+            let files_guard = self.files.read().await;
+            files_guard.get(key)
                 .cloned()
                 .ok_or_else(|| MockCoreError::new(MockCoreErrorType::NotFound, format!("File not found: {}", key)))
         }
@@ -166,9 +180,9 @@ mod tests {
             if let Some(ref err) = self.force_write_error {
                 return Err(err.clone());
             }
-            // In a real mock, you might want to store this to check it was called.
-            // For simplicity, we're not using self.files here for write.
-            println!("MockConfigService: write_config_file_string called for key {} with content:\n{}", key, content);
+            let mut files_guard = self.files.write().await;
+            files_guard.insert(key.to_string(), content);
+            // println!("MockConfigService: write_config_file_string called for key {} with content:\n{}", key, content); // Optional: keep for debugging
             Ok(())
         }
         
@@ -212,26 +226,55 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_global_settings_success() {
-        let mut mock_service_inner = MockConfigService::new();
+        let mock_service_inner = MockConfigService::new(); // Corrected: not mutable
         let expected_settings = GlobalDesktopSettings {
             appearance: AppearanceSettings {
                 active_theme_name: "custom_theme".to_string(),
                 color_scheme: ColorScheme::Dark,
-                enable_animations: false,
+                ..Default::default() // Fill other appearance fields with defaults
             },
             input_behavior: InputBehaviorSettings {
                 mouse_sensitivity: 1.5,
                 natural_scrolling_touchpad: false,
+                ..Default::default() // Fill other input behavior fields
             },
+            window_management: WindowManagementSettings { // Added
+                tiling_mode: TilingMode::Spiral,
+                placement_strategy: NewWindowPlacementStrategy::Center,
+                gaps: GapSettings {
+                    screen_outer_horizontal: 10,
+                    screen_outer_vertical: 10,
+                    window_inner: 7,
+                },
+                snapping: WindowSnappingPolicy {
+                    snap_to_screen_edges: false,
+                    snap_distance_px: 15,
+                    ..Default::default()
+                },
+                focus: FocusPolicy {
+                    focus_follows_mouse: true,
+                    focus_stealing_prevention: FocusStealingPreventionLevel::Strict,
+                    ..Default::default()
+                },
+                grouping: WindowGroupingPolicy {
+                    enable_manual_grouping: false,
+                }
+            },
+            ..Default::default() // Fill other GlobalDesktopSettings fields
         };
         let toml_content = toml::to_string_pretty(&expected_settings).unwrap();
-        mock_service_inner.set_file_content("test_settings.toml", toml_content);
+        mock_service_inner.set_file_content("test_settings.toml", toml_content).await; // Corrected: await
         let mock_config_service = Arc::new(mock_service_inner);
 
         let provider = FilesystemSettingsProvider::new(mock_config_service, "test_settings.toml".to_string());
         
         let loaded_settings = provider.load_global_settings().await.unwrap();
-        assert_eq!(loaded_settings, expected_settings);
+        assert_eq!(loaded_settings.appearance.active_theme_name, expected_settings.appearance.active_theme_name);
+        assert_eq!(loaded_settings.input_behavior.mouse_sensitivity, expected_settings.input_behavior.mouse_sensitivity);
+        assert_eq!(loaded_settings.window_management.tiling_mode, TilingMode::Spiral);
+        assert_eq!(loaded_settings.window_management.gaps.window_inner, 7);
+        assert_eq!(loaded_settings.window_management.focus.focus_follows_mouse, true);
+        assert_eq!(loaded_settings, expected_settings); // Also check full equality
     }
 
     #[tokio::test]
@@ -251,13 +294,34 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_global_settings_success() {
-        let mock_config_service = Arc::new(MockConfigService::new()); // Writes are just printed in mock
-        let provider = FilesystemSettingsProvider::new(mock_config_service, "test_settings.toml".to_string());
-        let settings_to_save = GlobalDesktopSettings::default();
+        let mock_config_service_inner = MockConfigService::new(); // Corrected
+        let mock_config_service = Arc::new(mock_config_service_inner);
+        let provider = FilesystemSettingsProvider::new(mock_config_service.clone(), "test_settings.toml".to_string()); // Clone Arc for provider
+        
+        let settings_to_save = GlobalDesktopSettings {
+             appearance: AppearanceSettings {
+                active_theme_name: "saved_theme".to_string(),
+                ..Default::default()
+            },
+            window_management: WindowManagementSettings {
+                tiling_mode: TilingMode::MaximizedFocused,
+                gaps: GapSettings { window_inner: 3, ..Default::default() },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         
         let result = provider.save_global_settings(&settings_to_save).await;
         assert!(result.is_ok());
-        // In a more complex mock, you'd check that MockConfigService received the correct content.
+
+        // Retrieve the content written to the mock and verify it
+        let written_toml = mock_config_service.get_file_content("test_settings.toml").await.expect("File was not written to mock");
+        let deserialized_settings: GlobalDesktopSettings = toml::from_str(&written_toml).expect("Failed to deserialize written TOML");
+        
+        assert_eq!(deserialized_settings.appearance.active_theme_name, "saved_theme");
+        assert_eq!(deserialized_settings.window_management.tiling_mode, TilingMode::MaximizedFocused);
+        assert_eq!(deserialized_settings.window_management.gaps.window_inner, 3);
+        assert_eq!(deserialized_settings, settings_to_save);
     }
 
     #[tokio::test]
