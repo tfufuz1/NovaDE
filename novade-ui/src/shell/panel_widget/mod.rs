@@ -27,6 +27,9 @@ pub use quick_settings_panel::QuickSettingsPanelWidget; // Added for easier acce
 pub mod notification_center_panel; // Added NotificationCenterPanelWidget module
 pub use notification_center_panel::NotificationCenterPanelWidget; // Added for easier access
 
+pub mod network_management_widget;
+pub use network_management_widget::NetworkManagementWidget;
+
 mod imp;
 
 glib::wrapper! {
