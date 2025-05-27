@@ -9,5 +9,7 @@ pub use panel_widget::clock_datetime_widget;
 pub mod active_window_service;
 pub use active_window_service::ActiveWindowService;
 
-pub mod shell_workspace_service;
-pub use shell_workspace_service::ShellWorkspaceService;
+// pub mod shell_workspace_service; // Old name
+// pub use shell_workspace_service::ShellWorkspaceService; // Old name
+pub mod domain_workspace_connector; // New name
+pub use domain_workspace_connector::DomainWorkspaceConnector; // New name

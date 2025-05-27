@@ -2,10 +2,18 @@ use gtk::glib;
 use gtk::subclass::prelude::*;
 use gtk::{Button, CompositeTemplate};
 
+use gtk::glib;
+use gtk::subclass::prelude::*;
+use gtk::{Button, CompositeTemplate, Popover, prelude::*}; // Added Popover and prelude
+use std::cell::RefCell;
+// Assuming NotificationCenterPanelWidget is in a sibling module `notification_center_panel`
+use super::notification_center_panel::NotificationCenterPanelWidget;
+
+
 #[derive(CompositeTemplate, Default)]
-#[template(string = "")] // No template for now, as it's a simple button
+#[template(string = "")] 
 pub struct NotificationCenterButtonWidget {
-    // Struct can be empty for this stub
+    pub popover: RefCell<Option<Popover>>,
 }
 
 #[glib::object_subclass]
@@ -14,8 +22,13 @@ impl ObjectSubclass for NotificationCenterButtonWidget {
     type Type = super::NotificationCenterButtonWidget;
     type ParentType = gtk::Button;
 
+    fn new() -> Self { // Added new for initialization
+        Self {
+            popover: RefCell::new(None),
+        }
+    }
+
     fn class_init(klass: &mut Self::Class) {
-        // NotificationCenterButtonWidget::bind_template(klass); // No template for now
         klass.set_css_name("notificationcenterbuttonwidget");
     }
 
@@ -29,17 +42,33 @@ impl ObjectImpl for NotificationCenterButtonWidget {
         self.parent_constructed();
         let obj = self.obj();
 
-        obj.set_icon_name("notification-symbolic"); // Or "emblem-synchronizing-symbolic"
+        obj.set_icon_name("notification-symbolic"); 
         obj.set_tooltip_text(Some("Notifications"));
+
+        obj.connect_clicked(move |button_instance_ref| {
+            let imp = button_instance_ref.imp();
+            let mut popover_borrow = imp.popover.borrow_mut();
+
+            if let Some(popover) = popover_borrow.as_ref() {
+                if popover.is_visible() {
+                    popover.popdown();
+                } else {
+                    popover.popup();
+                }
+            } else {
+                let panel_content = NotificationCenterPanelWidget::new();
+                let new_popover = Popover::builder()
+                    .child(&panel_content)
+                    .autohide(true) 
+                    .has_arrow(true) 
+                    .build();
+                
+                new_popover.set_parent(button_instance_ref);
+                *popover_borrow = Some(new_popover.clone());
+                new_popover.popup();
+            }
+        });
     }
-
-    // No properties defined yet
-    // fn properties() -> &'static [glib::ParamSpec] { &[] }
-    // fn set_property(&self, _id: usize, _value: &glib::Value, _pspec: &glib::ParamSpec) { unimplemented!() }
-    // fn property(&self, _id: usize, _pspec: &glib::ParamSpec) -> glib::Value { unimplemented!() }
-
-    // No signals defined yet
-    // fn signals() -> &'static [Signal] { &[] }
 }
 
 impl WidgetImpl for NotificationCenterButtonWidget {}

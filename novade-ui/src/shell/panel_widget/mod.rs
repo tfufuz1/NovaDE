@@ -21,6 +21,12 @@ pub use quick_settings_button::QuickSettingsButtonWidget; // Added for easier ac
 pub mod notification_center_button; // Added NotificationCenterButtonWidget module
 pub use notification_center_button::NotificationCenterButtonWidget; // Added for easier access
 
+pub mod quick_settings_panel; // Added QuickSettingsPanelWidget module
+pub use quick_settings_panel::QuickSettingsPanelWidget; // Added for easier access
+
+pub mod notification_center_panel; // Added NotificationCenterPanelWidget module
+pub use notification_center_panel::NotificationCenterPanelWidget; // Added for easier access
+
 mod imp;
 
 glib::wrapper! {
