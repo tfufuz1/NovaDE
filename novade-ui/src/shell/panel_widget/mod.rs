@@ -15,6 +15,12 @@ pub use workspace_indicator_widget::WorkspaceIndicatorWidget; // Added for easie
 pub mod clock_datetime_widget;
 pub use clock_datetime_widget::ClockDateTimeWidget; // Added for easier access
 
+pub mod quick_settings_button; // Added QuickSettingsButtonWidget module
+pub use quick_settings_button::QuickSettingsButtonWidget; // Added for easier access
+
+pub mod notification_center_button; // Added NotificationCenterButtonWidget module
+pub use notification_center_button::NotificationCenterButtonWidget; // Added for easier access
+
 mod imp;
 
 glib::wrapper! {
