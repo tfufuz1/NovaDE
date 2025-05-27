@@ -36,6 +36,16 @@ pub use workspaces::{
     WorkspaceConfigError,
     WorkspaceConfigProvider,
     FilesystemConfigProvider, // Re-exporting the concrete provider for convenience
+    // assignment types
+    assign_window_to_workspace,
+    remove_window_from_workspace,
+    find_workspace_for_window,
+    WindowAssignmentError,
+    // manager types
+    WorkspaceManagerService,
+    DefaultWorkspaceManager,
+    WorkspaceManagerError,
+    WorkspaceEvent,
 };
 
 // Declare the theming module
@@ -91,6 +101,99 @@ pub use global_settings::{
     PowerManagementPolicySettings,
     LidCloseAction,
     DefaultApplicationsSettings,
+};
+
+// Declare the window_management_policy module
+pub mod window_management_policy;
+
+// Re-export main public types from the window_management_policy module
+pub use window_management_policy::{
+    TilingMode,
+    NewWindowPlacementStrategy,
+    GapSettings,
+    WindowSnappingPolicy,
+    WindowLayoutInfo,
+    WorkspaceWindowLayout,
+    WindowPolicyError,
+    WindowManagementPolicyService,
+    DefaultWindowManagementPolicyService,
+    // New types for Iteration 3
+    WindowPolicyOverrides,
+    FocusPolicy,
+    FocusStealingPreventionLevel,
+    WindowGroupingPolicy,
+};
+
+// Declare the user_centric_services module
+pub mod user_centric_services;
+
+// Re-export main public types from the user_centric_services module
+pub use user_centric_services::{
+    // ai_interaction types
+    AIDataCategory,
+    AIConsentStatus,
+    AIModelCapability,
+    AIModelProfile,
+    AIConsentScope,
+    AIConsent,
+    AIInteractionError,
+    AIConsentProvider,
+    AIModelProfileProvider,
+    AIInteractionLogicService,
+    DefaultAIInteractionLogicService,
+    // New concrete provider types if they are intended for direct use by consumers
+    // For now, assuming consumers primarily use the traits (AIConsentProvider, etc.)
+    // and the DefaultAIInteractionLogicService would be configured with concrete providers
+    // by the application setup layer, not necessarily needing direct crate-level re-export
+    // of FilesystemAIConsentProvider unless explicitly stated.
+    // The prompt for ai_interaction/mod.rs re-exports them, so let's include them here for consistency.
+    FilesystemAIConsentProvider,
+    FilesystemAIModelProfileProvider,
+    // New iteration 2 types for AI
+    AttachmentData,
+    InteractionParticipant,
+    InteractionHistoryEntry,
+    AIInteractionContext,
+    // events (AIInteractionEvent is already here, NotificationEvent and DismissReason are new)
+    AIInteractionEvent, // This enum now includes new variants
+    NotificationEvent, // New from user_centric_services::events
+    NotificationDismissReason, // New from user_centric_services::events
+    // notifications_core types
+    NotificationUrgency,
+    NotificationActionType,
+    NotificationAction,
+    NotificationInput,
+    Notification,
+    NotificationError,
+    NotificationService,
+    DefaultNotificationService,
+    NotificationHistoryProvider, 
+    FilesystemNotificationHistoryProvider, // Added in Iteration 3 for notifications_core
+};
+
+// Declare the notifications_rules module
+pub mod notifications_rules;
+
+// Re-export main public types from the notifications_rules module
+pub use notifications_rules::{
+    // types
+    RuleConditionValue,
+    RuleConditionOperator,
+    RuleConditionField,
+    SimpleRuleCondition,
+    RuleCondition,
+    RuleAction,
+    NotificationRule,
+    NotificationRuleSet,
+    // errors
+    NotificationRulesError,
+    // persistence_iface
+    NotificationRulesProvider,
+    FilesystemNotificationRulesProvider, // Added in Iteration 2 for notifications_rules
+    // engine
+    RuleProcessingResult,
+    NotificationRulesEngine,
+    DefaultNotificationRulesEngine,
 };
 
 
