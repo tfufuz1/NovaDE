@@ -7,8 +7,8 @@ mod tests {
     use tempfile::NamedTempFile; // For creating temporary files for testing
     use std::fs;
 
-    use novade_core::config::ConfigServiceAsync;
-    use novade_core::errors::CoreError; // Assuming CoreError is clonable for mock
+    use crate::ports::config_service::ConfigServiceAsync; // Corrected path
+    use novade_core::CoreError; // Corrected path
     // If CoreError is not Clone, the mock needs to handle it, e.g. by storing Arc<CoreError> or String.
     // For simplicity, assuming it's Clone or can be easily stringified for mock errors.
 
@@ -58,41 +58,42 @@ mod tests {
     }
 
     #[async_trait]
-    impl ConfigServiceAsync for MockConfigService {
+    impl crate::ports::config_service::ConfigServiceAsync for MockConfigService { // Corrected trait path
         // Simplified for test: path is converted to String for map key
-        async fn load_config_file_content_async(&self, path_str: &str) -> Result<String, CoreError> {
+        async fn read_config_file_string(&self, path_str: &str) -> Result<String, novade_core::CoreError> { // Corrected error type
             if let Some(err) = &self.error_on_load {
-                return Err(err.clone());
+                // Assuming the mock's CoreError is compatible or directly novade_core::CoreError
+                return Err(err.clone()); 
             }
             let files = self.files.lock().unwrap();
             match files.get(path_str) {
                 Some(content) => Ok(content.clone()),
-                None => Err(CoreError::NotFound(path_str.to_string())),
+                // Ensure this error matches novade_core::CoreError structure
+                None => Err(novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations:vec![path_str.into()]})),
             }
         }
 
-        async fn save_config_file_content_async(&self, path_str: &str, content: &str) -> Result<(), CoreError> {
+        async fn write_config_file_string(&self, path_str: &str, content: String) -> Result<(), novade_core::CoreError> { // Corrected error type & content type
             if let Some(err) = &self.error_on_save {
                 return Err(err.clone());
             }
             let mut files = self.files.lock().unwrap();
-            files.insert(path_str.to_string(), content.to_string());
+            files.insert(path_str.to_string(), content); // content is String
             Ok(())
         }
         
         // Other methods not used by these tests can have dummy implementations
-        async fn list_config_files_async(&self, _dir_path: &str) -> Result<Vec<String>, CoreError> {
-            unimplemented!("list_config_files_async not needed for these tests")
-        }
-        fn get_config_file_path(&self, _app_id: &crate::shared_types::ApplicationId, _config_name: &str, _format: Option<novade_core::config::ConfigFormat>) -> Result<String, CoreError> {
-            unimplemented!("get_config_file_path not needed for these tests")
-        }
-        fn get_config_dir_path(&self, _app_id: &crate::shared_types::ApplicationId, _subdir: Option<&str>) -> Result<String, CoreError> {
-            unimplemented!("get_config_dir_path not needed for these tests")
-        }
-         fn ensure_config_dir_exists(&self, _app_id: &crate::shared_types::ApplicationId) -> Result<String, CoreError> {
-            unimplemented!("ensure_config_dir_exists not needed for these tests")
-        }
+        // Corrected return types to match ConfigServiceAsync trait from ports/config_service.rs
+        async fn read_file_to_string(&self, _path: &Path) -> Result<String, novade_core::CoreError> { unimplemented!() }
+        async fn list_files_in_dir(&self, _dir_path: &Path, _extension: Option<&str>) -> Result<Vec<PathBuf>, novade_core::CoreError> { unimplemented!() }
+        async fn get_config_dir(&self) -> Result<PathBuf, novade_core::CoreError> { unimplemented!() }
+        async fn get_data_dir(&self) -> Result<PathBuf, novade_core::CoreError> { unimplemented!() }
+
+        // Old methods from a previous version of ConfigServiceAsync, remove if not in current trait
+        // async fn list_config_files_async(&self, _dir_path: &str) -> Result<Vec<String>, novade_core::CoreError> { unimplemented!() }
+        // fn get_config_file_path(&self, _app_id: &crate::shared_types::ApplicationId, _config_name: &str, _format: Option<novade_core::config::ConfigFormat>) -> Result<String, novade_core::CoreError> { unimplemented!() }
+        // fn get_config_dir_path(&self, _app_id: &crate::shared_types::ApplicationId, _subdir: Option<&str>) -> Result<String, novade_core::CoreError> { unimplemented!() }
+        // fn ensure_config_dir_exists(&self, _app_id: &crate::shared_types::ApplicationId) -> Result<String, novade_core::CoreError> { unimplemented!() }
     }
 
     fn test_path() -> PathBuf {

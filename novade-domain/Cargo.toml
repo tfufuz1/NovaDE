@@ -3,12 +3,26 @@ name = "novade-domain"
 version = "0.1.0"
 edition = "2021"
 
+# This empty workspace definition is added to make this package buildable
+# independently of other potential workspace members.
+[workspace]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
 tokio = { version = "1", features = ["sync"] } # For broadcast channel
 async-trait = "0.1" # For async traits
 uuid = { version = "1.4", features = ["v4", "serde"] } # Example if using UUIDs for IDs
+log = "0.4" # For logging macros
+futures = "0.3" # For futures::executor::block_on
+novade-core = { path = "../novade-core" } # Added
+chrono = { version = "0.4", features = ["serde"] } # Added
+regex = "1" # Added
+lazy_static = "1.4" # Added
+toml = "0.8" # Added for config provider example
+anyhow = "1.0" # Added
+serde_json = { version = "1.0", features = ["raw_value"] } # Added
+rand = "0.8" # Added
 
 [dev-dependencies]
 # Add any development dependencies here, e.g., for testing

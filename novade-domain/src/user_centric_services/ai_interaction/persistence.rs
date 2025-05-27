@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use async_trait::async_trait;
 use log::{debug, info, warn, error};
-use novade_core::config::ConfigServiceAsync;
-use novade_core::errors::CoreError;
+use crate::ports::config_service::ConfigServiceAsync; // Corrected path
+use novade_core::CoreError; // Corrected path
 use crate::user_centric_services::ai_interaction::types::{AIConsent, AIModelProfile}; // Corrected path
 use crate::user_centric_services::ai_interaction::errors::AIInteractionError; // Corrected path
 use crate::user_centric_services::ai_interaction::persistence_iface::{AIConsentProvider, AIModelProfileProvider}; // Corrected path
@@ -143,7 +143,7 @@ mod tests {
     use super::*;
     use crate::user_centric_services::ai_interaction::types::{AIDataCategory, AIConsentStatus, AIConsentScope, AIModelCapability};
     use crate::user_centric_services::ai_interaction::persistence::core_error_mock_for_ai_persistence::{CoreError as MockCoreError, CoreErrorType as MockCoreErrorType};
-    use novade_core::config::ConfigServiceAsync; // Keep for trait bound
+    use crate::ports::config_service::ConfigServiceAsync; // Corrected path
     use std::collections::HashMap;
     use uuid::Uuid;
 
@@ -163,27 +163,38 @@ mod tests {
     use tokio::sync::RwLock; // Ensure RwLock is in scope
 
     #[async_trait]
-    impl ConfigServiceAsync for MockConfigService {
-        async fn read_config_file_string(&self, key: &str) -> Result<String, novade_core::errors::CoreError> {
+    impl crate::ports::config_service::ConfigServiceAsync for MockConfigService { // Corrected trait path
+        async fn read_config_file_string(&self, key: &str) -> Result<String, novade_core::CoreError> { // Corrected error type
             if let Some(ref err_type) = self.force_read_error_type {
-                return Err(MockCoreError::new(err_type.clone(), format!("Forced read error on {}", key)));
+                let core_err = match err_type {
+                    MockCoreErrorType::NotFound => novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]}),
+                    MockCoreErrorType::IoError => novade_core::CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("mock io error for {}", key))),
+                    MockCoreErrorType::Other(s) => novade_core::CoreError::Internal(s.clone()),
+                };
+                return Err(core_err);
             }
             match self.files.read().await.get(key) {
                 Some(content) => Ok(content.clone()),
-                None => Err(MockCoreError::new(MockCoreErrorType::NotFound, format!("File not found: {}", key))),
+                None => Err(novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]})),
             }
         }
-        async fn write_config_file_string(&self, key: &str, content: String) -> Result<(), novade_core::errors::CoreError> {
+        async fn write_config_file_string(&self, key: &str, content: String) -> Result<(), novade_core::CoreError> { // Corrected error type
             if let Some(ref err_type) = self.force_write_error_type {
-                return Err(MockCoreError::new(err_type.clone(), format!("Forced write error on {}", key)));
+                let core_err = match err_type {
+                    MockCoreErrorType::NotFound => novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]}),
+                    MockCoreErrorType::IoError => novade_core::CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("mock io error for {}", key))),
+                    MockCoreErrorType::Other(s) => novade_core::CoreError::Internal(s.clone()),
+                };
+                return Err(core_err);
             }
             self.files.write().await.insert(key.to_string(), content);
             Ok(())
         }
-        async fn read_file_to_string(&self, _path: &std::path::Path) -> Result<String, novade_core::errors::CoreError> { unimplemented!() }
-        async fn list_files_in_dir(&self, _dir_path: &std::path::Path, _extension: Option<&str>) -> Result<Vec<std::path::PathBuf>, novade_core::errors::CoreError> { unimplemented!() }
-        async fn get_config_dir(&self) -> std::path::PathBuf { unimplemented!() }
-        async fn get_data_dir(&self) -> std::path::PathBuf { unimplemented!() }
+        async fn read_file_to_string(&self, _path: &std::path::Path) -> Result<String, novade_core::CoreError> { unimplemented!() } // Corrected error type
+        async fn list_files_in_dir(&self, _dir_path: &std::path::Path, _extension: Option<&str>) -> Result<Vec<std::path::PathBuf>, novade_core::CoreError> { unimplemented!() } // Corrected error type
+        // Corrected return type to match trait definition in ports/config_service.rs
+        async fn get_config_dir(&self) -> Result<std::path::PathBuf, novade_core::CoreError> { unimplemented!() }
+        async fn get_data_dir(&self) -> Result<std::path::PathBuf, novade_core::CoreError> { unimplemented!() }
     }
 
     // --- AIConsentProvider Tests ---

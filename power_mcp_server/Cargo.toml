@@ -1,0 +1,20 @@
+[package]
+name = "power_mcp_server"
+version = "0.1.0"
+edition = "2021"
+
+# This empty workspace definition is added to make this package buildable
+# independently of other potential workspace members.
+[workspace]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "time", "sync", "io-util"] }
+anyhow = "1.0"
+chrono = "0.4" 
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3" # Often used by services and for stream/async patterns
+
+novade-domain = { path = "../novade-domain" }
