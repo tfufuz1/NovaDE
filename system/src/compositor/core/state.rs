@@ -19,6 +19,15 @@ use smithay::{
     input::{SeatHandler, SeatState, pointer::CursorImageStatus, keyboard::KeyboardHandle, touch::TouchHandle, TouchSlot}, // Use SeatHandler directly, added TouchHandle and TouchSlot
     utils::{Point, Size, Rectangle, Logical, Physical, Serial, Transform, Clock}, // Added Clock
 };
+use smithay::wayland::tablet_manager::{TabletManagerState, TabletManagerHandler, TabletSeatTrait}; // ADDED for tablet support
+use smithay::wayland::pointer_constraints::{ // ADDED for pointer constraints
+    PointerConstraintsState, PointerConstraintsHandler, PointerConstraint,
+    LockedPointerData, ConfinedPointerData, ConstraintState
+};
+use smithay::reexports::wayland_protocols::wp::pointer_constraints::zv1::server::{
+    zwp_pointer_constraints_v1, zwp_locked_pointer_v1, zwp_confined_pointer_v1
+};
+use smithay::reexports::wayland_server::{Resource, New, DataInit, Dispatch}; // For GlobalDispatch & Dispatch
 use std::{time::Duration, collections::HashMap, sync::{Arc, Mutex, Weak}, env}; // Mutex is already here, Added env
 // Ensure wl_surface is specifically available if not covered by wildcard
 use smithay::reexports::wayland_server::protocol::wl_surface;
@@ -97,6 +106,12 @@ pub struct DesktopState {
     pub output_manager_state: OutputManagerState, // Smithay's manager for output Wayland objects
     pub output_manager: Arc<Mutex<OutputManager>>, // Our manager for OutputDevice instances
 
+    // --- Tablet Manager State ---
+    pub tablet_manager_state: TabletManagerState, // ADDED
+
+    // --- Pointer Constraints State ---
+    pub pointer_constraints_state: PointerConstraintsState, // ADDED
+
     // Other fields like output_manager will be added later (this was a note for other fields, output_manager is here)
 }
 
@@ -142,6 +157,9 @@ impl DesktopState {
         // but for a simple display cursor, it might not be strictly necessary.
         // For now, we'll assume it's just for display.
 
+        let tablet_manager_state = TabletManagerState::new::<Self>(&display_handle); // ADDED
+        let pointer_constraints_state = PointerConstraintsState::new(); // ADDED: PointerConstraintsState::new() does not take display_handle
+
         // Store SeatState in the seat's user data if SeatState itself needs to be accessed via Seat later.
         // Or, more commonly, SeatState is owned by DesktopState directly.
         // The SeatHandler methods get `&mut SeatState<Self>` via `self.seat_state`.
@@ -178,6 +196,8 @@ impl DesktopState {
 
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle), // Initialize with XDG support
             output_manager: Arc::new(Mutex::new(OutputManager::new())),
+            tablet_manager_state, // ADDED
+            pointer_constraints_state, // ADDED
         }
     }
 }
@@ -280,6 +300,112 @@ impl SeatHandler for DesktopState {
     }
 }
 smithay::delegate_seat_handler!(DesktopState); // Ensures DesktopState delegates SeatHandler calls correctly
+
+// --- TabletManagerHandler Implementation ---
+impl TabletManagerHandler for DesktopState {
+    fn new_tablet_seat(&mut self, seat: Seat<Self>) -> Box<dyn TabletSeatTrait<Self>> {
+        tracing::info!("Neuer Tablet-Seat für Seat '{}' angefordert.", seat.name());
+        Box::new(smithay::wayland::tablet_manager::TabletSeat::new(seat))
+    }
+}
+smithay::delegate_tablet_manager!(DesktopState);
+
+// --- PointerConstraintsHandler Implementation ---
+impl PointerConstraintsHandler for DesktopState {
+    fn new_constraint(
+        &mut self,
+        constraint: &PointerConstraint,
+    ) {
+        if let Some(surface) = constraint.surface() {
+             tracing::info!(
+                "Neuer Pointer-Constraint {:?} für Surface {:?} erstellt.",
+                constraint.constraint_type(),
+                surface.id()
+            );
+        } else {
+            tracing::warn!("Neuer Pointer-Constraint ohne zugehörige Surface erstellt.");
+        }
+    }
+    // constraint_broken can be implemented if custom logic is needed when constraints are no longer valid
+}
+
+// --- GlobalDispatch for PointerConstraints ---
+impl GlobalDispatch<zwp_pointer_constraints_v1::ZwpPointerConstraintsV1, ()> for DesktopState {
+    fn bind(
+        &mut self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<zwp_pointer_constraints_v1::ZwpPointerConstraintsV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        // PointerConstraintsState handles the binding and further dispatching internally
+        self.pointer_constraints_state.new_global(resource, data_init);
+        tracing::info!("zwp_pointer_constraints_v1 global gebunden.");
+    }
+}
+
+// --- Dispatch for LockedPointer ---
+impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, LockedPointerData> for DesktopState {
+    fn request(
+        &mut self,
+        _client: &Client,
+        _resource: &zwp_locked_pointer_v1::ZwpLockedPointerV1,
+        request: zwp_locked_pointer_v1::Request,
+        data: &LockedPointerData,
+        _dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        self.pointer_constraints_state.handle_locked_pointer_request(request, data, data_init);
+    }
+
+    fn destroyed(
+        &mut self,
+        _client: ClientId,
+        resource: &zwp_locked_pointer_v1::ZwpLockedPointerV1,
+        data: &LockedPointerData,
+    ) {
+        self.pointer_constraints_state.handle_locked_pointer_destroyed(resource, data);
+        tracing::info!("zwp_locked_pointer_v1 zerstört: {:?}", resource.id());
+    }
+}
+
+// --- Dispatch for ConfinedPointer ---
+impl Dispatch<zwp_confined_pointer_v1::ZwpConfinedPointerV1, ConfinedPointerData> for DesktopState {
+    fn request(
+        &mut self,
+        _client: &Client,
+        _resource: &zwp_confined_pointer_v1::ZwpConfinedPointerV1,
+        request: zwp_confined_pointer_v1::Request,
+        data: &ConfinedPointerData,
+        _dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        self.pointer_constraints_state.handle_confined_pointer_request(request, data, data_init);
+    }
+
+    fn destroyed(
+        &mut self,
+        _client: ClientId,
+        resource: &zwp_confined_pointer_v1::ZwpConfinedPointerV1,
+        data: &ConfinedPointerData,
+    ) {
+        self.pointer_constraints_state.handle_confined_pointer_destroyed(resource, data);
+        tracing::info!("zwp_confined_pointer_v1 zerstört: {:?}", resource.id());
+    }
+}
+
+// Delegate dispatch for pointer constraint protocols to PointerConstraintsState
+smithay::delegate_dispatch!(DesktopState: [
+    zwp_pointer_constraints_v1::ZwpPointerConstraintsV1: ()
+] => PointerConstraintsState);
+smithay::delegate_dispatch!(DesktopState: [
+    zwp_locked_pointer_v1::ZwpLockedPointerV1: LockedPointerData
+] => PointerConstraintsState);
+smithay::delegate_dispatch!(DesktopState: [
+    zwp_confined_pointer_v1::ZwpConfinedPointerV1: ConfinedPointerData
+] => PointerConstraintsState);
+
 
 // --- OutputHandler Implementation ---
 impl OutputHandler for DesktopState {

@@ -11,9 +11,15 @@ use smithay::backend::input::{
     KeyboardKeyEvent, PointerMotionAbsoluteEvent, PointerButtonEvent, PointerAxisEvent,
     PointerMotionEvent, TouchDownEvent, TouchUpEvent, TouchMotionEvent, TouchFrameEvent,
     TouchCancelEvent,
+    tablet_tool::{ // ADDED: Tablet event types from backend
+        TabletToolAxisEvent, TabletToolProximityEvent, TabletToolTipEvent, TabletToolButtonEvent,
+        // TabletToolProximityState, TabletToolTipState, // These are used by From impls, not directly here
+    },
 };
 use smithay::reexports::input::{Libinput, Device as LibinputDevice, AccelProfile as LibinputAccelProfile}; // Libinput types
 use smithay::reexports::input::event::EventTrait; // For event.time()
+// use smithay::input::pointer::ButtonState as SmithayButtonState; // Already imported implicitly or handled by From
+// use smithay::input::tablet::{ProximityState as SmithayProximityState, TipState as SmithayTipState}; // Used by From impls
 use smithay::reexports::input::event::device::DeviceEventTrait; // For device.name()
 use smithay::reexports::calloop::{LoopHandle, RegistrationToken}; // Add RegistrationToken
 use crate::input::pointer::config::{AccelProfile, PointerDeviceIdentifier}; // New types
@@ -82,6 +88,15 @@ pub fn process_input_event(
                     }
                 }
             }
+            if device.has_capability(DeviceCapability::TabletTool) {
+                // Tablet tool capability detection.
+                // Actual TabletSeat and TabletToolHandle are managed by TabletManagerState
+                // and client bindings. We don't call seat.add_tablet_tool() here.
+                // We just log that the capability is present on the physical device.
+                tracing::info!("Tablet-Tool-Fähigkeit für Gerät '{}' auf Seat '{}' erkannt.", device.name(), seat_name);
+            }
+            // Similarly for TabletPad if handling those events:
+            // if device.has_capability(DeviceCapability::TabletPad) { ... }
         }
         InputEvent::DeviceRemoved { device } => {
             info!("Eingabegerät entfernt: {} auf Seat '{}'", device.name(), seat_name);
@@ -162,6 +177,27 @@ pub fn process_input_event(
             trace!("Gesture Swipe End on seat '{}': cancelled {}", seat_name, event.is_cancelled());
             // crate::input::gestures::handle_gesture_swipe_end(desktop_state, &seat, event);
         }
+        // --- Tablet Tool Events ---
+        InputEvent::TabletToolAxis { event } => {
+            trace!("Tablet Tool Axis event on seat '{}': tool {:?}", seat_name, event.tool());
+            crate::input::tablet::event_translator::handle_tablet_tool_axis_event(desktop_state, &seat, event, seat_name);
+        }
+        InputEvent::TabletToolProximity { event } => {
+            trace!("Tablet Tool Proximity event on seat '{}': tool {:?}, state {:?}", seat_name, event.tool(), event.state());
+            crate::input::tablet::event_translator::handle_tablet_tool_proximity_event(desktop_state, &seat, event, seat_name);
+        }
+        InputEvent::TabletToolTip { event } => {
+            trace!("Tablet Tool Tip event on seat '{}': tool {:?}, state {:?}", seat_name, event.tool(), event.state());
+            crate::input::tablet::event_translator::handle_tablet_tool_tip_event(desktop_state, &seat, event, seat_name);
+        }
+        InputEvent::TabletToolButton { event } => {
+            trace!("Tablet Tool Button event on seat '{}': tool {:?}, button {}, state {:?}", seat_name, event.tool(), event.button(), event.state());
+            crate::input::tablet::event_translator::handle_tablet_tool_button_event(desktop_state, &seat, event, seat_name);
+        }
+        // TODO: Add TabletPad event cases if those handlers are implemented
+        // InputEvent::TabletPadButton { event } => { /* ... */ }
+        // InputEvent::TabletPadRing { event } => { /* ... */ }
+        // InputEvent::TabletPadStrip { event } => { /* ... */ }
         other_event => {
             trace!("Unhandled input event on seat '{}': {:?}", seat_name, other_event);
         }

@@ -1,54 +1,72 @@
+// system/src/input/libinput_handler/session_interface.rs
 use smithay::backend::input::LibinputInterface;
-use std::os::unix::io::RawFd;
+use std::fs::OpenOptions;
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt; // For custom_flags
 use std::path::Path;
-// use calloop::LoopSignal; // As per document, though direct usage might change with actual session
-// use std::rc::Rc; // If wrapping an Rc<dyn Session>
-// use std::cell::RefCell; // If wrapping an Rc<RefCell<dyn Session>>
-// use smithay::backend::session::{Session, Signal as SessionSignal, SessionNotifier}; // For a full implementation
 
-// Placeholder for the actual session logic.
-// A real implementation would hold a smithay::backend::session::Session object (e.g., DirectSession, LogindSession)
-// and use it to open/close devices.
-// For now, this dummy implementation will always fail to open devices,
-// which means libinput might only work if the compositor is run as root.
 #[derive(Debug)]
 pub struct LibinputSessionManager {
-    // In a real scenario, this would hold something like:
-    // session: Rc<RefCell<S>>, where S: Session + 'static
-    // For the placeholder, we don't need fields yet.
-    _placeholder: (), // To make it a struct
+    // No fields needed for this basic implementation
+    _placeholder: (),
 }
 
 impl LibinputSessionManager {
     pub fn new() -> Self {
-        // In a real scenario, this would take a Session object.
-        tracing::warn!("LibinputSessionManager created with placeholder implementation. Device opening will likely fail without root privileges.");
+        tracing::info!(
+            "LibinputSessionManager initialized. This basic version attempts direct device access."
+        );
         Self { _placeholder: () }
     }
 }
 
 impl LibinputInterface for LibinputSessionManager {
     fn open_restricted(&mut self, path: &Path, flags: i32) -> Result<RawFd, std::io::Error> {
-        tracing::debug!("LibinputSessionManager: open_restricted called for path {:?}, flags {}", path, flags);
-        // Placeholder implementation:
-        // A real implementation would use self.session.open(path, flags).
-        // This will likely cause libinput to fail unless running as root.
-        Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "Placeholder LibinputSessionManager: Cannot open device. Full session management not implemented.",
-        ))
+        tracing::debug!(
+            "LibinputSessionManager: open_restricted called for path {:?}, flags {}",
+            path,
+            flags
+        );
+        // flags are typically O_RDWR | O_NONBLOCK | O_CLOEXEC from libinput
+        // We use custom_flags to pass them directly.
+        match OpenOptions::new()
+            .custom_flags(flags)
+            .read(true) // libinput needs to read
+            .write(true) // and sometimes write (e.g. for LEDS, disabling touchpad while typing)
+            .open(path)
+        {
+            Ok(file) => {
+                let fd = file.as_raw_fd();
+                // Important: Prevent closing the file when `file` goes out of scope.
+                // Libinput will manage the fd lifetime via close_restricted.
+                std::mem::forget(file);
+                tracing::info!("Successfully opened device {:?} with fd {}", path, fd);
+                Ok(fd)
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to open device {:?} with flags {}: {}. Check permissions or udev rules.",
+                    path,
+                    flags,
+                    e
+                );
+                Err(e)
+            }
+        }
     }
 
     fn close_restricted(&mut self, fd: RawFd) {
         tracing::debug!("LibinputSessionManager: close_restricted called for fd {}", fd);
-        // Placeholder implementation:
-        // A real implementation would use self.session.close(fd).
-        // Here, we just close it directly, which might not be correct for all session types.
-        unsafe { libc::close(fd) };
+        // Natively close the file descriptor
+        let result = unsafe { libc::close(fd) };
+        if result != 0 {
+            tracing::error!("Failed to close file descriptor {}: {}", fd, std::io::Error::last_os_error());
+        } else {
+            tracing::info!("Successfully closed file descriptor {}", fd);
+        }
     }
 }
 
-// Default trait for LibinputSessionManager to be easily usable.
 impl Default for LibinputSessionManager {
     fn default() -> Self {
         Self::new()

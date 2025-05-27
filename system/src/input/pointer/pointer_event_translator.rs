@@ -93,23 +93,40 @@ pub fn handle_pointer_motion_event(
         None => return,
     };
 
+    // Update global pointer location based on event delta
     desktop_state.pointer_location += event.delta();
-    // Optional: Clamp pointer_location to output boundaries here
 
-    let (new_focus_surface_option, surface_local_coords) =
+    // --- Apply Pointer Constraints ---
+    // Get the surface currently focused by the pointer (for constraint context)
+    let constraint_focus_surface_option: Option<WlSurface> = pointer_handle.current_focus().cloned();
+
+    // Apply constraints to desktop_state.pointer_location
+    // constrain_motion takes &mut Point<f64, Logical> for the location to be adjusted
+    desktop_state.pointer_constraints_state.constrain_motion(
+        &pointer_handle, // Needs a &PointerHandle<DesktopState>
+        &mut desktop_state.pointer_location,
+        constraint_focus_surface_option.as_ref(), // The surface the constraint might be relative to
+    );
+    // --- End Apply Pointer Constraints ---
+
+    // Optional: Clamp pointer_location to output boundaries here
+    // desktop_state.pointer_location = clamp_to_outputs(desktop_state.pointer_location, &desktop_state.space);
+
+    // Recalculate target surface and local coords based on potentially constrained pointer_location
+    let (final_target_surface_option, final_surface_local_coords) =
         find_surface_and_coords_at_global_point(desktop_state, desktop_state.pointer_location);
 
     pointer_handle.motion(
         desktop_state,
-        new_focus_surface_option.as_ref(),
+        final_target_surface_option.as_ref(),
         event.serial(),
-        desktop_state.pointer_location,
-        surface_local_coords,
+        desktop_state.pointer_location, // Use the (potentially constrained) global coordinates
+        final_surface_local_coords,
         event.time(),
         Some(tracing::Span::current()),
     );
     
-    desktop_state.active_input_surface = new_focus_surface_option.map(|s| s.downgrade());
+    desktop_state.active_input_surface = final_target_surface_option.map(|s| s.downgrade());
 }
 
 pub fn handle_pointer_motion_absolute_event(
@@ -131,25 +148,39 @@ pub fn handle_pointer_motion_absolute_event(
     // The event.absolute_x_transformed() and y_transformed() methods scale normalized (0-1) coordinates
     // to the provided width/height. If the event provides coordinates in a different system,
     // this part might need adjustment (e.g., if they are already in a global device space).
+    // The subtask description had new_x, new_y but the original code had global_x, global_y.
+    // I will use global_x, global_y to keep it consistent with the original code's variable naming for clarity.
     let global_x = event.absolute_x_transformed(output_geometry.size.w as u32) + output_geometry.loc.x as f64;
     let global_y = event.absolute_y_transformed(output_geometry.size.h as u32) + output_geometry.loc.y as f64;
     
+    // Set initial pointer_location from absolute event
     desktop_state.pointer_location = Point::from((global_x, global_y));
-    // Optional: Clamp pointer_location to output boundaries here
 
-    let (new_focus_surface_option, surface_local_coords) =
+    // --- Apply Pointer Constraints ---
+    let constraint_focus_surface_option: Option<WlSurface> = pointer_handle.current_focus().cloned();
+    desktop_state.pointer_constraints_state.constrain_motion(
+        &pointer_handle,
+        &mut desktop_state.pointer_location,
+        constraint_focus_surface_option.as_ref(),
+    );
+    // --- End Apply Pointer Constraints ---
+
+    // Optional: Clamp pointer_location to output boundaries here
+    // desktop_state.pointer_location = clamp_to_outputs(desktop_state.pointer_location, &desktop_state.space);
+
+    let (final_target_surface_option, final_surface_local_coords) =
         find_surface_and_coords_at_global_point(desktop_state, desktop_state.pointer_location);
 
-    pointer_handle.motion(
+    pointer_handle.motion( // Using motion here is fine as pointer_location is now global and constrained
         desktop_state,
-        new_focus_surface_option.as_ref(),
+        final_target_surface_option.as_ref(),
         event.serial(),
-        desktop_state.pointer_location, // Global coordinates
-        surface_local_coords,        // Surface-local coordinates
+        desktop_state.pointer_location,
+        final_surface_local_coords,
         event.time(),
         Some(tracing::Span::current()),
     );
-    desktop_state.active_input_surface = new_focus_surface_option.map(|s| s.downgrade());
+    desktop_state.active_input_surface = final_target_surface_option.map(|s| s.downgrade());
 }
 
 pub fn handle_pointer_button_event(
