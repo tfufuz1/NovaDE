@@ -1,6 +1,10 @@
 use glib;
 use gtk::glib::subclass::prelude::*;
-use gtk::{prelude::*, Box}; // Added Box and prelude
+use gtk::{prelude::*, Box}; 
+
+// Declare and use NotificationWidgetStub
+pub mod notification_widget_stub;
+pub use notification_widget_stub::NotificationWidgetStub;
 
 mod imp;
 

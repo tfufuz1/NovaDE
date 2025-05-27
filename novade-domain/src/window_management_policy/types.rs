@@ -39,33 +39,6 @@ impl Default for GapSettings {
     }
 }
 
-impl GapSettings {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.screen_outer_horizontal > 100 {
-            return Err("Screen outer horizontal gap cannot exceed 100.".to_string());
-        }
-        if self.screen_outer_vertical > 100 {
-            return Err("Screen outer vertical gap cannot exceed 100.".to_string());
-        }
-        if self.window_inner > 50 {
-            return Err("Window inner gap cannot exceed 50.".to_string());
-        }
-        Ok(())
-    }
-}
-
-impl WindowSnappingPolicy {
-    pub fn validate(&self) -> Result<(), String> {
-        if self.snap_distance_px == 0 {
-            return Err("Snap distance cannot be 0.".to_string());
-        }
-        if self.snap_distance_px > 50 {
-            return Err("Snap distance cannot exceed 50px.".to_string());
-        }
-        Ok(())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowSnappingPolicy {
     pub snap_to_screen_edges: bool,

@@ -7,13 +7,15 @@ use novade_ui::shell::panel_widget::clock_datetime_widget::ClockDateTimeWidget;
 use novade_ui::shell::panel_widget::quick_settings_button::QuickSettingsButtonWidget; 
 use novade_ui::shell::panel_widget::notification_center_button::NotificationCenterButtonWidget; 
 // Domain and Connector imports
-use novade_domain::workspaces::{StubWorkspaceManager, WorkspaceManager}; // Assuming these are re-exported at this level
+use novade_domain::workspaces::{StubWorkspaceManager, WorkspaceManager}; 
 use novade_ui::shell::domain_workspace_connector::DomainWorkspaceConnector;
 use novade_ui::shell::panel_widget::workspace_indicator_widget::types::WorkspaceInfo as UiWorkspaceInfo; 
+// System Info Provider import
+use novade_system::window_info_provider::StubSystemWindowInfoProvider; // Import the stub
 
 use std::sync::Arc; 
-use gtk::gio::{self, SimpleAction}; // Added gio::SimpleAction
-use gtk::glib::VariantTy; // Added VariantTy
+use gtk::gio::{self, SimpleAction}; 
+use gtk::glib::VariantTy; 
 
 const APP_ID: &str = "org.novade.UIShellTest";
 
@@ -62,8 +64,14 @@ fn build_ui(app: &Application, tokio_handle: tokio::runtime::Handle) {
     // Create the PanelWidget
     let panel = PanelWidget::new(app);
 
-    // --- ActiveWindowService for AppMenuButton (existing) ---
-    let active_window_service = Rc::new(novade_ui::shell::active_window_service::ActiveWindowService::new());
+    // --- SystemWindowInfoProvider Setup ---
+    let system_window_provider = Arc::new(StubSystemWindowInfoProvider::new());
+
+    // --- ActiveWindowService for AppMenuButton ---
+    // Pass the system_window_provider to ActiveWindowService constructor
+    let active_window_service = Rc::new(
+        novade_ui::shell::active_window_service::ActiveWindowService::new(system_window_provider.clone())
+    );
     let app_menu_button = AppMenuButton::new();
     app_menu_button.set_active_window_service(active_window_service.clone());
 
@@ -120,6 +128,47 @@ fn build_ui(app: &Application, tokio_handle: tokio::runtime::Handle) {
     // WorkspaceIndicatorWidget is now driven by events from DomainWorkspaceConnector.
     // Initial data load is handled by set_domain_workspace_connector.
     // Clicks on workspace items trigger service calls, which then lead to events.
+
+    // --- Test Dynamic Workspace Changes ---
+    let domain_manager_clone_for_create = domain_workspace_manager.clone();
+    let tokio_handle_clone_for_create = tokio_handle.clone();
+    glib::timeout_add_seconds_local_once(5, move || {
+        let dm_create = domain_manager_clone_for_create.clone();
+        tokio_handle_clone_for_create.spawn(async move {
+            match dm_create.create_workspace("New WS Alpha".to_string()).await {
+                Ok(ws) => tracing::info!("Test: Created workspace: id='{}', name='{}'", ws.id, ws.name),
+                Err(e) => tracing::error!("Test: Error creating workspace: {:?}", e),
+            }
+        });
+    });
+
+    let domain_manager_clone_for_delete = domain_workspace_manager.clone();
+    let tokio_handle_clone_for_delete = tokio_handle.clone();
+    // Assuming "ws2" is an ID from the initial stubs in StubWorkspaceManager
+    let id_to_delete = "ws2".to_string(); 
+    glib::timeout_add_seconds_local_once(10, move || {
+        let dm_delete = domain_manager_clone_for_delete.clone();
+        tokio_handle_clone_for_delete.spawn(async move {
+            match dm_delete.delete_workspace(id_to_delete.clone()).await {
+                Ok(()) => tracing::info!("Test: Deleted workspace {}", id_to_delete),
+                Err(e) => tracing::error!("Test: Error deleting workspace {}: {:?}", id_to_delete, e),
+            }
+        });
+    });
+    
+    // Test creating another workspace to see if active state is handled if ws2 was active
+    let domain_manager_clone_for_create2 = domain_workspace_manager.clone();
+    let tokio_handle_clone_for_create2 = tokio_handle.clone();
+    glib::timeout_add_seconds_local_once(15, move || {
+        let dm_create2 = domain_manager_clone_for_create2.clone();
+        tokio_handle_clone_for_create2.spawn(async move {
+            match dm_create2.create_workspace("Another New WS Beta".to_string()).await {
+                Ok(ws) => tracing::info!("Test: Created workspace: id='{}', name='{}'", ws.id, ws.name),
+                Err(e) => tracing::error!("Test: Error creating workspace: {:?}", e),
+            }
+        });
+    });
+
 
     panel.present();
 }

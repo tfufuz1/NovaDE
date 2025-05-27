@@ -18,7 +18,6 @@ pub struct ClientCapabilities {
 pub struct ServerInfo {
     pub name: String,
     pub version: String,
-    pub protocol_version: Option<String>, // Added for initialize response
     // Add other relevant fields like description, author, etc.
 }
 
@@ -90,11 +89,6 @@ pub enum MCPError {
     MethodNotFound,
     InvalidParams,
     InternalError,
-    TransportIOError(String),
-    JsonRpcParseError(String),
-    ConnectionClosed,
-    MessageHandlerNotRegistered, // Added for when trying tooperate without a handler
-    RequestError(JsonRpcError), // For when server returns a JSON-RPC error object
     // Add other MCP errors as needed
 }
 
@@ -168,11 +162,8 @@ pub struct AttachmentData {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AIInteractionError {
     ModelNotFound(String),
-    ConsentRequired(String), // Kept for general cases, or can be removed if specific ones cover all
-    ConsentNotGranted(String), // Kept for general cases, or can be removed
-    ConsentPending { model_id: String, categories: Vec<AIDataCategory> },
-    ConsentDenied { model_id: String, categories: Vec<AIDataCategory> },
-    ConsentExpired { model_id: String, categories: Vec<AIDataCategory> },
+    ConsentRequired(String),
+    ConsentNotGranted(String),
     InteractionNotFound(String),
     ConnectionError(String),
     OperationNotSupported(String),
@@ -185,11 +176,8 @@ impl std::fmt::Display for AIInteractionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AIInteractionError::ModelNotFound(id) => write!(f, "AI Model not found: {}", id),
-            AIInteractionError::ConsentRequired(msg) => write!(f, "Consent required: {}", msg),
-            AIInteractionError::ConsentNotGranted(msg) => write!(f, "Consent not granted: {}", msg),
-            AIInteractionError::ConsentPending { model_id, categories } => write!(f, "Consent pending for model '{}' regarding categories: {:?}", model_id, categories),
-            AIInteractionError::ConsentDenied { model_id, categories } => write!(f, "Consent denied for model '{}' regarding categories: {:?}", model_id, categories),
-            AIInteractionError::ConsentExpired { model_id, categories } => write!(f, "Consent expired for model '{}' regarding categories: {:?}", model_id, categories),
+            AIInteractionError::ConsentRequired(id) => write!(f, "Consent required for AI Model: {}", id),
+            AIInteractionError::ConsentNotGranted(id) => write!(f, "Consent not granted for AI Model: {}", id),
             AIInteractionError::InteractionNotFound(id) => write!(f, "AI Interaction context not found: {}", id),
             AIInteractionError::ConnectionError(msg) => write!(f, "Connection error: {}", msg),
             AIInteractionError::OperationNotSupported(op) => write!(f, "Operation not supported: {}", op),
@@ -233,7 +221,6 @@ mod tests {
         let original = ServerInfo {
             name: "TestServer".to_string(),
             version: "1.0.0".to_string(),
-            protocol_version: Some("1.0".to_string()), // Corrected test data
         };
         let json_string = serde_json::to_string(&original).unwrap();
         let deserialized: ServerInfo = serde_json::from_str(&json_string).unwrap();
@@ -394,7 +381,7 @@ mod tests {
         let original = AIModelProfile {
             model_id: "model-123".to_string(),
             server_id: "server-abc".to_string(),
-            server_info: ServerInfo { name: "AI Server".to_string(), version: "v2".to_string(), protocol_version: Some("2.0".to_string()) }, // Corrected test data
+            server_info: ServerInfo { name: "AI Server".to_string(), version: "v2".to_string() },
             mcp_server_config: MCPServerConfig { host: "mcp.example.com".to_string(), port: 9000 },
             name: "Super Model".to_string(),
             description: Some("The best model ever.".to_string()),

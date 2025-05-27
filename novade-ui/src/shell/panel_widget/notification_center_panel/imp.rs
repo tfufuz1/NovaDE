@@ -1,9 +1,10 @@
 use gtk::glib;
 use gtk::subclass::prelude::*;
-use gtk::{Box, Label, CompositeTemplate, Orientation}; // Added necessary imports
+use gtk::{Box, CompositeTemplate, Orientation, prelude::*}; // Removed Label, added prelude
+use super::notification_widget_stub::NotificationWidgetStub; // Import the stub
 
 #[derive(CompositeTemplate, Default)]
-#[template(string = "")] // No template for now
+#[template(string = "")] 
 pub struct NotificationCenterPanelWidget {
     // Struct can be empty for this stub
 }
@@ -15,7 +16,6 @@ impl ObjectSubclass for NotificationCenterPanelWidget {
     type ParentType = gtk::Box;
 
     fn class_init(klass: &mut Self::Class) {
-        // NotificationCenterPanelWidget::bind_template(klass); // No template for now
         klass.set_css_name("notificationcenterpanelwidget");
     }
 
@@ -30,20 +30,44 @@ impl ObjectImpl for NotificationCenterPanelWidget {
         let obj = self.obj(); // This is the NotificationCenterPanelWidget (gtk::Box)
 
         obj.set_orientation(Orientation::Vertical);
-        obj.set_spacing(6); // Add some spacing
-
-        // Add placeholder content
-        let no_notifications_label = Label::new(Some("No Notifications"));
-        obj.append(&no_notifications_label);
+        obj.set_spacing(6); 
         
-        // Add some padding to the box itself to make the popover look a bit nicer
-        obj.set_margin_top(12); // More top margin for a "title" feel if desired
-        obj.set_margin_bottom(12);
-        obj.set_margin_start(12);
-        obj.set_margin_end(12);
+        // Margins for the overall popover content
+        obj.set_margin_top(10);
+        obj.set_margin_bottom(10);
+        obj.set_margin_start(10);
+        obj.set_margin_end(10);
         
         // Set a minimum width for the popover content
-        obj.set_width_request(250); 
+        obj.set_width_request(300); // Slightly wider for notifications
+
+        // Container for notification items
+        // The NotificationCenterPanelWidget itself is already a Box, so we can append directly to it.
+        // If we wanted a scrollable area, we'd add a ScrolledWindow here, then a Box inside that.
+        // For now, direct appending is fine.
+
+        // Add dummy NotificationWidgetStub instances
+        let notification1 = NotificationWidgetStub::new(
+            "System Update",
+            "Updates are available. Click to install.",
+        );
+        obj.append(&notification1);
+
+        let notification2 = NotificationWidgetStub::new(
+            "Email Client",
+            "You have 3 new messages from John Doe.",
+        );
+        obj.append(&notification2);
+        
+        let notification3 = NotificationWidgetStub::new(
+            "Calendar",
+            "Reminder: Team Meeting in 15 minutes.",
+        );
+        obj.append(&notification3);
+
+        // If no notifications, a label should ideally be shown.
+        // For now, we always show these stubs. A more advanced implementation
+        // would clear these and show "No Notifications" label if the list is empty.
     }
 }
 
