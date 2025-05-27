@@ -18,6 +18,7 @@ pub struct ClientCapabilities {
 pub struct ServerInfo {
     pub name: String,
     pub version: String,
+    pub protocol_version: Option<String>, // Added for initialize response
     // Add other relevant fields like description, author, etc.
 }
 
@@ -89,6 +90,11 @@ pub enum MCPError {
     MethodNotFound,
     InvalidParams,
     InternalError,
+    TransportIOError(String),
+    JsonRpcParseError(String),
+    ConnectionClosed,
+    MessageHandlerNotRegistered, // Added for when trying tooperate without a handler
+    RequestError(JsonRpcError), // For when server returns a JSON-RPC error object
     // Add other MCP errors as needed
 }
 
@@ -162,8 +168,11 @@ pub struct AttachmentData {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AIInteractionError {
     ModelNotFound(String),
-    ConsentRequired(String),
-    ConsentNotGranted(String),
+    ConsentRequired(String), // Kept for general cases, or can be removed if specific ones cover all
+    ConsentNotGranted(String), // Kept for general cases, or can be removed
+    ConsentPending { model_id: String, categories: Vec<AIDataCategory> },
+    ConsentDenied { model_id: String, categories: Vec<AIDataCategory> },
+    ConsentExpired { model_id: String, categories: Vec<AIDataCategory> },
     InteractionNotFound(String),
     ConnectionError(String),
     OperationNotSupported(String),
@@ -176,8 +185,11 @@ impl std::fmt::Display for AIInteractionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AIInteractionError::ModelNotFound(id) => write!(f, "AI Model not found: {}", id),
-            AIInteractionError::ConsentRequired(id) => write!(f, "Consent required for AI Model: {}", id),
-            AIInteractionError::ConsentNotGranted(id) => write!(f, "Consent not granted for AI Model: {}", id),
+            AIInteractionError::ConsentRequired(msg) => write!(f, "Consent required: {}", msg),
+            AIInteractionError::ConsentNotGranted(msg) => write!(f, "Consent not granted: {}", msg),
+            AIInteractionError::ConsentPending { model_id, categories } => write!(f, "Consent pending for model '{}' regarding categories: {:?}", model_id, categories),
+            AIInteractionError::ConsentDenied { model_id, categories } => write!(f, "Consent denied for model '{}' regarding categories: {:?}", model_id, categories),
+            AIInteractionError::ConsentExpired { model_id, categories } => write!(f, "Consent expired for model '{}' regarding categories: {:?}", model_id, categories),
             AIInteractionError::InteractionNotFound(id) => write!(f, "AI Interaction context not found: {}", id),
             AIInteractionError::ConnectionError(msg) => write!(f, "Connection error: {}", msg),
             AIInteractionError::OperationNotSupported(op) => write!(f, "Operation not supported: {}", op),

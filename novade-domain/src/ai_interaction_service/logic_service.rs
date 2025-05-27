@@ -31,6 +31,7 @@ pub trait AIInteractionLogicService: Send + Sync {
     // or it's fully delegated to MCPConsentManager. Let's remove it from the trait if MCPConsentManager handles storage.
 
     async fn load_model_profiles(&mut self) -> Result<(), AIInteractionError>; // Load/refresh model profiles
+    async fn execute_tool_for_interaction(&mut self, interaction_id: &str, tool_name: String, arguments: Value) -> Result<Value, AIInteractionError>;
     // Add other methods as per "MCP-Pflichtenheft.md (Abschnitt III.A.1)"
 }
 
@@ -133,29 +134,34 @@ impl AIInteractionLogicService for DefaultAIInteractionLogicService {
         // For simplicity, assume a default user_id and categories for now.
         // In a real app, user_id would come from session, categories from model requirements/request.
         let user_id = "default_user"; // Placeholder
-        let required_categories = [AIDataCategory::Personal]; // Placeholder
+        // Using Proprietary as a placeholder for generic text/tool usage
+        let required_categories = [AIDataCategory::Proprietary]; 
 
         let consent_status = self.consent_manager.get_consent_status(
             &context.model_id,
-            user_id, // Assuming user_id is part of the context or globally available
+            user_id, 
             &required_categories, 
         ).await?;
 
         if consent_status != AIConsentStatus::Granted {
-            // If consent is PendingUserAction, we could ask for it.
-            if consent_status == AIConsentStatus::PendingUserAction {
-                 // The following line is commented out because request_consent_for_interaction is not fully implemented
-                 // and its interaction with send_prompt needs more design (e.g. how does the user respond?)
-                 // self.request_consent_for_interaction(interaction_id, &required_categories).await?;
-                 return Err(AIInteractionError::ConsentRequired(format!(
-                    "Consent is pending for model {}. Please grant consent.",
-                    context.model_id
-                )));
+            match consent_status {
+                AIConsentStatus::PendingUserAction => return Err(AIInteractionError::ConsentPending {
+                    model_id: context.model_id.clone(),
+                    categories: required_categories.to_vec(),
+                }),
+                AIConsentStatus::Denied => return Err(AIInteractionError::ConsentDenied {
+                    model_id: context.model_id.clone(),
+                    categories: required_categories.to_vec(),
+                }),
+                AIConsentStatus::Expired => return Err(AIInteractionError::ConsentExpired {
+                    model_id: context.model_id.clone(),
+                    categories: required_categories.to_vec(),
+                }),
+                _ => return Err(AIInteractionError::ConsentNotGranted(format!( // Fallback for other non-granted states
+                    "Consent not granted (status: {:?}) for model {} with categories {:?}.",
+                    consent_status, context.model_id, required_categories
+                ))),
             }
-            return Err(AIInteractionError::ConsentNotGranted(format!(
-                "Consent not granted (status: {:?}) for model {} with categories {:?}. Cannot send prompt.",
-                consent_status, context.model_id, required_categories
-            )));
         }
         
         // Update AIInteractionContext's consent_given flag based on the check
@@ -244,6 +250,85 @@ impl AIInteractionLogicService for DefaultAIInteractionLogicService {
     async fn get_user_consent_status_for_model(&self, model_id: &str, user_id: &str, categories: &[AIDataCategory]) -> Result<AIConsentStatus, AIInteractionError> {
         self.consent_manager.get_consent_status(model_id, user_id, categories).await
     }
+
+    async fn execute_tool_for_interaction(&mut self, interaction_id: &str, tool_name: String, arguments: Value) -> Result<Value, AIInteractionError> {
+        let context = self.get_interaction_context(interaction_id).await?;
+
+        // --- Consent Check (similar to send_prompt) ---
+        let user_id = "default_user"; // Placeholder
+        // Using Proprietary as a placeholder for generic text/tool usage
+        let required_categories = [AIDataCategory::Proprietary]; 
+
+        let consent_status = self.consent_manager.get_consent_status(
+            &context.model_id,
+            user_id,
+            &required_categories,
+        ).await?;
+
+        if consent_status != AIConsentStatus::Granted {
+            match consent_status {
+                AIConsentStatus::PendingUserAction => return Err(AIInteractionError::ConsentPending {
+                    model_id: context.model_id.clone(),
+                    categories: required_categories.to_vec(),
+                }),
+                AIConsentStatus::Denied => return Err(AIInteractionError::ConsentDenied {
+                    model_id: context.model_id.clone(),
+                    categories: required_categories.to_vec(),
+                }),
+                AIConsentStatus::Expired => return Err(AIInteractionError::ConsentExpired {
+                    model_id: context.model_id.clone(),
+                    categories: required_categories.to_vec(),
+                }),
+                _ => return Err(AIInteractionError::ConsentNotGranted(format!( // Fallback
+                    "Consent not granted (status: {:?}) for model {}, tool {} with categories {:?}.",
+                    consent_status, context.model_id, tool_name, required_categories
+                ))),
+            }
+        }
+        // --- End Consent Check ---
+
+        let conn_service_guard = self.connection_service.lock().await;
+        
+        let profiles = self.list_available_models().await?;
+        let model_profile = profiles.iter().find(|p| p.model_id == context.model_id)
+            .ok_or_else(|| AIInteractionError::ModelNotFound(context.model_id.clone()))?;
+
+        // Check if the model/server actually supports the tool
+        // This requires ToolDefinition to be part of AIModelProfile or ServerCapabilities.
+        // For now, assume ServerCapabilities in AIModelProfile holds ToolDefinitions.
+        // The mcp-echo-server defines "echo" tool in its ServerCapabilities.
+        let server_capabilities = model_profile.mcp_server_config.clone(); // Placeholder, need actual capabilities from ServerInfo or MCPServerConfig extension
+                                                                            // Let's assume ServerCapabilities are part of AIModelProfile.server_info.server_capabilities
+        
+        // Actually, ServerCapabilities are part of the MCPClientInstance, which we get via MCPConnectionService
+        let client_instance_arc = conn_service_guard.get_client_instance(&model_profile.server_id)
+            .ok_or_else(|| AIInteractionError::ConnectionError(format!("Client instance not found for server_id: {}", model_profile.server_id)))?;
+        
+        let client_instance_guard = client_instance_arc.lock().await;
+        let server_caps = client_instance_guard.get_server_capabilities().ok_or_else(|| AIInteractionError::OperationNotSupported(format!("Server capabilities not available for model {}", model_profile.model_id)))?;
+
+        if !server_caps.tools.iter().any(|t| t.name == tool_name) {
+             return Err(AIInteractionError::OperationNotSupported(format!("Tool '{}' not supported by model {}", tool_name, model_profile.model_id)));
+        }
+        // Drop guard before await on send_request_internal
+        drop(client_instance_guard);
+
+
+        // Call the "tools/call" MCP method
+        let params = json!({
+            "name": tool_name,
+            "arguments": arguments,
+            // Potentially add other context like interaction_id if MCP spec requires
+        });
+
+        let response = MCPClientInstance::send_request_internal(client_instance_arc.clone(), "tools/call".to_string(), params)
+            .await
+            .map_err(|e| AIInteractionError::ConnectionError(format!("MCP Error calling tool: {:?}", e)))?;
+        
+        // Assuming the result of tools/call is directly the tool's output value
+        response.result.ok_or_else(|| AIInteractionError::InternalServerError("Tool execution returned no result".to_string()))
+    }
+
 
     async fn load_model_profiles(&mut self) -> Result<(), AIInteractionError> {
         println!("[DefaultAIInteractionLogicService] STUB: load_model_profiles called. Re-evaluating available models.");

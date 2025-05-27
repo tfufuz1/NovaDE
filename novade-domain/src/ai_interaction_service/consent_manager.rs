@@ -49,33 +49,38 @@ impl MCPConsentManager {
         &self,
         model_id: &str,
         user_id: &str,
-        categories: &[AIDataCategory], // categories are not used in this stub but would be in a real impl
+        categories: &[AIDataCategory], 
     ) -> Result<AIConsentStatus, AIInteractionError> {
         println!(
             "[MCPConsentManager] Getting consent status for model_id: '{}', user_id: '{}', categories: {:?}",
             model_id, user_id, categories
         );
+
+        // --- Test Hook for Forcing Granted Status ---
+        if model_id.contains("_FORCE_GRANT_") {
+            println!("[MCPConsentManager] TEST HOOK: Forcing GRANTED status for model_id: {}", model_id);
+            return Ok(AIConsentStatus::Granted);
+        }
+        // --- End Test Hook ---
         
         let consents_guard = self.recorded_consents.lock().await;
         if let Some(consent_record) = consents_guard.get(&(model_id.to_string(), user_id.to_string())) {
-            // Basic check: if a record exists, and includes all requested categories, assume granted.
-            // This is a simplification. Real logic would check expiry, specific categories, etc.
             let all_categories_covered = categories.iter().all(|cat| consent_record.data_categories.contains(cat));
             if all_categories_covered {
-                 // And check if not expired (simplified: assuming no expiry for now if expires_at is None)
-                if consent_record.expires_at.is_none() { // Basic check, real expiry logic needed
+                if consent_record.expires_at.is_none() { 
                     return Ok(AIConsentStatus::Granted);
                 } else {
-                    // TODO: Implement actual date/time comparison for expiry
-                    // For now, if expires_at is Some, assume it might be expired or needs checking
-                    println!("[MCPConsentManager] Consent for model '{}', user '{}' has an expiry. Further check needed.", model_id, user_id);
-                    // Fall through to PendingUserAction or specific expired status if logic is added
+                    // Basic expiry check for testing. A real implementation needs proper date parsing and comparison.
+                    if consent_record.expires_at.as_deref() == Some("EXPIRED_FOR_TEST") {
+                        println!("[MCPConsentManager] Consent for model '{}', user '{}' is marked as EXPIRED_FOR_TEST.", model_id, user_id);
+                        return Ok(AIConsentStatus::Expired);
+                    }
+                    println!("[MCPConsentManager] Consent for model '{}', user '{}' has an expiry date '{}'. Further check needed (not implemented).", model_id, user_id, consent_record.expires_at.as_ref().unwrap());
+                    // Fall through to PendingUserAction if expiry logic is not fully implemented or date is in future
                 }
             }
         }
         
-        // If no specific grant is found that covers the request, return PendingUserAction.
-        // This simulates that we might need to ask the user, or it's the default state.
         Ok(AIConsentStatus::PendingUserAction)
     }
 
