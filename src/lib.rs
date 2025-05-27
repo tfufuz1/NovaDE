@@ -11,5 +11,6 @@ pub mod render_pass;
 pub mod surface_swapchain;
 pub mod sync_primitives;
 pub mod texture;
+pub mod client_buffer; // Added
 
 pub use error::{Result, VulkanError};

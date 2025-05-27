@@ -1,10 +1,12 @@
 use crate::error::{Result, VulkanError};
 use crate::instance::VulkanInstance;
 use crate::physical_device::PhysicalDeviceInfo;
-use crate::device::LogicalDevice; // Assuming Arc<Device> is accessible from LogicalDevice
+use crate::device::LogicalDevice;
 use std::sync::Arc;
 use vulkanalia::prelude::v1_0::*;
 use vk_mem_rs::{Allocator as VmaAllocator, AllocatorCreateInfo, Allocation, AllocationCreateInfo, MemoryUsage, AllocationCreateFlags};
+use std::os::unix::io::RawFd;
+use vulkanalia::vk::{ExtExternalMemoryDmaBufExtension, KhrExternalMemoryFdExtension, ExtImageDrmFormatModifierExtension, KhrExternalMemoryExtension, KhrGetPhysicalDeviceProperties2Extension}; // For dedicated allocation check
 
 pub struct Allocator {
     vma_allocator: VmaAllocator,
@@ -130,7 +132,121 @@ impl Drop for Allocator {
     fn drop(&mut self) {
         // VMA allocator is destroyed when it goes out of scope.
         // Its Drop trait handles cleanup.
-        // self.vma_allocator.destroy(); // Not needed if VmaAllocator implements Drop
         log::debug!("VMA Allocator dropped, resources should be freed.");
+    }
+
+    // Helper to find memory type index
+    fn find_memory_type_index(
+        &self,
+        type_filter: u32,
+        properties: vk::MemoryPropertyFlags,
+        instance: &Instance,
+        physical_device: vk::PhysicalDevice,
+    ) -> Result<u32> {
+        let memory_properties = unsafe { instance.get_physical_device_memory_properties(physical_device) };
+        for i in 0..memory_properties.memory_type_count {
+            if (type_filter & (1 << i)) != 0 && memory_properties.memory_types[i as usize].property_flags.contains(properties) {
+                return Ok(i);
+            }
+        }
+        Err(VulkanError::Message("Failed to find suitable memory type.".to_string()))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn import_dma_buf_as_image(
+        &self,
+        fd: RawFd,
+        width: u32,
+        height: u32,
+        vulkan_format: vk::Format,
+        drm_format_modifier: Option<u64>,
+        image_usage: vk::ImageUsageFlags,
+        instance_vulkanalia: &Instance, // Renamed to avoid conflict with struct field
+        physical_device: vk::PhysicalDevice,
+        device_vulkanalia: &Device,    // Renamed to avoid conflict
+    ) -> Result<(vk::Image, vk::DeviceMemory)> {
+
+        let mut external_memory_image_info = vk::ExternalMemoryImageCreateInfo::builder()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+
+        let mut image_info = vk::ImageCreateInfo::builder()
+            .image_type(vk::ImageType::_2D)
+            .format(vulkan_format)
+            .extent(vk::Extent3D::builder().width(width).height(height).depth(1).build())
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::_1)
+            .tiling(if drm_format_modifier.is_some() { vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT } else { vk::ImageTiling::OPTIMAL })
+            .usage(image_usage)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .push_next(&mut external_memory_image_info);
+
+        let mut modifier_info; 
+        if let Some(modifier) = drm_format_modifier {
+            if !device_vulkanalia.enabled_extensions().contains(&ExtImageDrmFormatModifierExtension::name()) {
+               return Err(VulkanError::Message("DRM format modifier provided, but VK_EXT_image_drm_format_modifier extension is not enabled on device.".to_string()));
+            }
+            log::debug!("Using DRM format modifier: {}", modifier);
+            modifier_info = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::builder()
+                .drm_format_modifier(modifier)
+                .drm_format_modifier_plane_count(1);
+            image_info = image_info.push_next(&mut modifier_info);
+        }
+
+        let image = unsafe { device_vulkanalia.create_image(&image_info, None) }
+            .map_err(VulkanError::VkResult)?;
+
+        let mut dedicated_allocation_required = false;
+        let mut memory_requirements2 = vk::MemoryRequirements2::builder();
+        let mut dedicated_reqs = vk::MemoryDedicatedRequirements::builder();
+        
+        // Assuming KHR_get_physical_device_properties2 is enabled on instance if KHR_external_memory is enabled on device.
+        // KHR_dedicated_allocation is core in 1.1. Device extensions imply certain instance extensions.
+        // This check is simplified; a robust app would track enabled instance/device extensions.
+        if device_vulkanalia.enabled_extensions().contains(&KhrExternalMemoryExtension::name()) {
+            memory_requirements2 = memory_requirements2.push_next(&mut dedicated_reqs);
+            let image_mem_req_info = vk::ImageMemoryRequirementsInfo2::builder().image(image);
+            unsafe { device_vulkanalia.get_image_memory_requirements2(&image_mem_req_info, &mut memory_requirements2); }
+            if dedicated_reqs.prefers_dedicated_allocation != vk::FALSE || dedicated_reqs.requires_dedicated_allocation != vk::FALSE {
+                dedicated_allocation_required = true;
+                log::debug!("DMA-BUF image {} dedicated allocation.", if dedicated_reqs.requires_dedicated_allocation != vk::FALSE {"requires"} else {"prefers"});
+            }
+        }
+        let memory_requirements = if dedicated_allocation_required {
+             memory_requirements2.memory_requirements // Use this if dedicated check was done
+        } else {
+            unsafe { device_vulkanalia.get_image_memory_requirements(image) }
+        };
+
+
+        let mut import_memory_info = vk::ImportMemoryFdInfoKHR::builder()
+            .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+            .fd(fd);
+
+        let mut memory_allocate_info = vk::MemoryAllocateInfo::builder()
+            .allocation_size(memory_requirements.size)
+            .memory_type_index(self.find_memory_type_index(
+                memory_requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                instance_vulkanalia, physical_device
+            )?)
+            .push_next(&mut import_memory_info);
+
+        let mut dedicated_alloc_info;
+        if dedicated_allocation_required {
+            dedicated_alloc_info = vk::MemoryDedicatedAllocateInfo::builder().image(image);
+            memory_allocate_info = memory_allocate_info.push_next(&mut dedicated_alloc_info);
+        }
+
+        let memory = unsafe { device_vulkanalia.allocate_memory(&memory_allocate_info, None) }
+            .map_err(VulkanError::VkResult)?;
+
+        unsafe { device_vulkanalia.bind_image_memory(image, memory, 0) }
+            .map_err(VulkanError::VkResult)?;
+        
+        log::info!("Imported DMA-BUF (fd: {}) as VkImage with format {:?}, modifier {:?}", fd, vulkan_format, drm_format_modifier);
+
+        Ok((image, memory))
     }
 }
