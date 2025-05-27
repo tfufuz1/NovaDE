@@ -6,24 +6,28 @@ use std::collections::HashMap;
 use super::workspace_item_widget::WorkspaceItemWidget;
 
 // No CompositeTemplate for now, will create Box manually.
+use std::rc::Rc;
+use crate::shell::shell_workspace_service::ShellWorkspaceService;
+
+
 #[derive(Default)]
 pub struct WorkspaceIndicatorWidget {
-    // If not using TemplateChild, this would be an Option<gtk::Box> initialized in constructed
-    // For simplicity and since we are building UI in code:
-    pub workspace_items_container: RefCell<Option<Box>>, // Container to hold WorkspaceItemWidgets
+    pub workspace_items_container: RefCell<Option<Box>>,
     pub workspace_item_widgets: RefCell<HashMap<String, WorkspaceItemWidget>>,
+    pub workspace_service: RefCell<Option<Rc<ShellWorkspaceService>>>,
 }
 
 #[glib::object_subclass]
 impl ObjectSubclass for WorkspaceIndicatorWidget {
     const NAME: &'static str = "NovaDEWorkspaceIndicatorWidget";
     type Type = super::WorkspaceIndicatorWidget;
-    type ParentType = gtk::Box; // Changed from gtk::Widget to gtk::Box as it's a container
+    type ParentType = gtk::Box;
 
     fn new() -> Self {
         Self {
             workspace_items_container: RefCell::new(None),
             workspace_item_widgets: RefCell::new(HashMap::new()),
+            workspace_service: RefCell::new(None),
         }
     }
 
@@ -99,19 +103,28 @@ impl WorkspaceIndicatorWidget {
             num
         );
 
-        // Simple visual feedback for testing: make the clicked item active
-        if let Some(clicked_id) = &id {
-            let mut items_map = self.workspace_item_widgets.borrow_mut();
-            for (current_id, widget_in_map) in items_map.iter_mut() {
-                let mut temp_info = super::types::WorkspaceInfo {
-                    id: widget_in_map.workspace_id().unwrap_or_default(),
-                    name: widget_in_map.tooltip_text().map(|s| s.to_string()).unwrap_or_default(),
-                    icon_name: None, // Not stored in item, retrieve if needed from a central source
-                    number: widget_in_map.workspace_number().unwrap_or_default(),
-                    is_active: current_id == clicked_id,
-                    is_occupied: false, // Not currently tracking
-                };
-                widget_in_map.update_content(&temp_info);
+        if let Some(service_rc) = self.workspace_service.borrow().as_ref() {
+            if let Some(id_str) = id {
+                service_rc.switch_to_workspace(id_str);
+                // After switching, refresh the display from the service
+                self.obj().refresh_workspaces();
+            }
+        } else {
+            // Fallback: if no service, do the simple local visual feedback (optional)
+            tracing::warn!("WorkspaceService not set in WorkspaceIndicatorWidget. Click will only have local effect.");
+            if let Some(clicked_id_str) = &item_widget.workspace_id() { // Use original item_widget's id
+                let mut items_map = self.workspace_item_widgets.borrow_mut();
+                for (current_id, widget_in_map) in items_map.iter_mut() {
+                     let mut temp_info = super::types::WorkspaceInfo {
+                        id: widget_in_map.workspace_id().unwrap_or_default(),
+                        name: widget_in_map.tooltip_text().map(|s| s.to_string()).unwrap_or_default(),
+                        icon_name: None, 
+                        number: widget_in_map.workspace_number().unwrap_or_default(),
+                        is_active: current_id == clicked_id_str,
+                        is_occupied: false, 
+                    };
+                    widget_in_map.update_content(&temp_info);
+                }
             }
         }
     }
