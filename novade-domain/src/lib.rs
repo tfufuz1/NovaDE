@@ -1,23 +1,3 @@
-// Declare modules
-pub mod common_events;
-pub mod shared_types;
-
-// Re-export public types from shared_types
-pub use shared_types::{
-    ApplicationId,
-    UserSessionState,
-    ResourceIdentifier,
-};
-
-// Re-export public types from common_events
-pub use common_events::{
-    UserActivityType,
-    UserActivityDetectedEvent,
-    ShutdownReason,
-    SystemShutdownInitiatedEvent,
-};
-
-// Declare the workspaces module (replacing the placeholder)
 pub mod workspaces;
 
 // Re-export key public types from the workspaces module (Iteration 1)
@@ -321,3 +301,4 @@ mod tests {
         assert_eq!(ShutdownReason::default(), ShutdownReason::Other);
     }
 }
+

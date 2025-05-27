@@ -71,17 +71,24 @@ impl MenuButtonImpl for AppMenuButton {}
 // Private methods
 impl AppMenuButton {
     pub(super) fn update_active_window_info_impl(
+use gtk::gio; // Ensure gio is imported for MenuModel
+
+// Private methods
+impl AppMenuButton {
+    pub(super) fn update_active_window_info_impl(
         &self,
         app_id: Option<String>,
         window_title: Option<String>,
         icon_name: Option<String>,
+        menu_model: Option<&gio::MenuModel>, // Added menu_model parameter
     ) {
         let obj = self.obj();
 
-        // Store new state
+        // Store new state (if needed, but menu_model is set directly on widget)
         self.active_app_id.replace(app_id.clone());
         self.active_window_title.replace(window_title.clone());
         self.active_icon_name.replace(icon_name.clone());
+        // menu_model is not stored in imp struct fields, it's applied directly to the GTK widget
 
         // Update Icon
         if let Some(icon_name_str) = icon_name.as_ref() {
@@ -98,5 +105,8 @@ impl AppMenuButton {
         } else {
             obj.set_label("Apps"); // Default label
         }
+        
+        // Update Menu Model
+        obj.set_menu_model(menu_model);
     }
 }

@@ -32,4 +32,41 @@ impl WorkspaceIndicatorWidget {
     pub(super) fn on_workspace_item_clicked_priv(&self, item_widget: &WorkspaceItemWidget) {
         self.imp().on_workspace_item_clicked_priv_impl(item_widget);
     }
+
+    // Renamed from set_shell_workspace_service
+    pub fn set_domain_workspace_connector(
+        &self,
+        connector: std::rc::Rc<crate::shell::domain_workspace_connector::DomainWorkspaceConnector>,
+        // Receiver for UI updates, created in main.rs and its sender is passed to DomainWorkspaceConnector
+        ui_event_receiver: glib::Receiver<Vec<WorkspaceInfo>>, 
+    ) {
+        self.imp().domain_connector.replace(Some(connector.clone()));
+
+        // Attach the receiver to the main context to update UI
+        let widget_weak = self.downgrade(); // Use weak reference to avoid cycles
+        ui_event_receiver.attach(None, move |infos| {
+            if let Some(widget) = widget_weak.upgrade() {
+                tracing::info!("WorkspaceIndicatorWidget: Received workspace update via glib channel.");
+                widget.update_workspaces(infos);
+            } else {
+                tracing::warn!("WorkspaceIndicatorWidget: Weak reference upgrade failed in UI event receiver.");
+            }
+            glib::ControlFlow::Continue
+        });
+        
+        // Perform initial fetch of workspaces
+        // This needs to be done carefully to avoid blocking and to ensure it runs on the UI thread
+        // for the final update.
+        let widget_clone = self.clone(); // Clone for the async block
+        // Spawn on the main context to ensure UI updates happen on the correct thread
+        glib::MainContext::default().spawn_local(async move {
+            tracing::info!("WorkspaceIndicatorWidget: Performing initial workspace fetch.");
+            let initial_infos = connector.get_all_workspaces_for_ui().await;
+            widget_clone.update_workspaces(initial_infos);
+        });
+    }
+
+    // The old refresh_workspaces and set_shell_workspace_service are effectively replaced.
+    // If a manual refresh is needed, it should be triggered via the connector which then
+    // sends an event through the existing channel.
 }

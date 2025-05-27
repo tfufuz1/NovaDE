@@ -7,14 +7,17 @@ use super::workspace_item_widget::WorkspaceItemWidget;
 
 // No CompositeTemplate for now, will create Box manually.
 use std::rc::Rc;
-use crate::shell::shell_workspace_service::ShellWorkspaceService;
+// Corrected path to DomainWorkspaceConnector
+use crate::shell::domain_workspace_connector::DomainWorkspaceConnector;
+use tokio::runtime::Handle; // For Handle::current() in the click handler
 
 
 #[derive(Default)]
 pub struct WorkspaceIndicatorWidget {
     pub workspace_items_container: RefCell<Option<Box>>,
     pub workspace_item_widgets: RefCell<HashMap<String, WorkspaceItemWidget>>,
-    pub workspace_service: RefCell<Option<Rc<ShellWorkspaceService>>>,
+    // Changed to DomainWorkspaceConnector
+    pub domain_connector: RefCell<Option<Rc<DomainWorkspaceConnector>>>, 
 }
 
 #[glib::object_subclass]
@@ -27,7 +30,7 @@ impl ObjectSubclass for WorkspaceIndicatorWidget {
         Self {
             workspace_items_container: RefCell::new(None),
             workspace_item_widgets: RefCell::new(HashMap::new()),
-            workspace_service: RefCell::new(None),
+            domain_connector: RefCell::new(None), // Initialize new field
         }
     }
 
@@ -103,29 +106,36 @@ impl WorkspaceIndicatorWidget {
             num
         );
 
-        if let Some(service_rc) = self.workspace_service.borrow().as_ref() {
+        if let Some(connector_rc) = self.domain_connector.borrow().as_ref() {
             if let Some(id_str) = id {
-                service_rc.switch_to_workspace(id_str);
-                // After switching, refresh the display from the service
-                self.obj().refresh_workspaces();
+                let connector_clone = connector_rc.clone();
+                let id_clone = id_str.clone();
+                // Spawn an async task to call the async method
+                Handle::current().spawn(async move {
+                    if let Err(e) = connector_clone.switch_to_workspace_in_domain(id_clone).await {
+                        tracing::error!("Failed to switch workspace via domain connector: {}", e);
+                    }
+                    // UI update will now be triggered by the event listener in DomainWorkspaceConnector
+                    // and then sent via glib::Sender to the UI thread in WorkspaceIndicatorWidget's mod.rs
+                });
             }
         } else {
-            // Fallback: if no service, do the simple local visual feedback (optional)
-            tracing::warn!("WorkspaceService not set in WorkspaceIndicatorWidget. Click will only have local effect.");
-            if let Some(clicked_id_str) = &item_widget.workspace_id() { // Use original item_widget's id
-                let mut items_map = self.workspace_item_widgets.borrow_mut();
-                for (current_id, widget_in_map) in items_map.iter_mut() {
-                     let mut temp_info = super::types::WorkspaceInfo {
-                        id: widget_in_map.workspace_id().unwrap_or_default(),
-                        name: widget_in_map.tooltip_text().map(|s| s.to_string()).unwrap_or_default(),
-                        icon_name: None, 
-                        number: widget_in_map.workspace_number().unwrap_or_default(),
-                        is_active: current_id == clicked_id_str,
-                        is_occupied: false, 
-                    };
-                    widget_in_map.update_content(&temp_info);
-                }
-            }
+            tracing::warn!("DomainWorkspaceConnector not set in WorkspaceIndicatorWidget. Click has no effect.");
+            // Optional: Fallback to old local visual feedback if desired, but ideally should not happen.
+            // if let Some(clicked_id_str) = &item_widget.workspace_id() {
+            //     let mut items_map = self.workspace_item_widgets.borrow_mut();
+            //     for (current_id, widget_in_map) in items_map.iter_mut() {
+            //          let mut temp_info = super::types::WorkspaceInfo {
+            //             id: widget_in_map.workspace_id().unwrap_or_default(),
+            //             name: widget_in_map.tooltip_text().map(|s| s.to_string()).unwrap_or_default(),
+            //             icon_name: None, 
+            //             number: widget_in_map.workspace_number().unwrap_or_default(),
+            //             is_active: current_id == clicked_id_str,
+            //             is_occupied: false, 
+            //         };
+            //         widget_in_map.update_content(&temp_info);
+            //     }
+            // }
         }
     }
 }
