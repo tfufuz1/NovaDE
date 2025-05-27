@@ -18,6 +18,8 @@ pub mod common;
 pub mod widgets;
 pub mod styles;
 pub mod assets;
+pub mod shell;
+pub mod theming_gtk;
 
 // Re-export key types for convenience
 pub use error::UiError;
