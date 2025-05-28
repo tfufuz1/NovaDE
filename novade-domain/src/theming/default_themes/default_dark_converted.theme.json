@@ -1,0 +1,119 @@
+{
+  "id": "default-dark-from-rust",
+  "name": "Default Dark (Converted)",
+  "description": "Default dark theme for NovaDE, converted from Rust code.",
+  "author": "NovaDE Team",
+  "version": "1.0.0",
+  "base_tokens": {
+    "color-background": {
+      "id": "color-background",
+      "value": { "color": "#202020FF" },
+      "description": "Background color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-text-default": {
+      "id": "color-text-default",
+      "value": { "color": "#FFFFFFFF" },
+      "description": "Default foreground/text color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-primary-default": {
+      "id": "color-primary-default",
+      "value": { "color": "#0078D7FF" },
+      "description": "Primary interactive color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-secondary-default": {
+      "id": "color-secondary-default",
+      "value": { "color": "#0063B1FF" },
+      "description": "Secondary interactive color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-status-success": {
+      "id": "color-status-success",
+      "value": { "color": "#5CB85CFF" },
+      "description": "Success status color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-status-warning": {
+      "id": "color-status-warning",
+      "value": { "color": "#F0AD4EFF" },
+      "description": "Warning status color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-status-error": {
+      "id": "color-status-error",
+      "value": { "color": "#D9534FFF" },
+      "description": "Error status color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-status-info": {
+      "id": "color-status-info",
+      "value": { "color": "#5BC0DEFF" },
+      "description": "Info status color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-border-default": {
+      "id": "color-border-default",
+      "value": { "color": "#454545FF" },
+      "description": "Default border color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-shadow-default": {
+      "id": "color-shadow-default",
+      "value": { "color": "#00000080" },
+      "description": "Default shadow color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-interactive-hover-background": {
+      "id": "color-interactive-hover-background",
+      "value": { "color": "#2D2D2DFF" },
+      "description": "Hover state background color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-interactive-active-background": {
+      "id": "color-interactive-active-background",
+      "value": { "color": "#333333FF" },
+      "description": "Active state background color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "color-interactive-disabled-foreground": {
+      "id": "color-interactive-disabled-foreground",
+      "value": { "color": "#666666FF" },
+      "description": "Disabled state foreground color from DefaultDarkTheme",
+      "group": "color"
+    },
+    "property-font-family": {
+      "id": "property-font-family",
+      "value": { "fontFamily": "Segoe UI, sans-serif" },
+      "description": "Property: font-family from DefaultDarkTheme",
+      "group": "property"
+    },
+    "property-font-size": {
+      "id": "property-font-size",
+      "value": { "fontSize": "14px" },
+      "description": "Property: font-size from DefaultDarkTheme",
+      "group": "property"
+    },
+    "property-border-radius": {
+      "id": "property-border-radius",
+      "value": { "dimension": "4px" },
+      "description": "Property: border-radius from DefaultDarkTheme",
+      "group": "property"
+    },
+    "property-animation-duration": {
+      "id": "property-animation-duration",
+      "value": { "duration": "0.2s" },
+      "description": "Property: animation-duration from DefaultDarkTheme",
+      "group": "property"
+    }
+  },
+  "variants": [
+    {
+      "applies_to_scheme": "dark",
+      "tokens": {}
+    }
+  ],
+  "supported_accent_colors": null,
+  "accentable_tokens": null
+}

@@ -1,0 +1,119 @@
+{
+  "id": "default-light-from-rust",
+  "name": "Default Light (Converted)",
+  "description": "Default light theme for NovaDE, converted from Rust code.",
+  "author": "NovaDE Team",
+  "version": "1.0.0",
+  "base_tokens": {
+    "color-background": {
+      "id": "color-background",
+      "value": { "color": "#F8F8F8FF" },
+      "description": "Background color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-text-default": {
+      "id": "color-text-default",
+      "value": { "color": "#212121FF" },
+      "description": "Default foreground/text color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-primary-default": {
+      "id": "color-primary-default",
+      "value": { "color": "#0078D7FF" },
+      "description": "Primary interactive color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-secondary-default": {
+      "id": "color-secondary-default",
+      "value": { "color": "#0063B1FF" },
+      "description": "Secondary interactive color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-status-success": {
+      "id": "color-status-success",
+      "value": { "color": "#107C10FF" },
+      "description": "Success status color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-status-warning": {
+      "id": "color-status-warning",
+      "value": { "color": "#C58607FF" },
+      "description": "Warning status color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-status-error": {
+      "id": "color-status-error",
+      "value": { "color": "#E81123FF" },
+      "description": "Error status color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-status-info": {
+      "id": "color-status-info",
+      "value": { "color": "#0078D7FF" },
+      "description": "Info status color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-border-default": {
+      "id": "color-border-default",
+      "value": { "color": "#D5D5D5FF" },
+      "description": "Default border color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-shadow-default": {
+      "id": "color-shadow-default",
+      "value": { "color": "#0000004D" },
+      "description": "Default shadow color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-interactive-hover-background": {
+      "id": "color-interactive-hover-background",
+      "value": { "color": "#E5F1FBFF" },
+      "description": "Hover state background color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-interactive-active-background": {
+      "id": "color-interactive-active-background",
+      "value": { "color": "#CCE4F7FF" },
+      "description": "Active state background color from DefaultLightTheme",
+      "group": "color"
+    },
+    "color-interactive-disabled-foreground": {
+      "id": "color-interactive-disabled-foreground",
+      "value": { "color": "#CCCCCCFF" },
+      "description": "Disabled state foreground color from DefaultLightTheme",
+      "group": "color"
+    },
+    "property-font-family": {
+      "id": "property-font-family",
+      "value": { "fontFamily": "Segoe UI, sans-serif" },
+      "description": "Property: font-family from DefaultLightTheme",
+      "group": "property"
+    },
+    "property-font-size": {
+      "id": "property-font-size",
+      "value": { "fontSize": "14px" },
+      "description": "Property: font-size from DefaultLightTheme",
+      "group": "property"
+    },
+    "property-border-radius": {
+      "id": "property-border-radius",
+      "value": { "dimension": "4px" },
+      "description": "Property: border-radius from DefaultLightTheme",
+      "group": "property"
+    },
+    "property-animation-duration": {
+      "id": "property-animation-duration",
+      "value": { "duration": "0.2s" },
+      "description": "Property: animation-duration from DefaultLightTheme",
+      "group": "property"
+    }
+  },
+  "variants": [
+    {
+      "applies_to_scheme": "light",
+      "tokens": {}
+    }
+  ],
+  "supported_accent_colors": null,
+  "accentable_tokens": null
+}

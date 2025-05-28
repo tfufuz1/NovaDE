@@ -6,6 +6,7 @@ pub mod types;
 pub mod errors;
 pub mod logic;
 pub mod service;
+pub mod default_config_service; // Added new module
 // default_themes is not a module of code, but a directory of assets.
 
 #[cfg(test)]
@@ -30,6 +31,7 @@ pub use types::{
 };
 pub use errors::ThemingError;
 pub use service::{ThemingEngine, ThemeChangedEvent};
+pub use default_config_service::DefaultFileSystemConfigService; // Export the new service
 
 // Constants for default file paths might also be useful to export if they
 // are needed by consumers for configuration, but typically these are internal details.

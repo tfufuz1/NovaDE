@@ -37,36 +37,36 @@ mod tests {
 
     #[async_trait]
     impl ConfigServiceAsync for MockConfigService {
-        async fn load_config_file_content_async(&self, file_path: &str) -> Result<String, CoreError> {
+        async fn read_config_file_string(&self, file_path: &str) -> Result<String, CoreError> { // Renamed method
             if let Some(err) = &self.error_on_load {
                 return Err(err.clone());
             }
             self.files
                 .get(file_path)
                 .cloned()
-                .ok_or_else(|| CoreError::NotFound(file_path.to_string()))
+                // Make error consistent with DefaultFileSystemConfigService and logic.rs expectations
+                .ok_or_else(|| CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![file_path.into()]}))
         }
 
-        async fn save_config_file_content_async(&self, _file_path: &str, _content: &str) -> Result<(), CoreError> {
-            if let Some(err) = &self.error_on_save {
-                return Err(err.clone());
-            }
+        // --- Dummy implementations for other ConfigServiceAsync methods if needed by tests ---
+        // --- (Copied from DefaultFileSystemConfigService for consistency, can be unimplemented!) ---
+        async fn write_config_file_string(&self, _file_path: &str, _content: String) -> Result<(), CoreError> { 
+            if let Some(err) = &self.error_on_save { return Err(err.clone()); }
+            // In a mock, you might store the written content if needed for assertions
             Ok(())
         }
-        async fn list_config_files_async(&self, _dir_path: &str) -> Result<Vec<String>, CoreError> {
-            if let Some(err) = &self.error_on_list {
-                return Err(err.clone());
-            }
-            Ok(self.files.keys().cloned().collect())
+        async fn read_file_to_string(&self, path: &std::path::Path) -> Result<String, CoreError> { 
+            self.read_config_file_string(path.to_str().unwrap_or_default()).await
         }
-        fn get_config_file_path(&self, _app_id: &crate::shared_types::ApplicationId, _config_name: &str, _format: Option<ConfigFormat>) -> Result<String, CoreError> {
-            unimplemented!("get_config_file_path not needed for these tests")
+        async fn list_files_in_dir(&self, _dir_path: &std::path::Path, _extension: Option<&str>) -> Result<Vec<std::path::PathBuf>, CoreError> { 
+            if let Some(err) = &self.error_on_list { return Err(err.clone()); }
+            Ok(self.files.keys().map(std::path::PathBuf::from).collect())
         }
-        fn get_config_dir_path(&self, _app_id: &crate::shared_types::ApplicationId, _subdir: Option<&str>) -> Result<String, CoreError> {
-            unimplemented!("get_config_dir_path not needed for these tests")
+        async fn get_config_dir(&self) -> Result<std::path::PathBuf, CoreError> { 
+            Ok(std::path::PathBuf::from("./mock_config_dir")) // Placeholder
         }
-        fn ensure_config_dir_exists(&self, _app_id: &crate::shared_types::ApplicationId) -> Result<String, CoreError> {
-            unimplemented!("ensure_config_dir_exists not needed for these tests")
+        async fn get_data_dir(&self) -> Result<std::path::PathBuf, CoreError> { 
+            Ok(std::path::PathBuf::from("./mock_data_dir")) // Placeholder
         }
     }
     
@@ -319,10 +319,10 @@ mod tests {
         assert_eq!(current_state_after_fail, initial_state);
     }
     
-    // TODO: test_reload_themes_and_tokens
-    // TODO: test_get_current_theme_state_caching
-    // TODO: test_list_available_themes
-    // TODO: test_get_theme_definition
+        // TODO: test_reload_themes_and_tokens (partially done, may need more scenarios)
+    // TODO: test_get_current_theme_state_caching (partially done)
+    // TODO: test_list_available_themes (partially done)
+    // TODO: test_get_theme_definition (partially done)
 
     #[tokio::test]
     async fn test_reload_themes_and_tokens_success() {
@@ -528,5 +528,392 @@ mod tests {
             Ok(Err(_)) => {}, // RecvError, means sender dropped or channel lagged (not expected here)
             Err(_) => {}, // Timeout, this is the expected outcome (no event)
         }
+    }
+
+    // --- Test for DefaultFileSystemConfigService ---
+    use crate::theming::default_config_service::DefaultFileSystemConfigService;
+    use std::fs as std_fs;
+    use std::io::Write;
+
+    // Helper to create dummy files for DefaultFileSystemConfigService tests
+    fn setup_temp_theme_files(base_content: &str, fallback_content: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let theming_dir = temp_dir.path().join("src/theming/default_themes");
+        std_fs::create_dir_all(&theming_dir).expect("Failed to create temp theming dir");
+
+        let base_path = theming_dir.join("base.tokens.json");
+        let fallback_path = theming_dir.join("fallback.theme.json");
+
+        let mut base_file = std_fs::File::create(&base_path).expect("Failed to create temp base tokens file");
+        base_file.write_all(base_content.as_bytes()).expect("Failed to write temp base tokens");
+
+        let mut fallback_file = std_fs::File::create(&fallback_path).expect("Failed to create temp fallback theme file");
+        fallback_file.write_all(fallback_content.as_bytes()).expect("Failed to write temp fallback theme");
+        
+        // The DEFAULT_GLOBAL_TOKENS_PATH and FALLBACK_THEME_PATH are relative like "src/theming/..."
+        // We need to run the test as if the temp_dir is the crate root.
+        // This is hard to achieve directly.
+        // Alternative: Modify ThemingEngine to accept base_path for testing, or have
+        // DefaultFileSystemConfigService take a root path.
+        // For now, this helper creates the files, but the test will use fixed paths
+        // assuming they are present relative to where `cargo test` is run (crate root).
+        // This helper is more for direct testing of DefaultFileSystemConfigService if needed.
+        // The ThemingEngine test will rely on the actual files being present.
+
+        (temp_dir, base_path, fallback_path)
+    }
+
+
+    #[tokio::test]
+    async fn test_theming_engine_new_default_loading_with_filesystem_service() {
+        // This test assumes that `src/theming/default_themes/base.tokens.json`
+        // and `src/theming/default_themes/fallback.theme.json` exist relative to the
+        // crate root where `cargo test` is executed.
+
+        // 1. Create dummy content for these files if they don't exist or to control test input.
+        //    This is tricky because tests run from crate root, so paths are relative to it.
+        //    Let's ensure the files exist for the test.
+        let base_tokens_content = get_valid_base_tokens_json();
+        let fallback_theme_content = get_valid_fallback_theme_json();
+
+        // Create files in expected locations if they don't exist (for local/CI test runs)
+        // Note: This approach of writing to src might be problematic and is generally
+        // not good practice for tests. Tests should ideally use temp files or mocks.
+        // However, DefaultFileSystemConfigService reads from fixed paths.
+        // A better DefaultFileSystemConfigService would take a root path in constructor.
+        
+        // For this test, we'll just proceed assuming the files are there as per project structure.
+        // If they are not, this test will fail, which is an indicator of missing default assets.
+
+        let fs_config_service = Arc::new(DefaultFileSystemConfigService::new());
+
+        let engine_result = ThemingEngine::new(fs_config_service, None).await;
+        
+        if let Err(ref e) = engine_result {
+            // Provide more diagnostic information if it fails
+            if let ThemingError::InternalError(msg) = e {
+                if msg.contains("Konfigurationsdatei nicht gefunden") {
+                    panic!("File not found during ThemingEngine::new: {}. Ensure default theme/token files exist at '{}' and '{}'. Original error: {:?}", 
+                           msg, DEFAULT_GLOBAL_TOKENS_PATH, FALLBACK_THEME_PATH, e);
+                }
+            }
+            panic!("ThemingEngine::new failed with DefaultFileSystemConfigService: {:?}", e);
+        }
+        assert!(engine_result.is_ok(), "ThemingEngine::new with DefaultFileSystemConfigService failed.");
+        
+        let engine = engine_result.unwrap();
+
+        let current_config = engine.get_current_configuration().await;
+        // Default theme ID comes from FALLBACK_THEME_PATH which is "fallback-dark" in get_valid_fallback_theme_json
+        assert_eq!(current_config.selected_theme_id.as_str(), "fallback-dark"); 
+
+        let current_state = engine.get_current_theme_state().await;
+        assert_eq!(current_state.theme_id.as_str(), "fallback-dark");
+        assert_eq!(current_state.color_scheme, ColorSchemeType::Dark); // Default from logic
+        
+        // Check for tokens from fallback.theme.json
+        assert!(current_state.resolved_tokens.contains_key(&TokenIdentifier::new("color-background")), "Missing color-background from fallback theme");
+        assert_eq!(current_state.resolved_tokens.get(&TokenIdentifier::new("color-background")).unwrap(), "#1E1E1E");
+        
+        // Check for tokens from base.tokens.json
+        assert!(current_state.resolved_tokens.contains_key(&TokenIdentifier::new("color-global-black")), "Missing color-global-black from base tokens");
+        assert_eq!(current_state.resolved_tokens.get(&TokenIdentifier::new("color-global-black")).unwrap(), "#000000");
+        assert!(current_state.resolved_tokens.contains_key(&TokenIdentifier::new("spacing-global-medium")), "Missing spacing-global-medium from base tokens");
+        assert_eq!(current_state.resolved_tokens.get(&TokenIdentifier::new("spacing-global-medium")).unwrap(), "8px");
+    }
+
+    #[tokio::test]
+    async fn test_theming_engine_discovers_multiple_themes_with_filesystem_service() {
+        // This test relies on:
+        // 1. `src/theming/default_themes/base.tokens.json` (for global tokens)
+        // 2. `src/theming/default_themes/fallback.theme.json`
+        // 3. `src/theming/default_themes/another.theme.json` (created in a previous step)
+
+        // Note: This test uses DefaultFileSystemConfigService which reads from the actual filesystem.
+        // Ensure the above files exist in their correct locations relative to the crate root
+        // when `cargo test` is executed. The `another.theme.json` should have been created by
+        // a prior step in the agent's execution plan.
+
+        let fs_config_service = Arc::new(DefaultFileSystemConfigService::new());
+        let engine_result = ThemingEngine::new(fs_config_service, None).await;
+
+        if let Err(ref e) = engine_result {
+            // Provide more diagnostic information if it fails, especially for file not found.
+            if let ThemingError::InternalError(msg) = e {
+                if msg.contains("Konfigurationsdatei nicht gefunden") || msg.contains("Failed to read file") {
+                    panic!(
+                        "File not found during ThemingEngine::new in multi-theme discovery test: {}. \
+                        Ensure default theme/token files (base.tokens.json, fallback.theme.json, another.theme.json) \
+                        exist at their expected paths relative to the crate root (e.g., 'src/theming/default_themes/'). Original error: {:?}", 
+                        msg, e
+                    );
+                }
+            }
+            panic!("ThemingEngine::new with DefaultFileSystemConfigService failed during multi-theme discovery test: {:?}", e);
+        }
+        assert!(engine_result.is_ok(), "ThemingEngine::new with DefaultFileSystemConfigService failed.");
+        
+        let engine = engine_result.unwrap();
+        let available_themes = engine.list_available_themes().await;
+
+        // Check for at least "fallback-dark" and "another-test-theme".
+        // There might be other .theme.json files if more were added to the default_themes directory.
+        let found_fallback = available_themes.iter().any(|t| t.id.as_str() == "fallback-dark");
+        let found_another = available_themes.iter().any(|t| t.id.as_str() == "another-test-theme");
+
+        assert!(found_fallback, 
+            "Fallback theme 'fallback-dark' not found. Available themes: {:?}", 
+            available_themes.iter().map(|t| t.id.clone()).collect::<Vec<_>>()
+        );
+        assert!(found_another, 
+            "Discovered theme 'another-test-theme' not found. Available themes: {:?}", 
+            available_themes.iter().map(|t| t.id.clone()).collect::<Vec<_>>()
+        );
+        
+        // Optionally, check properties of 'another-test-theme' to ensure it was loaded correctly
+        if let Some(another_theme) = engine.get_theme_definition(&ThemeIdentifier::new("another-test-theme")).await {
+            assert_eq!(another_theme.name, "Another Test Theme");
+            assert_eq!(another_theme.variants.len(), 1, "Expected 1 variant for another-test-theme");
+            if !another_theme.variants.is_empty() {
+                assert_eq!(another_theme.variants[0].applies_to_scheme, ColorSchemeType::Light);
+            }
+        } else {
+            panic!("'another-test-theme' was listed by id but could not be retrieved by get_theme_definition.");
+        }
+
+        // --- Assertions for "default-dark-from-rust" ---
+        let found_converted_dark_theme = available_themes.iter().any(|t| t.id.as_str() == "default-dark-from-rust");
+        assert!(found_converted_dark_theme,
+            "Converted theme 'default-dark-from-rust' not found. Available themes: {:?}",
+            available_themes.iter().map(|t| t.id.clone()).collect::<Vec<_>>()
+        );
+
+        if let Some(converted_theme) = engine.get_theme_definition(&ThemeIdentifier::new("default-dark-from-rust")).await {
+            assert_eq!(converted_theme.name, "Default Dark (Converted)");
+            assert_eq!(converted_theme.author.as_deref(), Some("NovaDE Team"));
+            assert!(converted_theme.base_tokens.contains_key(&TokenIdentifier::new("color-background")));
+            assert!(converted_theme.base_tokens.contains_key(&TokenIdentifier::new("property-font-family")));
+
+            // Check a specific color token value
+            let bg_token = converted_theme.base_tokens.get(&TokenIdentifier::new("color-background")).unwrap();
+            match &bg_token.value {
+                TokenValue::Color(color_val) => assert_eq!(color_val, "#202020FF"),
+                other => panic!("Expected color-background to be a Color value, got {:?}", other),
+            }
+
+            // Check a specific property token value
+            let font_token = converted_theme.base_tokens.get(&TokenIdentifier::new("property-font-family")).unwrap();
+            match &font_token.value {
+                TokenValue::FontFamily(font_val) => assert_eq!(font_val, "Segoe UI, sans-serif"),
+                other => panic!("Expected property-font-family to be a FontFamily value, got {:?}", other),
+            }
+            
+            assert_eq!(converted_theme.variants.len(), 1);
+            assert_eq!(converted_theme.variants[0].applies_to_scheme, ColorSchemeType::Dark);
+            assert!(converted_theme.variants[0].tokens.is_empty(), "Expected converted dark theme's dark variant to have empty tokens (all in base)");
+
+        } else {
+            panic!("'default-dark-from-rust' was listed by id but could not be retrieved by get_theme_definition.");
+        }
+
+        // --- Assertions for "default-light-from-rust" ---
+        let found_converted_light_theme = available_themes.iter().any(|t| t.id.as_str() == "default-light-from-rust");
+        assert!(found_converted_light_theme,
+            "Converted theme 'default-light-from-rust' not found. Available themes: {:?}",
+            available_themes.iter().map(|t| t.id.clone()).collect::<Vec<_>>()
+        );
+        if let Some(converted_theme) = engine.get_theme_definition(&ThemeIdentifier::new("default-light-from-rust")).await {
+            assert_eq!(converted_theme.name, "Default Light (Converted)");
+            assert!(converted_theme.base_tokens.contains_key(&TokenIdentifier::new("color-background")));
+            let bg_token = converted_theme.base_tokens.get(&TokenIdentifier::new("color-background")).unwrap();
+            match &bg_token.value {
+                TokenValue::Color(color_val) => assert_eq!(color_val, "#F8F8F8FF"),
+                other => panic!("Expected light theme color-background to be a Color value, got {:?}", other),
+            }
+            assert_eq!(converted_theme.variants[0].applies_to_scheme, ColorSchemeType::Light);
+        } else {
+            panic!("'default-light-from-rust' was listed but could not be retrieved by get_theme_definition.");
+        }
+
+        // --- Assertions for "high-contrast-from-rust" ---
+        let found_high_contrast_theme = available_themes.iter().any(|t| t.id.as_str() == "high-contrast-from-rust");
+        assert!(found_high_contrast_theme,
+            "Converted theme 'high-contrast-from-rust' not found. Available themes: {:?}",
+            available_themes.iter().map(|t| t.id.clone()).collect::<Vec<_>>()
+        );
+        if let Some(converted_theme) = engine.get_theme_definition(&ThemeIdentifier::new("high-contrast-from-rust")).await {
+            assert_eq!(converted_theme.name, "High Contrast (Converted)");
+            assert!(converted_theme.base_tokens.contains_key(&TokenIdentifier::new("color-background")));
+            let bg_token = converted_theme.base_tokens.get(&TokenIdentifier::new("color-background")).unwrap();
+            match &bg_token.value {
+                TokenValue::Color(color_val) => assert_eq!(color_val, "#000000FF"),
+                other => panic!("Expected high-contrast color-background to be a Color value, got {:?}", other),
+            }
+            let font_size_token = converted_theme.base_tokens.get(&TokenIdentifier::new("property-font-size")).unwrap();
+             match &font_size_token.value {
+                TokenValue::FontSize(val) => assert_eq!(val, "16px"),
+                other => panic!("Expected high-contrast property-font-size to be a FontSize value, got {:?}", other),
+            }
+            assert_eq!(converted_theme.variants[0].applies_to_scheme, ColorSchemeType::Dark); // As per our conversion
+        } else {
+            panic!("'high-contrast-from-rust' was listed but could not be retrieved by get_theme_definition.");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_theming_engine_switch_themes_and_apply_config() {
+        // This test uses DefaultFileSystemConfigService and assumes the presence of:
+        // - src/theming/default_themes/base.tokens.json
+        // - src/theming/default_themes/fallback.theme.json
+        // - src/theming/default_themes/another.theme.json
+        // - src/theming/default_themes/default_dark_converted.theme.json
+        // - src/theming/default_themes/default_light_converted.theme.json
+        // - src/theming/default_themes/high_contrast_converted.theme.json
+
+        let fs_config_service = Arc::new(DefaultFileSystemConfigService::new());
+        let engine_result = ThemingEngine::new(fs_config_service, None).await;
+        assert!(engine_result.is_ok(), "Engine ::new failed: {:?}", engine_result.err());
+        let engine = engine_result.unwrap();
+
+        // --- 1. Initial State Verification (should be fallback-dark) ---
+        let initial_state = engine.get_current_theme_state().await;
+        assert_eq!(initial_state.theme_id.as_str(), "fallback-dark");
+        assert_eq!(initial_state.color_scheme, ColorSchemeType::Dark); // Default for fallback-dark
+        assert_eq!(initial_state.resolved_tokens.get(&TokenIdentifier::new("color-background")).unwrap(), "#1E1E1EFF");
+        assert_eq!(initial_state.resolved_tokens.get(&TokenIdentifier::new("color-panel-background")).unwrap(), "#252526FF");
+        let initial_primary_color = initial_state.resolved_tokens.get(&TokenIdentifier::new("color-primary")).unwrap().clone();
+
+
+        // --- 2. Switch Theme to "another-test-theme" (Light scheme by its definition) ---
+        let another_theme_id = ThemeIdentifier::new("another-test-theme");
+        let config_another_theme = ThemingConfiguration {
+            selected_theme_id: another_theme_id.clone(),
+            preferred_color_scheme: ColorSchemeType::Light, // This theme's variant is light
+            selected_accent_color: None,
+            custom_user_token_overrides: None,
+        };
+        let update_result_another = engine.update_configuration(config_another_theme).await;
+        assert!(update_result_another.is_ok(), "Update to 'another-test-theme' failed: {:?}", update_result_another.err());
+        
+        let state_another_theme = engine.get_current_theme_state().await;
+        assert_eq!(state_another_theme.theme_id, another_theme_id);
+        assert_eq!(state_another_theme.color_scheme, ColorSchemeType::Light);
+        // "another-test-theme" has "color-text": "#111111" in its light variant
+        assert_eq!(state_another_theme.resolved_tokens.get(&TokenIdentifier::new("color-text")).unwrap(), "#111111");
+
+
+        // --- 3. Switch back to "fallback-dark" and change Scheme to Light ---
+        let fallback_theme_id = ThemeIdentifier::new("fallback-dark");
+        let config_fallback_light = ThemingConfiguration {
+            selected_theme_id: fallback_theme_id.clone(),
+            preferred_color_scheme: ColorSchemeType::Light, // Explicitly switch to light variant
+            selected_accent_color: None,
+            custom_user_token_overrides: None,
+        };
+        let update_result_fallback_light = engine.update_configuration(config_fallback_light).await;
+        assert!(update_result_fallback_light.is_ok(), "Update to 'fallback-dark' (Light) failed: {:?}", update_result_fallback_light.err());
+
+        let state_fallback_light = engine.get_current_theme_state().await;
+        assert_eq!(state_fallback_light.theme_id, fallback_theme_id);
+        assert_eq!(state_fallback_light.color_scheme, ColorSchemeType::Light);
+        // Values from fallback.theme.json's light variant
+        assert_eq!(state_fallback_light.resolved_tokens.get(&TokenIdentifier::new("color-background")).unwrap(), "#FFFFFFFF");
+        assert_eq!(state_fallback_light.resolved_tokens.get(&TokenIdentifier::new("color-foreground")).unwrap(), "#000000FF");
+        assert_eq!(state_fallback_light.resolved_tokens.get(&TokenIdentifier::new("color-panel-background")).unwrap(), "#F3F3F3FF");
+        // Primary color should still be from base if not overridden in variant
+        assert_eq!(state_fallback_light.resolved_tokens.get(&TokenIdentifier::new("color-primary")).unwrap(), &initial_primary_color);
+
+
+        // --- 4. Apply Accent Color to "fallback-dark" (Light scheme) ---
+        let accent_crimson_hex = "#DC143CFF"; // Crimson Red from fallback.theme.json
+        let accent_crimson = CoreColor::from_hex(accent_crimson_hex).unwrap();
+        let config_fallback_accent = ThemingConfiguration {
+            selected_theme_id: fallback_theme_id.clone(),
+            preferred_color_scheme: ColorSchemeType::Light, // Keep light scheme
+            selected_accent_color: Some(accent_crimson.clone()),
+            custom_user_token_overrides: None,
+        };
+        let update_result_fallback_accent = engine.update_configuration(config_fallback_accent).await;
+        assert!(update_result_fallback_accent.is_ok(), "Update to 'fallback-dark' (Light with Accent) failed: {:?}", update_result_fallback_accent.err());
+
+        let state_fallback_accent = engine.get_current_theme_state().await;
+        assert_eq!(state_fallback_accent.theme_id, fallback_theme_id);
+        assert_eq!(state_fallback_accent.color_scheme, ColorSchemeType::Light);
+        assert_eq!(state_fallback_accent.active_accent_color, Some(accent_crimson));
+        
+        // "color-primary" is accentable with "direct-replace" in fallback.theme.json
+        assert_eq!(
+            state_fallback_accent.resolved_tokens.get(&TokenIdentifier::new("color-primary")).unwrap(),
+            &accent_crimson.to_hex_string() // Expecting exact match due to direct-replace
+        );
+        // Other colors should remain from the light variant
+        assert_eq!(state_fallback_accent.resolved_tokens.get(&TokenIdentifier::new("color-background")).unwrap(), "#FFFFFFFF");
+
+
+        // --- 5. Switch to "default-dark-from-rust" and apply a different accent ---
+        let default_dark_conv_id = ThemeIdentifier::new("default-dark-from-rust");
+        let accent_blue_hex = "#007ACCFF"; // Default Blue from fallback.theme.json (can be any valid color)
+        let accent_blue = CoreColor::from_hex(accent_blue_hex).unwrap();
+
+        // "default-dark-from-rust" does not have accentable_tokens defined in its JSON.
+        // So, applying an accent color should not change any tokens unless we modify its definition.
+        // For this test, we'll assume it has no accentable tokens, so color-primary should not change.
+        
+        // Let's quickly check if "default-dark-from-rust" has "color-primary-default"
+        let def_dark_theme_def = engine.get_theme_definition(&default_dark_conv_id).await;
+        assert!(def_dark_theme_def.is_some(), "'default-dark-from-rust' definition not found");
+        let def_dark_primary_original_value = def_dark_theme_def.unwrap().base_tokens
+            .get(&TokenIdentifier::new("color-primary-default"))
+            .map(|rt| rt.value.to_string()) // This to_string() might not be ideal for TokenValue comparison
+            .unwrap_or_else(|| panic!("color-primary-default not in default-dark-from-rust base_tokens"));
+            
+        // To properly get the string value from TokenValue::Color for comparison:
+        let def_dark_primary_original_hex = if let Some(raw_token) = engine.get_theme_definition(&default_dark_conv_id).await.unwrap().base_tokens.get(&TokenIdentifier::new("color-primary-default")) {
+            if let TokenValue::Color(hex) = &raw_token.value {
+                hex.clone()
+            } else {
+                panic!("color-primary-default is not a Color TokenValue in default-dark-from-rust");
+            }
+        } else {
+            panic!("color-primary-default not found in default-dark-from-rust base_tokens for value check");
+        };
+
+
+        let config_dd_accent = ThemingConfiguration {
+            selected_theme_id: default_dark_conv_id.clone(),
+            preferred_color_scheme: ColorSchemeType::Dark, // Its default scheme
+            selected_accent_color: Some(accent_blue.clone()),
+            custom_user_token_overrides: None,
+        };
+        let update_result_dd_accent = engine.update_configuration(config_dd_accent).await;
+        assert!(update_result_dd_accent.is_ok(), "Update to 'default-dark-from-rust' (with Accent) failed: {:?}", update_result_dd_accent.err());
+        
+        let state_dd_accent = engine.get_current_theme_state().await;
+        assert_eq!(state_dd_accent.theme_id, default_dark_conv_id);
+        assert_eq!(state_dd_accent.active_accent_color, Some(accent_blue));
+        // Since "default-dark-from-rust" has no "accentable_tokens" defined, "color-primary-default" should NOT change.
+        assert_eq!(
+            state_dd_accent.resolved_tokens.get(&TokenIdentifier::new("color-primary-default")).unwrap(),
+            &def_dark_primary_original_hex
+        );
+
+
+        // --- 6. Clear Accent Color on "fallback-dark" ---
+        let config_fallback_no_accent = ThemingConfiguration {
+            selected_theme_id: fallback_theme_id.clone(),
+            preferred_color_scheme: ColorSchemeType::Light, // Keep light scheme
+            selected_accent_color: None, // Clear accent
+            custom_user_token_overrides: None,
+        };
+        let update_result_fallback_no_accent = engine.update_configuration(config_fallback_no_accent).await;
+        assert!(update_result_fallback_no_accent.is_ok(), "Update to 'fallback-dark' (Light, No Accent) failed: {:?}", update_result_fallback_no_accent.err());
+
+        let state_fallback_no_accent = engine.get_current_theme_state().await;
+        assert_eq!(state_fallback_no_accent.theme_id, fallback_theme_id);
+        assert_eq!(state_fallback_no_accent.color_scheme, ColorSchemeType::Light);
+        assert!(state_fallback_no_accent.active_accent_color.is_none());
+        // "color-primary" should revert to its non-accented value for the light scheme.
+        // The light scheme variant for fallback-dark does NOT override color-primary, so it comes from base.
+        assert_eq!(state_fallback_no_accent.resolved_tokens.get(&TokenIdentifier::new("color-primary")).unwrap(), &initial_primary_color);
     }
 }

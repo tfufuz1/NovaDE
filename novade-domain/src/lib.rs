@@ -52,7 +52,26 @@ pub use workspaces::{
 pub use workspaces::common_types::*; // Re-export common_types used by workspaces
 
 // From theming module
-pub use theming::{ThemeManager, Theme, ThemeMeta, ThemeError, ThemeChangeEvent, ThemeMode, ColorToken, FontToken, ThemeDefinition};
+// Old legacy types (ThemeManager, Theme, ThemeMeta, ColorToken, FontToken, ThemeMode) are removed.
+// ThemeError is still relevant if it's the same error type used by ThemingEngine.
+// ThemeChangeEvent is relevant. ThemeDefinition is the core new type.
+pub use theming::{
+    ThemingEngine, // The new primary service
+    ThemeDefinition, // The new theme structure
+    ThemeIdentifier,
+    ColorSchemeType,
+    AccentColor,
+    AppliedThemeState,
+    ThemingConfiguration,
+    TokenIdentifier,
+    TokenValue,
+    RawToken,
+    TokenSet,
+    AccentModificationType,
+    ThemeChangedEvent, // Event from the new engine
+    ThemingError, // Errors from the new engine
+    DefaultFileSystemConfigService, // The default config service
+};
 
 // From ports (newly added)
 pub use ports::config_service::ConfigServiceAsync;
