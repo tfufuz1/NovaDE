@@ -4,6 +4,7 @@
 //! including battery monitoring, power state management, and sleep inhibition.
 
 mod services;
+mod dbus_proxies; // Added D-Bus proxies module
 
 pub use services::default_power_management_service::DefaultPowerManagementService;
 
@@ -32,9 +33,13 @@ pub enum BatteryState {
     /// Battery is discharging.
     Discharging,
     /// Battery is fully charged.
-    Full,
+    FullyCharged, // Renamed from Full for consistency with UPower mapping
     /// Battery state is unknown.
     Unknown,
+    /// Battery is empty.
+    Empty, // Added based on UPower states
+    /// Battery state is pending (e.g. pending charge/discharge)
+    Pending, // Added based on UPower states
 }
 
 /// Battery information.
@@ -60,18 +65,18 @@ pub struct BatteryInfo {
     pub serial: Option<String>,
     /// Battery technology.
     pub technology: Option<String>,
-    /// Battery capacity in percentage (0-100).
-    pub capacity: f64,
-    /// Battery energy in Wh.
-    pub energy: f64,
-    /// Battery energy full in Wh.
-    pub energy_full: f64,
-    /// Battery energy full design in Wh.
-    pub energy_full_design: f64,
-    /// Battery voltage in V.
-    pub voltage: f64,
+    /// Battery capacity in percentage (0-100). (Note: UPower provides energy, not direct capacity in Ah. This might need re-evaluation or be derived)
+    pub capacity: Option<f64>, // Made Option as it's not directly from UPower like this
+    /// Battery energy in Wh, if available.
+    pub energy: Option<f64>,
+    /// Battery energy when full in Wh, if available.
+    pub energy_full: Option<f64>,
+    /// Battery energy full design in Wh, if available.
+    pub energy_full_design: Option<f64>,
+    /// Battery voltage in V, if available.
+    pub voltage: Option<f64>,
     /// Battery additional properties.
-    pub properties: std::collections::HashMap<String, String>,
+    pub properties: std::collections::HashMap<String, String>, // Kept for future extensibility
 }
 
 /// Power management service interface.
