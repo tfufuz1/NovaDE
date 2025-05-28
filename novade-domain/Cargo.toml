@@ -6,9 +6,10 @@ edition = "2021"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
-tokio = { version = "1", features = ["sync"] } # For broadcast channel
-async-trait = "0.1" # For async traits
-uuid = { version = "1.4", features = ["v4", "serde"] } # Example if using UUIDs for IDs
+tokio = { version = "1.28", features = ["sync"] } # Updated tokio version, ensure it matches novade-ui if problems arise
+async-trait = "0.1.68" # Updated async-trait
+uuid = { version = "1.4", features = ["v4", "serde"] } 
+glib = "0.19" # For glib::Variant, ensure gtk4-rs 0.8 compatibility
 
 [dev-dependencies]
 # Add any development dependencies here, e.g., for testing
