@@ -6,11 +6,12 @@ use crate::ai_interaction_service::transport::IMCPTransport;
 use anyhow::{Result, anyhow, Context};
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc}; // Added mpsc
 
 pub struct MCPClientInstance {
     pub config: MCPServerConfig, // Made public
     client_capabilities: ClientCapabilities,
+    notification_rx: Option<mpsc::UnboundedReceiver<JsonRpcRequest>>, // Added
     server_capabilities: Option<ServerCapabilities>,
     server_info: Option<ServerInfo>,
     connection_status: ConnectionStatus,
@@ -23,16 +24,22 @@ impl MCPClientInstance {
         config: MCPServerConfig,
         client_capabilities: ClientCapabilities,
         transport: Arc<Mutex<dyn IMCPTransport>>,
+        notification_rx: mpsc::UnboundedReceiver<JsonRpcRequest>, // Added parameter
     ) -> Self {
         MCPClientInstance {
             config,
             client_capabilities,
+            notification_rx: Some(notification_rx), // Store it
             server_capabilities: None,
             server_info: None,
             connection_status: ConnectionStatus::Disconnected,
             transport,
             request_id_counter: 0,
         }
+    }
+
+    pub fn take_notification_receiver(&mut self) -> Option<mpsc::UnboundedReceiver<JsonRpcRequest>> { // Added method
+        self.notification_rx.take()
     }
 
     fn next_request_id(&mut self) -> serde_json::Value {

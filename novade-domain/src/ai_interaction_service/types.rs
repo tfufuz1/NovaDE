@@ -2,8 +2,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MCPServerConfig {
-    pub host: String,
-    pub port: u16,
+    pub host: String, // Used as ServerId, and conceptually for identifying the server type
+    pub command: String, // The actual command to execute for stdio servers
+    pub args: Vec<String>, // Arguments for the command
+    pub port: u16, // Relevant for network servers, can be 0 for stdio
     // Add other relevant fields like timeout, max_connections, etc.
 }
 
@@ -198,7 +200,9 @@ mod tests {
     #[test]
     fn test_mcp_server_config_serde() {
         let original = MCPServerConfig {
-            host: "localhost".to_string(),
+            host: "localhost_test_server".to_string(),
+            command: "test_server_command".to_string(),
+            args: vec!["--arg1".to_string(), "value1".to_string()],
             port: 8080,
         };
         let json_string = serde_json::to_string(&original).unwrap();
@@ -382,7 +386,12 @@ mod tests {
             model_id: "model-123".to_string(),
             server_id: "server-abc".to_string(),
             server_info: ServerInfo { name: "AI Server".to_string(), version: "v2".to_string() },
-            mcp_server_config: MCPServerConfig { host: "mcp.example.com".to_string(), port: 9000 },
+            mcp_server_config: MCPServerConfig {
+                host: "mcp.example.com".to_string(),
+                command: "mcp_server_executable".to_string(),
+                args: vec![],
+                port: 9000
+            },
             name: "Super Model".to_string(),
             description: Some("The best model ever.".to_string()),
         };
