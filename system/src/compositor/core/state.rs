@@ -16,10 +16,23 @@ use smithay::{
         shell::xdg::{XdgShellState, XdgShellHandler, XdgToplevelSurfaceData, XdgPopupSurfaceData, ToplevelSurface, PopupSurface, XdgWmBaseClientData, XdgPositionerUserData, XdgSurfaceUserData, XdgActivationState, XdgActivationHandler},
         seat::Seat,
     },
-    input::{SeatHandler as SmithaySeatHandler, SeatState, pointer::CursorImageStatus, keyboard::KeyboardHandle}, // Renamed SeatHandler to SmithaySeatHandler, added SeatState, CursorImageStatus, KeyboardHandle
-    utils::{Point, Size, Rectangle, Logical, Physical, Serial, Transform},
+    input::{SeatHandler, SeatState, pointer::CursorImageStatus, keyboard::KeyboardHandle, touch::TouchHandle, TouchSlot}, // Use SeatHandler directly, added TouchHandle and TouchSlot
+    utils::{Point, Size, Rectangle, Logical, Physical, Serial, Transform, Clock}, // Added Clock
 };
-use std::{time::Duration, collections::HashMap, sync::{Arc, Mutex, Weak}}; // Added Mutex, Weak
+use smithay::wayland::tablet_manager::{TabletManagerState, TabletManagerHandler, TabletSeatTrait}; // ADDED for tablet support
+use smithay::wayland::pointer_constraints::{ // ADDED for pointer constraints
+    PointerConstraintsState, PointerConstraintsHandler, PointerConstraint,
+    LockedPointerData, ConfinedPointerData, ConstraintState
+};
+use smithay::reexports::wayland_protocols::wp::pointer_constraints::zv1::server::{
+    zwp_pointer_constraints_v1, zwp_locked_pointer_v1, zwp_confined_pointer_v1
+};
+use smithay::reexports::wayland_server::{Resource, New, DataInit, Dispatch}; // For GlobalDispatch & Dispatch
+use std::{time::Duration, collections::HashMap, sync::{Arc, Mutex, Weak}, env}; // Mutex is already here, Added env
+// Ensure wl_surface is specifically available if not covered by wildcard
+use smithay::reexports::wayland_server::protocol::wl_surface;
+use smithay::wayland::cursor::{CursorTheme, load_theme}; // ADDED for themed cursors
+use smithay::wayland::compositor::CompositorToken; // For create_surface
 use uuid::Uuid;
 use crate::{
     compositor::{
@@ -27,7 +40,7 @@ use crate::{
         xdg_shell::types::ManagedWindow,
         display_loop::client_data::ClientData,
     },
-    input::{keyboard::XkbKeyboardData, touch::TouchFocusData},
+    input::{keyboard::XkbKeyboardData}, // Removed TouchFocusData
     outputs::manager::OutputManager,
 };
 use smithay::{
@@ -58,7 +71,7 @@ pub struct DesktopState {
     pub display_handle: DisplayHandle,
     pub loop_handle: LoopHandle<'static, Self>, // 'static might need adjustment based on main loop
     pub loop_signal: LoopSignal,
-    // pub clock: Clock, // Assuming Clock will be defined or imported
+    pub clock: Clock<u64>, // ADDED/UNCOMMENTED
 
     // Smithay states
     pub compositor_state: CompositorState,
@@ -77,15 +90,27 @@ pub struct DesktopState {
     pub seat_state: SeatState<Self>, // Smithay's manager for seat Wayland objects
     pub seat: Seat<Self>,            // Smithay's core Seat object
     pub seat_name: String,           // Name of the primary seat, e.g., "seat0"
-    pub keyboard_data_map: HashMap<String, Arc<XkbKeyboardData>>, // XKB data per seat name
+    pub keyboard_data_map: HashMap<String, Arc<Mutex<XkbKeyboardData>>>, // MODIFIED type
     pub current_cursor_status: Arc<Mutex<CursorImageStatus>>, // For renderer to observe
     pub pointer_location: Point<f64, Logical>, // Global pointer coordinates
-    pub active_input_surface: Option<Weak<WlSurface>>,
-    pub touch_focus_data: TouchFocusData,
+    pub active_input_surface: Option<Weak<WlSurface>>, // General purpose, might be kb focus
+    // pub touch_focus_data: TouchFocusData, // REMOVED
+    pub active_touch_targets: HashMap<TouchSlot, Weak<wl_surface::WlSurface>>, // Per-slot touch targets
+
+    // --- Cursor Theming State ---
+    pub loaded_theme: Arc<CursorTheme>,
+    pub cursor_surface: wl_surface::WlSurface, // Dedicated surface for compositor-drawn cursors
+    pub pointer_hotspot: Point<i32, Logical>, // Hotspot for the compositor-drawn cursor
 
     // --- Output Related State ---
     pub output_manager_state: OutputManagerState, // Smithay's manager for output Wayland objects
     pub output_manager: Arc<Mutex<OutputManager>>, // Our manager for OutputDevice instances
+
+    // --- Tablet Manager State ---
+    pub tablet_manager_state: TabletManagerState, // ADDED
+
+    // --- Pointer Constraints State ---
+    pub pointer_constraints_state: PointerConstraintsState, // ADDED
 
     // Other fields like output_manager will be added later (this was a note for other fields, output_manager is here)
 }
@@ -108,6 +133,32 @@ impl DesktopState {
         // SeatState::new_seat is not a method. Seat::new is typical.
         // The wl_seat global is created later via seat_state.new_wl_seat().
         let mut seat = Seat::new(&display_handle, seat_name.clone(), None); // Logger can be added
+        let clock = Clock::new(None); // ADDED/UNCOMMENTED initialization, using None for span for now
+        
+        let mut compositor_state = CompositorState::new();
+        let shm_state = ShmState::new(vec![], None); // Assuming tracing::Span::current() would be passed if enabled for ShmState
+
+        // Initialize Cursor Theme and Surface
+        let theme_name = env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".to_string());
+        let theme_size = env::var("XCURSOR_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(24);
+        
+        let loaded_theme = Arc::new(load_theme(
+            Some(&theme_name),
+            theme_size,
+            shm_state.wl_shm()
+        ));
+
+        let cursor_surface = compositor_state.create_surface_with_data(
+            &display_handle,
+            smithay::wayland::compositor::SurfaceAttributes::default(),
+            (), // No specific user data for the cursor surface itself initially
+        );
+        // It's good practice to set an input region for the cursor surface if it's to be interactive,
+        // but for a simple display cursor, it might not be strictly necessary.
+        // For now, we'll assume it's just for display.
+
+        let tablet_manager_state = TabletManagerState::new::<Self>(&display_handle); // ADDED
+        let pointer_constraints_state = PointerConstraintsState::new(); // ADDED: PointerConstraintsState::new() does not take display_handle
 
         // Store SeatState in the seat's user data if SeatState itself needs to be accessed via Seat later.
         // Or, more commonly, SeatState is owned by DesktopState directly.
@@ -118,8 +169,9 @@ impl DesktopState {
             display_handle: display_handle.clone(),
             loop_handle,
             loop_signal,
-            compositor_state: CompositorState::new(),
-            shm_state: ShmState::new(Vec::new(), None),
+            clock, // ADDED/UNCOMMENTED
+            compositor_state, // Initialized above
+            shm_state,       // Initialized above
             xdg_shell_state: XdgShellState::new(&display_handle, PopupManager::new(None), None),
             xdg_activation_state: XdgActivationState::new(&display_handle, seat.clone(), None), // XdgActivationState needs the Seat
             space: Space::new(None),
@@ -131,14 +183,21 @@ impl DesktopState {
             seat_state, // Initialize SeatState
             seat,       // Initialize Seat
             seat_name,  // Initialize seat_name
-            keyboard_data_map: HashMap::new(),
+            keyboard_data_map: HashMap::new(), // Initialization is fine, type already changed
             current_cursor_status: Arc::new(Mutex::new(CursorImageStatus::Default)),
             pointer_location: Point::from((0.0, 0.0)),
             active_input_surface: None,
-            touch_focus_data: TouchFocusData::default(),
+            // touch_focus_data: TouchFocusData::default(), // REMOVED
+            active_touch_targets: HashMap::new(), // Initialize new field
+            
+            loaded_theme, // ADDED
+            cursor_surface, // ADDED
+            pointer_hotspot: (0,0).into(), // ADDED initialization
 
             output_manager_state: OutputManagerState::new_with_xdg_output::<Self>(&display_handle), // Initialize with XDG support
             output_manager: Arc::new(Mutex::new(OutputManager::new())),
+            tablet_manager_state, // ADDED
+            pointer_constraints_state, // ADDED
         }
     }
 }
@@ -146,51 +205,207 @@ impl DesktopState {
 smithay::delegate_client_handler!(DesktopState);
 
 // --- SeatHandler Implementation ---
-impl SmithaySeatHandler for DesktopState {
+impl SeatHandler for DesktopState {
     type KeyboardFocus = WlSurface;
     type PointerFocus = WlSurface;
-    type TouchFocus = WlSurface; // Added TouchFocus
+    type TouchFocus = WlSurface; // Or WlSurface if touch focus is on a surface
 
     fn seat_state(&mut self) -> &mut SeatState<Self> {
         &mut self.seat_state
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Self::KeyboardFocus>) {
-        tracing::info!(seat_name = %seat.name(), "Keyboard focus changed to: {:?}", focused.map(|s| s.id()));
+        tracing::debug!(
+            seat_name = %seat.name(),
+            new_focus_surface_id = ?focused.map(|s| s.id()),
+            "SeatHandler::focus_changed (keyboard) triggered by Smithay."
+        );
+        let new_focused_wl_surface_weak = focused.map(|s| s.downgrade());
+        self.active_input_surface = new_focused_wl_surface_weak;
+    }
 
-        if let Some(surface) = focused {
-            self.active_input_surface = Some(surface.downgrade());
-            // TODO: Notify domain layer about the focus change.
-            // e.g., self.domain_notifier.keyboard_focus_changed(surface.id());
-        } else {
-            self.active_input_surface = None;
-            // TODO: Notify domain layer about loss of focus.
-            // e.g., self.domain_notifier.keyboard_focus_lost();
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        let mut current_status_guard = self.current_cursor_status.lock().unwrap();
+        
+        match image {
+            CursorImageStatus::Named(name) => {
+                if let Some(cursor_image_buffer) = self.loaded_theme.get_cursor(&name) {
+                    self.cursor_surface.attach(Some(cursor_image_buffer.buffer()), 0, 0);
+                    if self.cursor_surface.send_pending_events().is_ok() { // Check if surface is alive
+                        self.cursor_surface.damage_buffer(0, 0, cursor_image_buffer.width() as i32, cursor_image_buffer.height() as i32);
+                        self.cursor_surface.commit();
+                        self.pointer_hotspot = (cursor_image_buffer.hotspot_x() as i32, cursor_image_buffer.hotspot_y() as i32).into();
+                        *current_status_guard = CursorImageStatus::Surface(self.cursor_surface.clone());
+                        tracing::debug!("Cursor set to themed: '{}'", name);
+                    } else {
+                        *current_status_guard = CursorImageStatus::Default; // Fallback if surface is dead
+                        tracing::warn!("Failed to set themed cursor '{}': cursor_surface is not alive.", name);
+                    }
+                } else {
+                    tracing::warn!("Cursor name '{}' not found in theme, using default.", name);
+                    // Try to load "left_ptr" as a fallback default
+                    if let Some(default_cursor_buffer) = self.loaded_theme.get_cursor("left_ptr")
+                        .or_else(|| self.loaded_theme.cursors().get(0).cloned()) // Absolute fallback
+                    {
+                        self.cursor_surface.attach(Some(default_cursor_buffer.buffer()), 0, 0);
+                        if self.cursor_surface.send_pending_events().is_ok() {
+                             self.cursor_surface.damage_buffer(0, 0, default_cursor_buffer.width() as i32, default_cursor_buffer.height() as i32);
+                             self.cursor_surface.commit();
+                             self.pointer_hotspot = (default_cursor_buffer.hotspot_x() as i32, default_cursor_buffer.hotspot_y() as i32).into();
+                            *current_status_guard = CursorImageStatus::Surface(self.cursor_surface.clone());
+                             tracing::debug!("Cursor set to fallback default theme cursor ('left_ptr' or first available).");
+                        } else {
+                            *current_status_guard = CursorImageStatus::Hidden; // Fallback if surface is dead
+                            tracing::warn!("Failed to set fallback themed cursor: cursor_surface is not alive.");
+                        }
+                    } else {
+                        *current_status_guard = CursorImageStatus::Hidden; // Ultimate fallback
+                        tracing::error!("Could not load any default cursor from the theme.");
+                    }
+                }
+            }
+            CursorImageStatus::Surface(surface) => {
+                // Client provides the surface. Renderer handles hotspot based on client data.
+                *current_status_guard = CursorImageStatus::Surface(surface);
+                 tracing::debug!("Cursor set to client-provided surface.");
+            }
+            CursorImageStatus::Hidden => {
+                *current_status_guard = CursorImageStatus::Hidden;
+                tracing::debug!("Cursor set to hidden.");
+            }
+            CursorImageStatus::Default => {
+                // This case might be hit if Smithay itself decides to revert to default.
+                // Similar to Named("default") or a specific default cursor like "left_ptr"
+                if let Some(cursor_image_buffer) = self.loaded_theme.get_cursor("left_ptr")
+                    .or_else(|| self.loaded_theme.get_cursor("default"))
+                    .or_else(|| self.loaded_theme.cursors().get(0).cloned())
+                {
+                    self.cursor_surface.attach(Some(cursor_image_buffer.buffer()), 0, 0);
+                     if self.cursor_surface.send_pending_events().is_ok() {
+                        self.cursor_surface.damage_buffer(0, 0, cursor_image_buffer.width() as i32, cursor_image_buffer.height() as i32);
+                        self.cursor_surface.commit();
+                        self.pointer_hotspot = (cursor_image_buffer.hotspot_x() as i32, cursor_image_buffer.hotspot_y() as i32).into();
+                        *current_status_guard = CursorImageStatus::Surface(self.cursor_surface.clone());
+                        tracing::debug!("Cursor set to default theme cursor (via Default status).");
+                    } else {
+                        *current_status_guard = CursorImageStatus::Hidden; // Fallback if surface is dead
+                         tracing::warn!("Failed to set default themed cursor (via Default status): cursor_surface is not alive.");
+                    }
+                } else {
+                    *current_status_guard = CursorImageStatus::Hidden; // Ultimate fallback
+                    tracing::error!("Could not load any default cursor from the theme (via Default status).");
+                }
+            }
         }
-        // Additionally, if you have per-window state that needs updating on focus change (e.g. borders)
-        // you might iterate through self.windows or use self.space to find the relevant ManagedWindow
-        // and update its visual state.
     }
-
-    fn cursor_image(&mut self, seat: &Seat<Self>, image: CursorImageStatus) {
-        tracing::trace!(seat_name = %seat.name(), "Cursor image status updated: {:?}", image);
-        *self.current_cursor_status.lock().unwrap() = image;
-        // The renderer will observe self.current_cursor_status to draw the cursor.
-        // Signal the event loop to redraw if the cursor change requires it.
-        // self.loop_signal.wakeup(); // Might be too frequent; cursor updates are often part of overall render loop.
-    }
-
-    // Optional methods for more detailed seat management, can be added if needed:
-    // fn new_capability(_seat: &Seat<Self>, _capability: Capability) {}
-    // fn remove_capability(_seat: &Seat<Self>, _capability: Capability) {}
-    // fn new_keyboard(_seat: &Seat<Self>, _keyboard: KeyboardHandle<Self>) {}
-    // fn new_pointer(_seat: &Seat<Self>, _pointer: PointerHandle<Self>) {}
-    // fn new_touch(_seat: &Seat<Self>, _touch: TouchHandle<Self>) {}
-    // fn remove_keyboard(_seat: &Seat<Self>) {}
-    // fn remove_pointer(_seat: &Seat<Self>) {}
-    // fn remove_touch(_seat: &Seat<Self>) {}
 }
-smithay::delegate_seat_handler!(DesktopState);
+smithay::delegate_seat_handler!(DesktopState); // Ensures DesktopState delegates SeatHandler calls correctly
+
+// --- TabletManagerHandler Implementation ---
+impl TabletManagerHandler for DesktopState {
+    fn new_tablet_seat(&mut self, seat: Seat<Self>) -> Box<dyn TabletSeatTrait<Self>> {
+        tracing::info!("Neuer Tablet-Seat für Seat '{}' angefordert.", seat.name());
+        Box::new(smithay::wayland::tablet_manager::TabletSeat::new(seat))
+    }
+}
+smithay::delegate_tablet_manager!(DesktopState);
+
+// --- PointerConstraintsHandler Implementation ---
+impl PointerConstraintsHandler for DesktopState {
+    fn new_constraint(
+        &mut self,
+        constraint: &PointerConstraint,
+    ) {
+        if let Some(surface) = constraint.surface() {
+             tracing::info!(
+                "Neuer Pointer-Constraint {:?} für Surface {:?} erstellt.",
+                constraint.constraint_type(),
+                surface.id()
+            );
+        } else {
+            tracing::warn!("Neuer Pointer-Constraint ohne zugehörige Surface erstellt.");
+        }
+    }
+    // constraint_broken can be implemented if custom logic is needed when constraints are no longer valid
+}
+
+// --- GlobalDispatch for PointerConstraints ---
+impl GlobalDispatch<zwp_pointer_constraints_v1::ZwpPointerConstraintsV1, ()> for DesktopState {
+    fn bind(
+        &mut self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<zwp_pointer_constraints_v1::ZwpPointerConstraintsV1>,
+        _global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        // PointerConstraintsState handles the binding and further dispatching internally
+        self.pointer_constraints_state.new_global(resource, data_init);
+        tracing::info!("zwp_pointer_constraints_v1 global gebunden.");
+    }
+}
+
+// --- Dispatch for LockedPointer ---
+impl Dispatch<zwp_locked_pointer_v1::ZwpLockedPointerV1, LockedPointerData> for DesktopState {
+    fn request(
+        &mut self,
+        _client: &Client,
+        _resource: &zwp_locked_pointer_v1::ZwpLockedPointerV1,
+        request: zwp_locked_pointer_v1::Request,
+        data: &LockedPointerData,
+        _dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        self.pointer_constraints_state.handle_locked_pointer_request(request, data, data_init);
+    }
+
+    fn destroyed(
+        &mut self,
+        _client: ClientId,
+        resource: &zwp_locked_pointer_v1::ZwpLockedPointerV1,
+        data: &LockedPointerData,
+    ) {
+        self.pointer_constraints_state.handle_locked_pointer_destroyed(resource, data);
+        tracing::info!("zwp_locked_pointer_v1 zerstört: {:?}", resource.id());
+    }
+}
+
+// --- Dispatch for ConfinedPointer ---
+impl Dispatch<zwp_confined_pointer_v1::ZwpConfinedPointerV1, ConfinedPointerData> for DesktopState {
+    fn request(
+        &mut self,
+        _client: &Client,
+        _resource: &zwp_confined_pointer_v1::ZwpConfinedPointerV1,
+        request: zwp_confined_pointer_v1::Request,
+        data: &ConfinedPointerData,
+        _dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        self.pointer_constraints_state.handle_confined_pointer_request(request, data, data_init);
+    }
+
+    fn destroyed(
+        &mut self,
+        _client: ClientId,
+        resource: &zwp_confined_pointer_v1::ZwpConfinedPointerV1,
+        data: &ConfinedPointerData,
+    ) {
+        self.pointer_constraints_state.handle_confined_pointer_destroyed(resource, data);
+        tracing::info!("zwp_confined_pointer_v1 zerstört: {:?}", resource.id());
+    }
+}
+
+// Delegate dispatch for pointer constraint protocols to PointerConstraintsState
+smithay::delegate_dispatch!(DesktopState: [
+    zwp_pointer_constraints_v1::ZwpPointerConstraintsV1: ()
+] => PointerConstraintsState);
+smithay::delegate_dispatch!(DesktopState: [
+    zwp_locked_pointer_v1::ZwpLockedPointerV1: LockedPointerData
+] => PointerConstraintsState);
+smithay::delegate_dispatch!(DesktopState: [
+    zwp_confined_pointer_v1::ZwpConfinedPointerV1: ConfinedPointerData
+] => PointerConstraintsState);
+
 
 // --- OutputHandler Implementation ---
 impl OutputHandler for DesktopState {

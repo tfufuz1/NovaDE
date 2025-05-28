@@ -6,6 +6,7 @@ use novade_ui::shell::panel_widget::workspace_indicator_widget::WorkspaceIndicat
 use novade_ui::shell::panel_widget::clock_datetime_widget::ClockDateTimeWidget;
 use novade_ui::shell::panel_widget::quick_settings_button::QuickSettingsButtonWidget; 
 use novade_ui::shell::panel_widget::notification_center_button::NotificationCenterButtonWidget; 
+use novade_ui::shell::panel_widget::network_management_widget::NetworkManagementWidget;
 // Domain and Connector imports
 use novade_domain::workspaces::{StubWorkspaceManager, WorkspaceManager}; 
 use novade_ui::shell::domain_workspace_connector::DomainWorkspaceConnector;
@@ -123,13 +124,15 @@ fn build_ui(app: &Application, tokio_handle: tokio::runtime::Handle) {
     let clock_widget = ClockDateTimeWidget::new();
     let quick_settings_button = QuickSettingsButtonWidget::new(); 
     let notification_center_button = NotificationCenterButtonWidget::new(); 
+    let network_widget = NetworkManagementWidget::new();
 
     // Add modules to the panel
     panel.add_module(&app_menu_button, ModulePosition::Start, 0);
     panel.add_module(&workspace_indicator, ModulePosition::Center, 0);
-    panel.add_module(&clock_widget, ModulePosition::End, 0); 
-    panel.add_module(&quick_settings_button, ModulePosition::End, 1); 
-    panel.add_module(&notification_center_button, ModulePosition::End, 2); 
+    panel.add_module(&network_widget, ModulePosition::End, 0);
+    panel.add_module(&clock_widget, ModulePosition::End, 1); 
+    panel.add_module(&quick_settings_button, ModulePosition::End, 2); 
+    panel.add_module(&notification_center_button, ModulePosition::End, 3); 
     
     // Test properties
     // panel.set_position(PanelPosition::Bottom);

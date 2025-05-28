@@ -5,9 +5,9 @@ use crate::theming::types::{
 use crate::theming::errors::ThemingError;
 use crate::theming::logic::{
     resolve_tokens_for_config, load_and_validate_token_files, load_and_validate_theme_files,
-    generate_fallback_applied_state,
+    generate_fallback_applied_state, load_theme_definition_from_file, // Ensure this is available or fix usage
 };
-use novade_core::config::ConfigServiceAsync;
+use crate::ports::config_service::ConfigServiceAsync; // Corrected path
 use novade_core::types::Color as CoreColor;
 use std::collections::HashMap;
 use std::sync::Arc;

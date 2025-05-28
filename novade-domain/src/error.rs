@@ -3,9 +3,16 @@
 //! This module defines domain-specific errors for the NovaDE desktop environment.
 
 use thiserror::Error;
-use crate::core::error::CoreError;
+// The import `use crate::core::error::CoreError;` was present in Turn 23's read.
+// This path is problematic if `core` is not a module at `crate::core`.
+// `novade_core::CoreError` is the correct path if `novade_core` is a dependency.
+// Assuming novade_core is correctly listed in Cargo.toml and CoreError is pub use'd there.
+use novade_core::CoreError; // Corrected path, assuming novade_core is a dependency and CoreError is public.
 
-/// Domain error type.
+/// A general Result type for domain operations.
+pub type DomainResult<T> = Result<T, DomainError>;
+
+/// The primary error type for the domain layer.
 #[derive(Debug, Error)]
 pub enum DomainError {
     /// Core error.

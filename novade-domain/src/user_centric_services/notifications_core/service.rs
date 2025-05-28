@@ -39,7 +39,7 @@ pub mod placeholder_rules_engine { // Wrap in a module
     use super::NotificationError; // Use NotificationError from this module
 
     #[derive(Debug)] pub enum RuleProcessingResult { Keep(Notification), Modify(Notification), Suppress { rule_id: String } }
-    #[derive(Debug, thiserror::Error)] #[error("Rule Engine Error: {0}")] pub struct NotificationRulesError(String);
+    #[derive(Debug, thiserror::Error)] #[error("Rule Engine Error: {0}")] pub struct NotificationRulesError(pub String); // Made field public
 
     #[async_trait]
     pub trait NotificationRulesEngine: Send + Sync {

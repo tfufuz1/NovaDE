@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use async_trait::async_trait;
 use log::{debug, info, warn};
-use novade_core::config::ConfigServiceAsync; // Assuming this path
-use novade_core::errors::CoreError;         // Assuming this path
+use crate::ports::config_service::ConfigServiceAsync; // Corrected path
+use novade_core::CoreError;         // Corrected path
 
 use crate::global_settings::errors::GlobalSettingsError;
 use crate::global_settings::persistence_iface::SettingsPersistenceProvider;
@@ -152,19 +152,30 @@ mod tests {
     }
 
     #[async_trait]
-    impl ConfigServiceAsync for MockConfigService {
-        async fn read_config_file_string(&self, key: &str) -> Result<String, novade_core::errors::CoreError> {
-             if let Some(ref err) = self.force_read_error {
-                return Err(err.clone());
+    impl crate::ports::config_service::ConfigServiceAsync for MockConfigService { // Corrected trait path
+        async fn read_config_file_string(&self, key: &str) -> Result<String, novade_core::CoreError> { // Corrected error type
+             if let Some(ref mock_err) = self.force_read_error {
+                // Convert mock error to novade_core::CoreError
+                let core_err = match mock_err.error_type {
+                    MockCoreErrorType::NotFound => novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]}),
+                    MockCoreErrorType::IoError => novade_core::CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, mock_err.message.clone())),
+                    MockCoreErrorType::Other(ref s) => novade_core::CoreError::Internal(s.clone()),
+                };
+                return Err(core_err);
             }
             self.files.get(key)
                 .cloned()
-                .ok_or_else(|| MockCoreError::new(MockCoreErrorType::NotFound, format!("File not found: {}", key)))
+                .ok_or_else(|| novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]}))
         }
 
-        async fn write_config_file_string(&self, key: &str, content: String) -> Result<(), novade_core::errors::CoreError> {
-            if let Some(ref err) = self.force_write_error {
-                return Err(err.clone());
+        async fn write_config_file_string(&self, key: &str, content: String) -> Result<(), novade_core::CoreError> { // Corrected error type
+            if let Some(ref mock_err) = self.force_write_error {
+                let core_err = match mock_err.error_type {
+                    MockCoreErrorType::NotFound => novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]}),
+                    MockCoreErrorType::IoError => novade_core::CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, mock_err.message.clone())),
+                    MockCoreErrorType::Other(ref s) => novade_core::CoreError::Internal(s.clone()),
+                };
+                return Err(core_err);
             }
             // In a real mock, you might want to store this to check it was called.
             // For simplicity, we're not using self.files here for write.
@@ -173,19 +184,19 @@ mod tests {
         }
         
         // Required by the trait being used in other modules, even if not directly by this provider's tests
-        async fn read_file_to_string(&self, _path: &std::path::Path) -> Result<String, novade_core::errors::CoreError> {
+        async fn read_file_to_string(&self, _path: &std::path::Path) -> Result<String, novade_core::CoreError> { // Corrected error type
             unimplemented!("read_file_to_string not needed for these specific tests")
         }
-        async fn list_files_in_dir(&self, _dir_path: &std::path::Path, _extension: Option<&str>) -> Result<Vec<std::path::PathBuf>, novade_core::errors::CoreError> {
+        async fn list_files_in_dir(&self, _dir_path: &std::path::Path, _extension: Option<&str>) -> Result<Vec<std::path::PathBuf>, novade_core::CoreError> { // Corrected error type
              unimplemented!("list_files_in_dir not needed for these specific tests")
         }
-        async fn get_config_dir(&self) -> std::path::PathBuf {
+        // Corrected return type to match trait definition in ports/config_service.rs
+        async fn get_config_dir(&self) -> Result<std::path::PathBuf, novade_core::CoreError> { 
             unimplemented!("get_config_dir not needed for these specific tests")
         }
-        async fn get_data_dir(&self) -> std::path::PathBuf {
+        async fn get_data_dir(&self) -> Result<std::path::PathBuf, novade_core::CoreError> { 
             unimplemented!("get_data_dir not needed for these specific tests")
         }
-
     }
 
 
