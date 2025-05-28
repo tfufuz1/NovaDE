@@ -1,6 +1,6 @@
-use glib;
+use gtk::glib; // Ensure gtk::glib is used for glib, not just glib directly
 use gtk::glib::subclass::prelude::*;
-use gtk::{glib, Application, prelude::*};
+use gtk::{Application, prelude::*}; // Removed gtk::glib from here as it's imported above
 use gtk4_layer_shell;
 
 // Re-export enums from imp
@@ -29,6 +29,9 @@ pub use notification_center_panel::NotificationCenterPanelWidget; // Added for e
 
 pub mod network_management_widget;
 pub use network_management_widget::NetworkManagementWidget;
+
+pub mod cpu_usage_widget; // Added cpu_usage_widget module
+// pub use cpu_usage_widget::CpuUsageWidget; // Optional: re-export if needed for direct access
 
 mod imp;
 

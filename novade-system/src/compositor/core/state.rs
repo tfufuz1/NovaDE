@@ -29,12 +29,19 @@ use smithay::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex as StdMutex}, // Renamed to StdMutex to avoid conflict with tokio::sync::Mutex
     time::Instant,
 };
 use crate::compositor::surface_management::{AttachedBufferInfo, SurfaceData}; 
 use crate::compositor::core::ClientCompositorData;
 use crate::compositor::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
+
+// --- Imports for MCP and CPU Usage Service ---
+use tokio::sync::Mutex as TokioMutex; // Using tokio's Mutex for async services
+use novade_domain::ai_interaction_service::MCPConnectionService;
+use novade_domain::cpu_usage_service::ICpuUsageService;
+// Consider if mcp_client_spawner also needs to be stored
+// use crate::mcp_client_service::IMCPClientService;
 
 
 // Main desktop state
@@ -56,8 +63,13 @@ pub struct DesktopState {
     pub seat_name: String,
     pub seat: Seat<Self>,
     pub pointer_location: Point<f64, Logical>,
-    pub current_cursor_status: Arc<Mutex<CursorImageStatus>>,
-    pub dmabuf_state: DmabufState, // Added dmabuf_state
+    pub current_cursor_status: Arc<StdMutex<CursorImageStatus>>, // Using StdMutex for smithay compatibility
+    pub dmabuf_state: DmabufState,
+
+    // --- Added for MCP and CPU Usage Service ---
+    pub mcp_connection_service: Option<Arc<TokioMutex<MCPConnectionService>>>,
+    pub cpu_usage_service: Option<Arc<dyn ICpuUsageService>>,
+    // pub mcp_client_spawner: Option<Arc<dyn IMCPClientService>>,
 }
 
 impl DesktopState {
@@ -74,7 +86,7 @@ impl DesktopState {
         let mut seat_state = SeatState::new();
         let seat_name = "seat0".to_string();
         let seat = seat_state.new_wl_seat(&display_handle, seat_name.clone(), Some(tracing::Span::current()));
-        let dmabuf_state = DmabufState::new(); // Initialize DmabufState
+        let dmabuf_state = DmabufState::new();
 
         Self {
             display_handle,
@@ -94,8 +106,12 @@ impl DesktopState {
             seat_name,
             seat,
             pointer_location: (0.0, 0.0).into(),
-            current_cursor_status: Arc::new(Mutex::new(CursorImageStatus::Default)),
-            dmabuf_state, // Store initialized DmabufState
+            current_cursor_status: Arc::new(StdMutex::new(CursorImageStatus::Default)),
+            dmabuf_state,
+            // --- Initialize new service fields ---
+            mcp_connection_service: None,
+            cpu_usage_service: None,
+            // mcp_client_spawner: None,
         }
     }
 }
@@ -108,16 +124,15 @@ impl CompositorHandler for DesktopState {
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
         client
             .get_data::<ClientCompositorData>()
-            .expect("ClientCompositorData not initialized for this client.") // As per plan
-            .compositor_state() // Assuming ClientCompositorData has a method to get its internal state
+            .expect("ClientCompositorData not initialized for this client.")
+            .compositor_state()
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
-        let client_id = surface.client().expect("Surface must have a client.").id(); // As per plan
+        let client_id = surface.client().expect("Surface must have a client.").id();
         tracing::info!(surface_id = ?surface.id(), ?client_id, "New WlSurface created");
 
-        // SurfaceData initialization from `crate::compositor::surface_management`
-        let surface_data = Arc::new(Mutex::new(
+        let surface_data = Arc::new(StdMutex::new(
             crate::compositor::surface_management::SurfaceData::new(client_id),
         ));
         
@@ -125,19 +140,18 @@ impl CompositorHandler for DesktopState {
 
         add_destruction_hook(surface, |data_map_of_destroyed_surface| {
             let surface_data_arc = data_map_of_destroyed_surface
-                .get::<Arc<Mutex<crate::compositor::surface_management::SurfaceData>>>()
+                .get::<Arc<StdMutex<crate::compositor::surface_management::SurfaceData>>>()
                 .expect("SurfaceData missing in destruction hook")
                 .clone();
             
             let surface_id_for_log = { 
                 let sd = surface_data_arc.lock().unwrap(); 
-                sd.id // Assuming SurfaceData has a UUID id field
+                sd.id
             };
             tracing::info!(
                 "WlSurface with internal ID {:?} destroyed, SurfaceData cleaned up from UserDataMap.",
                 surface_id_for_log
             );
-            // Further cleanup (layout, renderer) would be triggered from here or by this.
         });
     }
 
@@ -147,25 +161,22 @@ impl CompositorHandler for DesktopState {
         smithay::wayland::compositor::with_states(surface, |states| {
             let surface_data_arc = states
                 .data_map
-                .get::<Arc<Mutex<crate::compositor::surface_management::SurfaceData>>>()
+                .get::<Arc<StdMutex<crate::compositor::surface_management::SurfaceData>>>()
                 .expect("SurfaceData missing on commit")
                 .clone();
             
             let mut surface_data = surface_data_arc.lock().unwrap();
             let current_surface_attributes = states.cached_state.current::<WlSurfaceAttributes>();
 
-            // Buffer Handling & Damage
             if current_surface_attributes.buffer.is_some() {
                 let buffer_object = current_surface_attributes.buffer.as_ref().unwrap();
-                // For Smithay 0.10, buffer_dimensions might come from wl_buffer directly or renderer utils.
-                // Assuming smithay::backend::renderer::utils::buffer_dimensions is available and works.
                 let dimensions = buffer_dimensions(buffer_object); 
 
                 let new_buffer_info = crate::compositor::surface_management::AttachedBufferInfo {
                     buffer: buffer_object.clone(),
                     scale: current_surface_attributes.buffer_scale,
                     transform: current_surface_attributes.buffer_transform,
-                    dimensions: dimensions.map_or_else(Default::default, |d| d.size), // Handle Option from buffer_dimensions
+                    dimensions: dimensions.map_or_else(Default::default, |d| d.size),
                 };
                 surface_data.current_buffer_info = Some(new_buffer_info);
                 tracing::debug!(
@@ -173,14 +184,11 @@ impl CompositorHandler for DesktopState {
                     "Attached new buffer. Dimensions: {:?}, Scale: {}, Transform: {:?}",
                     dimensions, current_surface_attributes.buffer_scale, current_surface_attributes.buffer_transform
                 );
-                // TODO: Mark for texture recreation/update by the renderer
-            } else if current_surface_attributes.buffer.is_none() { // Explicitly handle buffer detachment
+            } else if current_surface_attributes.buffer.is_none() {
                 surface_data.current_buffer_info = None;
                 tracing::debug!(surface_id = ?surface.id(), "Buffer detached.");
             }
             
-            // Smithay 0.10 `SurfaceAttributes.damage` is `Vec<Rectangle<i32, Buffer>>`
-            // which is `damage_buffer_coords`
             let previous_buffer_id = surface_data.current_buffer_info.as_ref().map(|info| info.buffer.id());
             let new_buffer_wl = current_surface_attributes.buffer.as_ref();
             let new_buffer_id = new_buffer_wl.map(|b| b.id());
@@ -196,7 +204,6 @@ impl CompositorHandler for DesktopState {
                             surface_data.texture_handle = Some(new_texture);
                             tracing::info!("Created new texture for surface {:?}", surface.id());
                             
-                            // Update current_buffer_info in SurfaceData
                             let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
                             surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
                                 buffer: buffer_to_texture.clone(),
@@ -208,30 +215,24 @@ impl CompositorHandler for DesktopState {
                         Err(e) => {
                             tracing::error!("Failed to create texture for surface {:?}: {:?}", surface.id(), e);
                             surface_data.texture_handle = None;
-                            surface_data.current_buffer_info = None; // Clear buffer info if texture creation failed
+                            surface_data.current_buffer_info = None;
                         }
                     }
                 } else {
                     tracing::warn!("No renderer to create texture for surface {:?}", surface.id());
-                    // Buffer is attached but no renderer, so clear existing texture and buffer info if any,
-                    // as they are now out of sync with the client's idea of the buffer.
                     surface_data.texture_handle = None;
                     surface_data.current_buffer_info = None;
                 }
             } else if buffer_detached {
                 tracing::info!("Buffer detached from surface {:?}, clearing texture and buffer info.", surface.id());
-                surface_data.texture_handle = None; // Old texture is dropped
+                surface_data.texture_handle = None;
                 surface_data.current_buffer_info = None;
             } else if new_buffer_wl.is_some() && new_buffer_id == previous_buffer_id {
-                // Buffer is the same, but other attributes like scale or transform might have changed.
-                // Update current_buffer_info if needed.
-                // The texture itself doesn't need to be recreated if the buffer ID is the same.
                 if let Some(info) = surface_data.current_buffer_info.as_mut() {
                     info.scale = current_surface_attributes.buffer_scale;
                     info.transform = current_surface_attributes.buffer_transform;
                 }
             }
-
 
             surface_data.damage_buffer_coords.clear(); 
             surface_data.damage_buffer_coords.extend_from_slice(&current_surface_attributes.damage_buffer);
@@ -243,64 +244,33 @@ impl CompositorHandler for DesktopState {
 
             surface_data.opaque_region_surface_local = current_surface_attributes.opaque_region.clone();
             surface_data.input_region_surface_local = current_surface_attributes.input_region.clone();
-
-            // TODO: Mark window for redraw (will involve DesktopState.space and window mapping)
         });
     }
 
     fn new_subsurface(&mut self, surface: &WlSurface, parent: &WlSurface) {
-        // Ensure SurfaceData is initialized for the new subsurface
-        // self.new_surface(surface); // This should be called by smithay internally when the wl_surface for subsurface is created.
-                                 // If not, it means the surface object passed here is not yet fully init by our new_surface.
-                                 // Smithay's design implies new_surface is called for *all* wl_surfaces.
-        
         tracing::info!(surface_id = ?surface.id(), parent_id = ?parent.id(), "New WlSubsurface created");
 
-        // Retrieve SurfaceData for both. It should exist due to prior new_surface calls.
         let surface_data_arc = surface.data_map()
-            .get::<Arc<Mutex<crate::compositor::surface_management::SurfaceData>>>()
+            .get::<Arc<StdMutex<crate::compositor::surface_management::SurfaceData>>>()
             .expect("SurfaceData not found for subsurface. new_surface should have run.")
             .clone();
         let parent_surface_data_arc = parent.data_map()
-            .get::<Arc<Mutex<crate::compositor::surface_management::SurfaceData>>>()
+            .get::<Arc<StdMutex<crate::compositor::surface_management::SurfaceData>>>()
             .expect("SurfaceData not found for parent surface.")
             .clone();
 
         surface_data_arc.lock().unwrap().parent = Some(parent.downgrade());
         parent_surface_data_arc.lock().unwrap().children.push(surface.downgrade());
-        
-        // Smithay handles assigning the SubsurfaceRole. We don't need to do it manually here
-        // unless we have custom subsurface role data to attach.
     }
 
     fn destroyed(&mut self, _surface: &WlSurface) {
-        // Most cleanup is handled by the destruction hook in `new_surface`.
-        // This handler can be used for any `DesktopState`-level cleanup related to the surface
-        // that isn't managed by `SurfaceData`'s `Drop` or its destruction hook.
         tracing::trace!("CompositorHandler::destroyed called for surface {:?}", _surface.id());
-        // Example: if this surface was a cursor, update cursor state in DesktopState.
-        // Or if it was a drag-and-drop icon, etc.
     }
 }
 
-// ClientData definition (moved from previous attempt to be self-contained in this file for now)
-// This should ideally be in its own module or alongside DesktopState if it's core.
 #[derive(Debug)]
 pub struct ClientCompositorData {
-    // Smithay 0.10's CompositorClientState is usually managed internally by CompositorState.
-    // We might not need to store it explicitly in ClientCompositorData unless we're customizing behavior
-    // that CompositorState itself doesn't handle per client.
-    // For now, let's assume it's a placeholder for any *additional* client-specific data
-    // related to the compositor functionality, beyond what Smithay's CompositorClientState provides.
-    // If CompositorHandler::client_compositor_state needs to return a ref to smithay's internal one,
-    // DesktopState::compositor_state will be the source, and this struct might be simpler.
-    _placeholder: (), // Replace with actual client data if needed.
-    // For Smithay 0.10, `CompositorClientState` is often not directly stored by the user's `ClientData`.
-    // The `CompositorHandler::client_compositor_state` method is usually implemented by
-    // delegating to `CompositorState::client_state_for(client_id)`.
-    // However, the plan implies `ClientCompositorData` holds a `CompositorClientState`.
-    // Let's reconcile this: Smithay 0.10.0 `CompositorState` does not have `client_state_for`.
-    // `CompositorClientState` is indeed user-managed per client.
+    _placeholder: (), 
     pub client_specific_state: CompositorClientState,
 }
 
@@ -311,7 +281,6 @@ impl ClientCompositorData {
             client_specific_state: CompositorClientState::default(),
         }
     }
-    // Added as per plan's expectation for client_compositor_state
     pub fn compositor_state(&self) -> &CompositorClientState {
         &self.client_specific_state
     }
@@ -323,84 +292,17 @@ impl Default for ClientCompositorData {
     }
 }
 
-
-// Delegate Compositor
 delegate_compositor!(DesktopState);
-
-// Delegate SHM
-// This macro needs to be present for ShmHandler and BufferHandler to be correctly wired up
-// with the ShmState and CompositorState when dispatching client requests.
 delegate_shm!(DesktopState);
 
 impl ShmHandler for DesktopState {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
     }
-    // Optional: send_formats - Smithay 0.10 ShmState handles this automatically if formats are provided at creation.
-    // fn send_formats(&self, shm: &wl_shm::WlShm) {
-    //     // If custom logic is needed to send formats, implement here.
-    //     // Otherwise, ShmState::new constructor and its internal bind logic handle it.
-    // }
 }
 
 impl BufferHandler for DesktopState {
     fn buffer_destroyed(&mut self, buffer: &WlBuffer) {
-        tracing::debug!(buffer_id = ?buffer.id(), "WlBuffer (potentially SHM or other type) destroyed notification received in BufferHandler.");
-        // This is a generic notification that a WlBuffer has been destroyed.
-        // It could be an SHM buffer, a DMA-BUF, or any other type that results in a WlBuffer.
-        
-        // The detailed plan suggests iterating through all windows/surfaces.
-        // This requires a central tracking mechanism for surfaces/windows,
-        // which is not yet implemented (e.g., `DesktopState.space`).
-        //
-        // For now, this log confirms the handler is called.
-        // Actual cleanup of renderer resources associated with this buffer
-        // would typically involve:
-        // 1. Identifying which SurfaceData instances were using this buffer.
-        // 2. Clearing their `current_buffer_info` and `texture_handle`.
-        // 3. Notifying the renderer to release any GPU resources tied to this buffer/texture.
-        // 4. Damaging the affected windows/surfaces.
-        //
-        // Example conceptual logic (will not compile without `self.space`):
-        /*
-        let mut affected_windows = Vec::new();
-        if let Some(space) = self.space.as_mut() { // Assuming space is Option<Space<YourWindowType>>
-            for window_element in space.elements_mut() {
-                // Assuming YourWindowType has a way to get its WlSurface
-                // and then its SurfaceData. This is highly dependent on future window management code.
-                // For example, if window_element.user_data() holds Arc<Mutex<SurfaceData>>:
-                if let Some(surface_data_arc) = window_element.user_data().get::<Arc<Mutex<SurfaceData>>>() {
-                    let mut surface_data = surface_data_arc.lock().unwrap();
-                    if surface_data.current_buffer_info.as_ref().map_or(false, |info| &info.buffer == buffer) {
-                        tracing::info!(
-                            "Buffer {:?} for surface with internal ID {:?} (associated with window {:?}) destroyed. \
-                             Clearing buffer info and texture handle from SurfaceData.",
-                            buffer.id(),
-                            surface_data.id,
-                            // window_element.id() // Assuming YourWindowType has an id()
-                        );
-                        surface_data.current_buffer_info = None;
-                        surface_data.texture_handle = None; // This signals the renderer to drop its texture.
-                        
-                        // Mark the window for redraw.
-                        // affected_windows.push(window_element.clone()); // Or some ID
-                    }
-                }
-            }
-            // After iterating, damage all affected windows.
-            // for window_id_or_ref in affected_windows {
-            //     space.damage_window(&window_id_or_ref, None, None);
-            // }
-        }
-        */
-        // Since we don't have self.space or a similar list yet, this is a no-op beyond logging.
-        // Individual surfaces will clear their buffer on the next commit if it's invalid,
-        // and the renderer will need to handle cases where a texture's underlying buffer is gone.
+        tracing::debug!(buffer_id = ?buffer.id(), "WlBuffer destroyed notification received in BufferHandler.");
     }
 }
-
-
-/*
-GlobalDispatch implementations for WlCompositor and WlSubcompositor are in globals.rs
-GlobalDispatch for WlShm will be added to globals.rs next.
-*/

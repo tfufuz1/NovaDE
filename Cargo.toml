@@ -6,6 +6,7 @@ members = [
     "novade-ui",
     "clock_mcp_server",
     "power_mcp_server",
+    "cpu_mcp_server"
 ]
 
 [features]
