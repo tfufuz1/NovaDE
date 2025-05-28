@@ -6,7 +6,6 @@ members = [
     "novade-ui",
     "clock_mcp_server",
     "power_mcp_server",
-    // any other crates at the root level
 ]
 
 [features]
