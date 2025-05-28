@@ -215,9 +215,13 @@ pub enum WindowManagementError {
 /// Power management error type.
 #[derive(Debug, Error)]
 pub enum PowerManagementError {
-    /// Battery not found.
-    #[error("Battery not found: {0}")]
-    BatteryNotFound(String),
+    /// Device not found (e.g., a specific UPower device).
+    #[error("Device not found: {0}")]
+    DeviceNotFound(String),
+
+    /// D-Bus communication error.
+    #[error("D-Bus communication error: {0}")]
+    DbusCommunicationError(String),
     
     /// Operation not supported.
     #[error("Operation not supported: {0}")]
@@ -230,7 +234,11 @@ pub enum PowerManagementError {
     /// Inhibitor not found.
     #[error("Inhibitor not found: {0}")]
     InhibitorNotFound(String),
-    
+
+    // Renamed BatteryNotFound to DeviceNotFound, so this specific variant is removed
+    // If BatteryNotFound specifically is needed elsewhere, it can be a new variant or use Other.
+    // For now, DeviceNotFound covers the UPower device case.
+
     /// Other error.
     #[error("Power management error: {0}")]
     Other(String),

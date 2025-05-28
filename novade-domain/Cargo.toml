@@ -23,6 +23,8 @@ toml = "0.8" # Added for config provider example
 anyhow = "1.0" # Added
 serde_json = { version = "1.0", features = ["raw_value"] } # Added
 rand = "0.8" # Added
+zbus = { version = "3", default-features = false, features = ["tokio"] } # Added for D-Bus
+futures-util = "0.3" # Added for stream processing
 
 
 [dev-dependencies]
