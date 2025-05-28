@@ -1,4 +1,13 @@
-workspace = { members = ["clock_mcp_server", "power_mcp_server"] }
+[workspace]
+members = [
+    "novade-system",
+    "novade-core",
+    "novade-domain",
+    "novade-ui",
+    "clock_mcp_server",
+    "power_mcp_server",
+    // any other crates at the root level
+]
 
 [features]
 default = []
