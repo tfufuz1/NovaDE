@@ -11,6 +11,8 @@ static SIGNALS: Lazy<Vec<Signal>> = Lazy::new(|| {
     ]
 });
 
+use novade_domain::notifications::Notification; // For type hint, though not directly used in struct fields
+
 #[derive(CompositeTemplate, Default)]
 #[template(string = "")] 
 pub struct NotificationWidgetStub {
@@ -18,6 +20,7 @@ pub struct NotificationWidgetStub {
     pub app_name_label: TemplateChild<Label>,
     #[template_child]
     pub summary_label: TemplateChild<Label>,
+    pub notification_id: RefCell<String>, // Added field
 }
 
 #[glib::object_subclass]
@@ -26,9 +29,17 @@ impl ObjectSubclass for NotificationWidgetStub {
     type Type = super::NotificationWidgetStub;
     type ParentType = gtk::Box;
 
+    fn new() -> Self { // Added new for initializing notification_id
+        Self {
+            app_name_label: TemplateChild::default(),
+            summary_label: TemplateChild::default(),
+            notification_id: RefCell::new(String::new()),
+        }
+    }
+
     fn class_init(klass: &mut Self::Class) {
         klass.set_css_name("notificationwidgetstub");
-        klass.install_signals(&SIGNALS); // Install the custom signal
+        klass.install_signals(&SIGNALS); 
     }
 
     fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {

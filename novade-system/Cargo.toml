@@ -23,8 +23,24 @@ khronos-egl = "6.0.0" # For EGL context management
 
 async-trait = "0.1"
 thiserror = "1.0"
-# Use gtk4-gio for gio::MenuModel, assuming it's sufficient and lighter than full gtk4
-gtk4-gio = { version = "0.8", package = "gtk4-gio" } # Or specific version for your gtk4 setup
+gtk4-gio = { version = "0.8", package = "gtk4-gio" } 
+
+# Wayland dependencies
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable_protocols"] }
+# For wlr-foreign-toplevel-management specifically
+# Check if version aligns with wayland-protocols
+# Smithay's versioning might be different, e.g. wayland-protocols-wlr = "0.1.0"
+# For this task, let's assume it's included in "unstable_protocols" or try to find a direct one if needed.
+# After checking crates.io, smithay-client-toolkit uses its own wayland-protocols,
+# and wlr protocols are often separate.
+# Let's try finding a direct wlr-foreign-toplevel protocol crate or use a broader one if it exists.
+# For now, assuming "unstable_protocols" might cover it or that we'll handle it if it doesn't.
+
+tracing = "0.1" # For logging
+# crossbeam-channel might be needed if std::sync::mpsc is not sufficient for specific threading patterns
+# std::sync::mpsc is part of the standard library, so no direct Cargo entry.
+# For more complex scenarios, crossbeam-channel = "0.5"
 
 
 # novade-core = { path = "../novade-core" } # Assuming these are local sibling crates

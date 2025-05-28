@@ -12,15 +12,16 @@ use novade_domain::workspaces::{StubWorkspaceManager, WorkspaceManager};
 use novade_ui::shell::domain_workspace_connector::DomainWorkspaceConnector;
 use novade_ui::shell::panel_widget::workspace_indicator_widget::types::WorkspaceInfo as UiWorkspaceInfo; 
 // System Info Provider import
-use novade_system::window_info_provider::StubSystemWindowInfoProvider; 
+use novade_system::window_info_provider::{StubSystemWindowInfoProvider, WaylandWindowInfoProvider, SystemWindowInfoProvider}; // Import Wayland provider and trait
 // DBusMenuProvider import
-use novade_system::dbus_menu_provider::StubDBusMenuProvider; // Import the stub
+use novade_system::dbus_menu_provider::StubDBusMenuProvider; 
 // AppMenuService import
-use novade_ui::shell::app_menu_service::AppMenuService; // Import AppMenuService
+use novade_ui::shell::app_menu_service::AppMenuService; 
 
 use std::sync::Arc; 
 use gtk::gio::{self, SimpleAction}; 
 use gtk::glib::VariantTy; 
+use tracing; // Ensure tracing is imported for logging
 
 const APP_ID: &str = "org.novade.UIShellTest";
 
@@ -69,8 +70,18 @@ fn build_ui(app: &Application, tokio_handle: tokio::runtime::Handle) {
     // Create the PanelWidget
     let panel = PanelWidget::new(app);
 
-    // --- SystemWindowInfoProvider Setup ---
-    let system_window_provider = Arc::new(StubSystemWindowInfoProvider::new());
+    // --- SystemWindowInfoProvider Setup (Attempt Wayland, fallback to Stub) ---
+    let system_window_provider: Arc<dyn SystemWindowInfoProvider> =
+        match WaylandWindowInfoProvider::new() {
+            Ok(provider) => {
+                tracing::info!("Successfully initialized WaylandWindowInfoProvider.");
+                Arc::new(provider)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize WaylandWindowInfoProvider: {}. Falling back to StubSystemWindowInfoProvider.", e);
+                Arc::new(StubSystemWindowInfoProvider::new())
+            }
+        };
 
     // --- ActiveWindowService for AppMenuButton (for app_id, title, icon) ---
     let active_window_service = Rc::new(
