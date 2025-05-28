@@ -1,4 +1,10 @@
+use crate::compositor::renderer_interface::abstraction::FrameRenderer;
 use smithay::{
+    backend::{
+        drm::{DrmDevice, DrmDisplay, DrmNode, DrmSurface},
+        egl::EGLDisplay,
+        session::Session,
+    },
     delegate_compositor, delegate_shm,
     desktop::{Space, Window, WindowSurfaceType, PopupManager}, // Added PopupManager
     reexports::{
@@ -112,14 +118,250 @@ pub struct DesktopState {
     // --- Pointer Constraints State ---
     pub pointer_constraints_state: PointerConstraintsState, // ADDED
 
+    // --- Graphics Backend Handles ---
+    // These are initialized in the display_loop and passed to DesktopState
+    pub renderer: Box<dyn FrameRenderer>,
+    pub session: Arc<Session>, // Session needs to be Arc for potential sharing or longer lifetime needs
+    pub drm_device: Arc<DrmDevice>, // DrmDevice is often Arc for sharing with DrmDisplay and event processing
+    pub drm_display: DrmDisplay, // DrmDisplay might not need to be Arc if solely owned by DesktopState
+    pub drm_surfaces: Arc<Mutex<HashMap<crtc::Handle, DrmSurface>>>, // Map of CRTC to DrmSurface
+    pub drm_node: DrmNode,
+    pub egl_display: EGLDisplay, // EGLDisplay might be needed by the renderer or for creating new contexts
+
     // Other fields like output_manager will be added later (this was a note for other fields, output_manager is here)
 }
 
+// Struct to hold graphics backend handles passed to DesktopState
+// This helps in organizing the parameters for DesktopState::new
+#[derive(Debug)]
+pub struct GraphicsBackendHandles {
+    pub session: Arc<Session>,
+    pub drm_device: Arc<DrmDevice>,
+    pub drm_display: DrmDisplay,
+    pub drm_surfaces: Arc<Mutex<HashMap<crtc::Handle, DrmSurface>>>,
+    pub drm_node: DrmNode,
+    pub egl_display: EGLDisplay,
+use crate::compositor::surface_management::{self, SurfaceData, AttachedBufferInfo}; // For SurfaceData access
+use crate::compositor::renderer_interface::abstraction::RenderableTexture; // For texture handle in SurfaceData
+use smithay::backend::renderer::element::AsRenderElements; // For render_elements_from_space
+use smithay::backend::renderer::utils::Rectangle as RendererRectangle; // For damage rects
+use std::error::Error; // For Result types in new methods
+
+use crate::compositor::renderer_interface::abstraction::RenderElement; // Import the trait itself
+
+// Concrete implementation for RenderElement wrapping ManagedWindow
+// This is a simplified version. A more robust implementation might be needed
+// depending on how textures and damage are managed and accessed.
+#[derive(Debug)]
+struct WindowRenderElement<'a> {
+    window_id: Uuid,
+    // wl_surface: &'a WlSurface, // Not strictly needed if all info is extracted
+    transform: Transform, // Copied from SurfaceData
+    window_location: Point<i32, Physical>,
+    window_geometry_physical: Rectangle<i32, Physical>,
+    texture_ref: &'a dyn RenderableTexture,
+    damage_regions_buffer_coords: Vec<Rectangle<i32, BufferCoords>>, // Copied
+}
+
+impl<'a> RenderElement<'a> for WindowRenderElement<'a> {
+    fn id(&self) -> Uuid { self.window_id }
+    fn location(&self, _scale: f64) -> Point<i32, Physical> { self.window_location }
+    fn geometry(&self, _scale: f64) -> Rectangle<i32, Physical> {
+        // This should be the buffer geometry. Assuming window_geometry_physical.size is buffer size for now.
+        Rectangle::from_loc_and_size((0,0), self.window_geometry_physical.size)
+    }
+    fn texture(&self, _scale: f64) -> &'a dyn RenderableTexture { self.texture_ref }
+    fn damage(&self, _output_scale: f64, _space_size: Size<i32, Physical>) -> Vec<Rectangle<i32, Physical>> {
+        // Transform damage from buffer to physical coordinates if necessary.
+        // For now, assume damage_regions_buffer_coords can be used or adapted.
+        // This simplification assumes 1:1 mapping from buffer to physical for damage rects.
+        self.damage_regions_buffer_coords.iter().map(|rect_buffer_coords| {
+            // This transformation is likely incorrect if buffer scale/transform is not identity.
+            // For now, direct cast, assuming physical damage is requested by renderer.
+            RendererRectangle::from_loc_and_size(
+                (rect_buffer_coords.loc.x, rect_buffer_coords.loc.y),
+                (rect_buffer_coords.size.w, rect_buffer_coords.size.h)
+            )
+        }).collect()
+    }
+    fn transform(&self) -> Transform { self.transform }
+    fn alpha(&self) -> f32 { 1.0 } // TODO
+    }
+    fn opaque_regions(&self, _scale: f64) -> Option<Vec<Rectangle<i32, Physical>>> {
+        // TODO: Implement based on surface opaque region if available
+        None
+    }
+}
+
+#[derive(Debug)]
+struct CursorRenderElement<'a> {
+    texture: &'a dyn RenderableTexture,
+    location: Point<i32, Physical>, // Physical location on screen
+}
+
+impl<'a> RenderElement<'a> for CursorRenderElement<'a> {
+    fn id(&self) -> Uuid { Uuid::nil() } // Cursor doesn't need a persistent ID for damage tracking in the same way windows do
+    fn location(&self, _scale: f64) -> Point<i32, Physical> { self.location }
+    fn geometry(&self, _scale: f64) -> Rectangle<i32, Physical> {
+         Rectangle::from_loc_and_size((0,0), Size::from((self.texture.width_px() as i32, self.texture.height_px() as i32)))
+    }
+    fn texture(&self, _scale: f64) -> &'a dyn RenderableTexture { self.texture }
+    fn damage(&self, _output_scale: f64, _space_size: Size<i32, Physical>) -> Vec<Rectangle<i32, Physical>> {
+        // Full damage for cursor
+        vec![Rectangle::from_loc_and_size((0,0), Size::from((self.texture.width_px() as i32, self.texture.height_px() as i32)))]
+    }
+    fn transform(&self) -> Transform { Transform::Normal }
+    fn alpha(&self) -> f32 { 1.0 }
+    fn opaque_regions(&self, _scale: f64) -> Option<Vec<Rectangle<i32, Physical>>> { Some(vec![self.geometry(_scale)]) } // Cursor is usually opaque
+}
+
+
 impl DesktopState {
+    // Methods moved from display_loop/mod.rs and implemented here
+    pub fn render_frame(&mut self, _background_color: [f32; 4]) -> Result<(), Box<dyn Error>> {
+        // TODO: Multi-output rendering requires iterating through active outputs (from OutputManager)
+        // and calling render_frame_on_output for each.
+        // For now, assuming a single primary output identified by the first DRM surface.
+        
+        let output_details = {
+            let surfaces_guard = self.drm_surfaces.lock().unwrap();
+            surfaces_guard.iter().next().map(|(crtc, surface)| {
+                let size = surface.size();
+                // This should come from the OutputDevice's current mode and scale
+                (crtc.clone(), Rectangle::from_loc_and_size((0,0), size), 1.0f64)
+            })
+        };
+
+        if let Some((crtc_handle, output_render_geometry, output_scale)) = output_details {
+            // Gather render elements. This part is tricky due to lifetimes.
+            // We need to collect all SurfaceData guards and texture references first.
+            // This approach avoids holding MutexGuards across the renderer call.
+            // 1. Collect data (including textures) from windows.
+            struct WindowRenderData<'a> {
+                window_id: Uuid,
+                texture_ref: &'a dyn RenderableTexture,
+                location: Point<i32, Physical>,
+                geometry_physical: Rectangle<i32, Physical>,
+                transform: Transform,
+                damage_buffer_coords: Vec<Rectangle<i32, BufferCoords>>,
+            }
+            let mut window_render_data_list = Vec::new();
+            // Need to ensure guards are dropped before renderer is called if textures are references.
+            // This requires careful lifetime management. Let's assume textures are Arc or similar,
+            // or the renderer can handle short-lived texture references if it copies them.
+            // For Box<dyn RenderableTexture>, we are passing references.
+            
+            // Store guards here temporarily and ensure they are dropped.
+            let mut temp_guards = Vec::new();
+            for window_arc in self.space.elements() {
+                let guard = surface_management::get_surface_data(&window_arc.wl_surface()).lock().unwrap();
+                if let Some(texture_handle) = &guard.texture_handle {
+                    window_render_data_list.push(WindowRenderData {
+                        window_id: window_arc.id(),
+                        texture_ref: texture_handle.as_ref(),
+                        location: self.space.element_location(window_arc).unwrap_or_default(),
+                        geometry_physical: window_arc.geometry(),
+                        transform: guard.current_transform().unwrap_or(Transform::Normal),
+                        damage_buffer_coords: guard.damage_regions_buffer_coords.clone(),
+                    });
+                }
+                temp_guards.push(guard); // Keep guard alive until all data is extracted
+            }
+            drop(temp_guards); // Explicitly drop guards
+
+            // 2. Prepare cursor data if visible.
+            struct CursorRenderData<'a> {
+                texture_ref: &'a dyn RenderableTexture,
+                location: Point<i32, Physical>,
+            }
+            let mut cursor_render_data_option = None;
+            let cursor_status_guard = self.current_cursor_status.lock().unwrap(); // Hold lock for status
+            let mut temp_cursor_guard = None; // For cursor surface data guard
+
+            if let CursorImageStatus::Surface(ref cursor_wl_surface) = *cursor_status_guard {
+                let guard = surface_management::get_surface_data(cursor_wl_surface).lock().unwrap();
+                if let Some(texture_handle) = &guard.texture_handle {
+                    let hotspot = self.pointer_hotspot;
+                    let cursor_location_logical = self.pointer_location;
+                    cursor_render_data_option = Some(CursorRenderData {
+                        texture_ref: texture_handle.as_ref(),
+                        location: Point::from((
+                            (cursor_location_logical.x - hotspot.x as f64) as i32,
+                            (cursor_location_logical.y - hotspot.y as f64) as i32,
+                        )),
+                    });
+                }
+                temp_cursor_guard = Some(guard); // Keep guard alive
+            }
+            drop(cursor_status_guard); // Drop status lock
+            drop(temp_cursor_guard);   // Drop cursor surface data lock
+
+            // 3. Build RenderElement list for the renderer.
+            let mut elements_to_render_dyn: Vec<&dyn RenderElement> = Vec::new();
+            let mut concrete_window_elements: Vec<WindowRenderElement> = Vec::new();
+            for data in &window_render_data_list {
+                concrete_window_elements.push(WindowRenderElement {
+                    window_id: data.window_id,
+                    transform: data.transform,
+                    window_location: data.location,
+                    window_geometry_physical: data.geometry_physical,
+                    texture_ref: data.texture_ref,
+                    damage_regions_buffer_coords: data.damage_buffer_coords.clone(),
+                });
+            }
+            for el in &concrete_window_elements { elements_to_render_dyn.push(el); }
+            
+            let mut concrete_cursor_element = None; // Needs to live as long as elements_to_render_dyn
+            if let Some(data) = &cursor_render_data_option {
+                let hotspot = self.pointer_hotspot;
+                let cursor_location_logical = self.pointer_location;
+                let cursor_pos_physical = Point::from((
+                    (cursor_location_logical.x - hotspot.x as f64) as i32,
+                    (cursor_location_logical.y - hotspot.y as f64) as i32,
+                ));
+                // Correctly use the texture from CursorRenderData
+                concrete_cursor_element = Some(CursorRenderElement {
+                    texture: data.texture_ref, 
+                    location: cursor_pos_physical,
+                });
+                if let Some(el) = &concrete_cursor_element { elements_to_render_dyn.push(el); }
+            }
+
+
+            match self.renderer.render_frame(output_render_geometry, output_scale, elements_to_render_dyn.into_iter()) {
+                Ok(_render_damage) => { /* Use damage if needed by present_frame */ }
+                Err(e) => tracing::error!("Error rendering frame: {}", e),
+            }
+
+            if let Err(e) = self.renderer.present_frame(Some(crtc_handle.into())) {
+                tracing::error!("Error presenting frame on CRTC {:?}: {}", crtc_handle, e);
+            }
+        } else {
+            tracing::warn!("render_frame called but no DRM surfaces available.");
+        }
+        
+        self.space.send_frames(self.clock.now().try_into().unwrap_or_default());
+        Ok(())
+    }
+
+    pub fn process_drm_events(&mut self) -> Result<(), smithay::backend::drm::DrmError> {
+        self.drm_device.process_events()
+    }
+
+    pub fn dispatch_clients(&mut self) -> Result<(), Box<dyn Error>> {
+        self.display_handle.dispatch_clients(self).map_err(Into::into)
+    }
+
+    pub fn flush_clients(&mut self) -> Result<(), Box<dyn Error>> {
+        self.display_handle.flush_clients(self).map_err(Into::into)
+    }
+
     pub fn new(
         display_handle: DisplayHandle,
         loop_handle: LoopHandle<'static, Self>,
         loop_signal: LoopSignal,
+        renderer: Box<dyn FrameRenderer>,
+        graphics_handles: GraphicsBackendHandles,
     ) -> Self {
         let seat_name = "seat0".to_string(); // Default seat name
 
@@ -165,8 +407,13 @@ impl DesktopState {
         // The SeatHandler methods get `&mut SeatState<Self>` via `self.seat_state`.
         // seat.user_data().insert_if_missing(|| seat_state.clone()); // SeatState is not Clone
 
+        // Field for current cursor texture (software cursor)
+        let current_cursor_texture = Arc::new(Mutex::new(None::<Box<dyn RenderableTexture>>));
+
+
         Self {
             display_handle: display_handle.clone(),
+            // current_cursor_texture, // This was for software cursor via renderer, SeatHandler::cursor_image will manage it
             loop_handle,
             loop_signal,
             clock, // ADDED/UNCOMMENTED
@@ -198,9 +445,21 @@ impl DesktopState {
             output_manager: Arc::new(Mutex::new(OutputManager::new())),
             tablet_manager_state, // ADDED
             pointer_constraints_state, // ADDED
+
+            // Store the graphics backend handles
+            renderer,
+            session: graphics_handles.session,
+            drm_device: graphics_handles.drm_device,
+            drm_display: graphics_handles.drm_display,
+            drm_surfaces: graphics_handles.drm_surfaces,
+            drm_node: graphics_handles.drm_node,
+            egl_display: graphics_handles.egl_display,
         }
     }
 }
+
+// Required import for the GraphicsBackendHandles struct fields if not already present at the top
+use smithay::reexports::drm::control::crtc;
 
 smithay::delegate_client_handler!(DesktopState);
 
@@ -473,10 +732,118 @@ impl CompositorHandler for DesktopState {
     }
 
     fn commit(&mut self, surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface) {
-        // Handle surface commit logic
-        // This will involve accessing surface data, applying new state, damage tracking, etc.
-        tracing::info!("CompositorHandler: Surface commit for {:?}", surface);
-        // TODO: Implement detailed commit logic using surface_management functions
+        // Use surface_management::commit_surface_state_buffer or similar, then our custom logic.
+        // Smithay's on_commit_buffer_handler usually goes first if not using custom buffer management.
+        smithay::wayland::compositor::on_commit_buffer_handler::<Self>(surface);
+
+        let client_id = surface.client().map(|c| c.id()); // Get client ID for SurfaceData::new if needed
+
+        surface_management::with_surface_data_mut(surface, |surface_data| {
+            let surface_attributes = smithay::wayland::compositor::surface_attributes(surface);
+
+            // 1. Handle SHM buffer import and texture creation
+            if let Some(buffer) = surface_attributes.buffer.as_ref() {
+                if smithay::wayland::shm::is_shm_buffer(buffer) {
+                    match self.renderer.create_texture_from_shm(buffer) {
+                        Ok(texture) => {
+                            surface_data.texture_handle = Some(texture);
+                            tracing::info!("SHM buffer imported as texture for surface {:?}", surface.id());
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to create texture from SHM buffer for surface {:?}: {}", surface.id(), e);
+                            surface_data.texture_handle = None; // Clear previous texture
+                        }
+                    }
+                } else if let Ok(dmabuf) = smithay::wayland::dmabuf::get_dmabuf(buffer) {
+                     match self.renderer.create_texture_from_dmabuf(&dmabuf) {
+                        Ok(texture) => {
+                            surface_data.texture_handle = Some(texture);
+                            tracing::info!("DMABUF imported as texture for surface {:?}", surface.id());
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to create texture from DMABUF for surface {:?}: {}", surface.id(), e);
+                            surface_data.texture_handle = None;
+                        }
+                    }
+                } else {
+                    tracing::warn!("Surface {:?} committed with an unsupported buffer type. Clearing texture.", surface.id());
+                    surface_data.texture_handle = None;
+                }
+
+                // 2. Update current_buffer_info (simplified)
+                surface_data.current_buffer_info = Some(AttachedBufferInfo {
+                    buffer: buffer.clone(),
+                    damage: surface_attributes.damage_buffer.clone(), // Damage in buffer coordinates
+                    transform: surface_attributes.buffer_transform,
+                    scale: surface_attributes.buffer_scale,
+                });
+            } else {
+                // No buffer attached (client attached null buffer)
+                surface_data.texture_handle = None;
+                surface_data.current_buffer_info = None;
+                tracing::info!("Surface {:?} committed with null buffer. Texture and buffer info cleared.", surface.id());
+            }
+
+            // 3. Manage damage tracking
+            // surface_attributes.damage_surface contains damage in surface coordinates.
+            // This needs to be transformed to buffer coordinates if that's what your renderer expects
+            // or accumulated in physical coordinates for the space.
+            // For SurfaceData, we store buffer damage.
+            surface_data.damage_regions_buffer_coords.clear();
+            surface_data.damage_regions_buffer_coords.extend_from_slice(&surface_attributes.damage_buffer);
+
+            // Store other attributes
+            surface_data.current_scale_factor = surface_attributes.buffer_scale;
+            // surface_data.current_transform = surface_attributes.buffer_transform; // Already in AttachedBufferInfo
+
+        });
+
+        // If the surface is part of the space (i.e., a window), mark its region for redraw.
+        // This depends on how ManagedWindow relates to WlSurface and how Space tracks damage.
+        // Smithay's Space::damage_element can be used if ManagedWindow is the element.
+        if let Some(window) = self.space.elements().find(|w| w.wl_surface() == *surface) {
+            // The damage here should be in global coordinates.
+            // Smithay's render_elements_from_space helper usually calculates this.
+            // For now, let's assume full damage for the window on commit.
+            self.space.damage_element(window, None, None); // Damage the whole window area
+        }
+
+
+        // Handle XDG surface role specific commit logic (e.g. configure acks)
+        if let Some(toplevel_surface) = smithay::wayland::shell::xdg::ToplevelSurface::try_from(surface) {
+            // Handle toplevel specific commits if necessary, though ack_configure is separate
+        } else if let Some(popup_surface) = smithay::wayland::shell::xdg::PopupSurface::try_from(surface) {
+            // Handle popup specific commits
+        }
+
+
+        tracing::debug!("CompositorHandler: Commit processed for surface {:?}", surface.id());
+    }
+
+    fn new_surface(&mut self, surface: &WlSurface, client_data: &CompositorClientState) { // Added client_data
+        let client_id = client_data.client_id(); // Get client ID from CompositorClientState
+
+        // Initialize SurfaceData for the new surface
+        // The SurfaceData::new method in surface_management.rs already uses surface.client()
+        // if we need the client_id there.
+        surface_management::get_surface_data(surface); // This ensures it's initialized
+
+        // Add destruction hook for renderer resource cleanup
+        let renderer_clone = self.renderer.clone_renderer(); // Assuming FrameRenderer has a way to be cloned (e.g. Arc internal) or we pass a handle
+        let surface_clone = surface.clone();
+        surface.add_destruction_hook(move |_surface_destroyed_data| { // _surface_destroyed_data is UserData from surface
+            tracing::info!("Surface {:?} destroyed. Cleaning up associated renderer resources.", surface_clone.id());
+            surface_management::with_surface_data_mut(&surface_clone, |surface_data| {
+                if let Some(texture_handle) = surface_data.texture_handle.take() {
+                    // The renderer needs a method to release textures by their handle/ID.
+                    // The texture_handle is Box<dyn RenderableTexture>, which has an id() method.
+                    if let Err(e) = renderer_clone.release_texture(texture_handle.id()) {
+                        tracing::warn!("Error releasing texture for destroyed surface {:?}: {}", surface_clone.id(), e);
+                    }
+                }
+            });
+        });
+        tracing::info!("New surface {:?} created and SurfaceData initialized. Destruction hook added.", surface.id());
     }
 }
 
@@ -518,23 +885,78 @@ delegate_shm!(DesktopState);
 impl BufferHandler for DesktopState {
     fn buffer_destroyed(
         &mut self,
-        _buffer: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
+        buffer_to_destroy: &smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer,
     ) {
-        tracing::info!("Buffer destroyed: {:?}", _buffer);
-        // TODO: Notify renderer about texture invalidation.
+        tracing::info!("Buffer {:?} destroyed.", buffer_to_destroy.id());
+
+        // Iterate through all surfaces to see if this buffer was backing any texture.
+        // This is inefficient. A better approach would be to have a map from buffer ID to surface ID
+        // or for the renderer to manage textures by buffer ID if it caches them that way.
+        // For now, we iterate.
+        
+        let mut affected_surfaces = Vec::new();
+        for window_arc in self.space.elements() {
+            let wl_surface = window_arc.wl_surface();
+            let mut surface_data_guard = surface_management::get_surface_data(&wl_surface).lock().unwrap();
+            
+            if let Some(buffer_info) = &surface_data_guard.current_buffer_info {
+                if buffer_info.buffer == *buffer_to_destroy {
+                    affected_surfaces.push(wl_surface.clone());
+                    // Clear texture handle and buffer info from this specific surface_data
+                    if let Some(texture_handle) = surface_data_guard.texture_handle.take() {
+                        if let Err(e) = self.renderer.release_texture(texture_handle.id()) {
+                            tracing::warn!("Error releasing texture for buffer {:?} on surface {:?}: {}", buffer_to_destroy.id(), wl_surface.id(), e);
+                        }
+                    }
+                    surface_data_guard.current_buffer_info = None;
+                    // Mark for redraw/damage - handled by space.damage_element below
+                }
+            }
+        }
+
+        for surface in affected_surfaces {
+            tracing::info!("Cleared texture from surface {:?} due to buffer destruction.", surface.id());
+            if let Some(window) = self.space.elements().find(|w| w.wl_surface() == surface) {
+                self.space.damage_element(window, None, None); // Damage the whole window
+            }
+        }
+
+        // Also check the cursor surface if it's using this buffer (less likely for SHM buffers but possible)
+        let cursor_wl_surface = self.cursor_surface.clone(); // Clone to avoid borrow issues if cursor_surface is also in space
+        let mut cursor_surface_data = surface_management::get_surface_data(&cursor_wl_surface).lock().unwrap();
+        if let Some(buffer_info) = &cursor_surface_data.current_buffer_info {
+            if buffer_info.buffer == *buffer_to_destroy {
+                if let Some(texture_handle) = cursor_surface_data.texture_handle.take() {
+                     if let Err(e) = self.renderer.release_texture(texture_handle.id()) {
+                        tracing::warn!("Error releasing texture for cursor buffer {:?}: {}", buffer_to_destroy.id(), e);
+                    }
+                }
+                cursor_surface_data.current_buffer_info = None;
+                // If the cursor texture was from this buffer, current_cursor_status might need update
+                // but SeatHandler::cursor_image should handle setting a new one or default.
+                tracing::info!("Cleared texture from cursor surface due to buffer destruction.");
+            }
+        }
     }
 }
 
-// ShmHandler (existing, but ensure it's correct for DesktopState)
+// ShmHandler
 impl ShmHandler for DesktopState {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
     }
-    // shm_formats, shm_client_data can be added if needed
+    // shm_formats needs to be implemented if not using default
+    fn shm_formats(&self) -> &[wl_shm::Format] {
+        // Provide the list of SHM formats supported by the renderer.
+        // This typically comes from the renderer capabilities.
+        // For Gles2NovaRenderer, it would depend on what Gles2 can handle.
+        // Common formats: Argb8888, Xrgb8888.
+        // For now, returning a common set. This should be queried from the renderer.
+        &[wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888, wl_shm::Format::Rgb565]
+    }
 }
 
 // XdgShellHandler (minimal for now, will be expanded in xdg_shell/handlers.rs)
-// This is a preliminary stub. The full implementation will be in its own module.
 impl XdgShellHandler for DesktopState {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
@@ -542,18 +964,35 @@ impl XdgShellHandler for DesktopState {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         tracing::info!("New toplevel surface created: {:?}", surface.wl_surface());
-        // TODO: Full ManagedWindow creation and mapping will be in xdg_shell/handlers.rs
-        // For now, just acknowledge to prevent client errors.
-        let data = surface.wl_surface().get_data::<XdgToplevelSurfaceData>().unwrap(); // Smithay attaches this
-        data.send_configure(); // Send initial configure
+        // Full ManagedWindow creation and mapping will be in xdg_shell/handlers.rs
+        // Ensure SurfaceData is initialized for the underlying WlSurface.
+        // This should be handled by CompositorHandler::new_surface if it's consistently called first.
+        // If not, initialize here:
+        surface_management::get_surface_data(surface.wl_surface()); // Ensures initialization
+
+        // Store XdgToplevelSurfaceData in SurfaceData.user_data_ext if needed for custom logic.
+        // Smithay already stores it in WlSurface's data_map.
+        // let xdg_toplevel_data = surface.wl_surface().get_data::<XdgToplevelSurfaceData>().unwrap();
+        // surface_management::with_surface_data_mut(surface.wl_surface(), |data| {
+        //    data.user_data_ext = Some(Arc::new(Mutex::new(xdg_toplevel_data.clone())));
+        // });
+        // This is often not necessary as XdgToplevelSurfaceData is accessible via surface.wl_surface().get_data().
+
+        // For now, just acknowledge to prevent client errors, actual logic in xdg_shell/handlers.rs
+        let initial_configure_serial = surface.send_configure();
+        tracing::info!("New toplevel surface {:?} created. Initial configure serial: {:?}", surface.wl_surface().id(), initial_configure_serial);
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _client_data: &XdgWmBaseClientData) {
-        tracing::info!("New popup surface created: {:?}", surface.wl_surface());
-        // TODO: Full ManagedWindow (popup variant) creation and mapping.
+        tracing::info!("New popup surface created: {:?}", surface.wl_surface().id());
+        surface_management::get_surface_data(surface.wl_surface()); // Ensures initialization
+
+        // Store XdgPopupSurfaceData if needed, similar to toplevel.
+        // Smithay already stores it.
+
         // For now, just acknowledge.
-        let data = surface.wl_surface().get_data::<XdgPopupSurfaceData>().unwrap(); // Smithay attaches this
-        data.send_configure(surface.get_parent_surface().unwrap()); // Example configure
+        let initial_configure_serial = surface.send_configure();
+        tracing::info!("New popup surface {:?} created. Initial configure serial: {:?}", surface.wl_surface().id(), initial_configure_serial);
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
