@@ -1,0 +1,14 @@
+{
+  "id": "another-test-theme",
+  "name": "Another Test Theme",
+  "description": "A simple theme for testing discovery.",
+  "base_tokens": {},
+  "variants": [
+    {
+      "applies_to_scheme": "light",
+      "tokens": {
+        "color-text": {"id": "color-text", "value": {"color": "#111111"}}
+      }
+    }
+  ]
+}
