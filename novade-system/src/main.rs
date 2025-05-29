@@ -28,12 +28,26 @@ use novade_domain::cpu_usage_service::{DefaultCpuUsageService, ICpuUsageService 
 mod compositor;
 use compositor::core::state::DesktopState;
 
-// For placeholder EGL/Renderer setup
-use khronos_egl as egl;
-use compositor::renderers::gles2::renderer::Gles2Renderer;
-
 // For global creation
 use compositor::core::globals::create_all_wayland_globals;
+
+// --- Winit Backend Imports START ---
+use smithay::backend::winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend};
+use smithay::backend::renderer::glow::GlowRenderer;
+use smithay::backend::renderer::gles::GlesError; // For error types, though Glow might have its own
+use smithay::reexports::calloop::Error as CalloopError;
+use smithay::reexports::calloop::timer::{Timer, TimeoutAction};
+use std::time::Duration;
+// --- Winit Backend Imports END ---
+
+// --- Libinput Imports START ---
+use smithay::backend::input::{InputEvent, LibinputInputBackend, SeatEvent, Axis, KeyState};
+use smithay::input::Seat; // Already imported via compositor::core::state but good to have explicitly if used here
+// UdevBackend and DirectSession are not used for the simplified approach
+// use smithay::backend::session::direct::DirectSession;
+// use smithay::backend::udev::UdevBackend;
+// use std::path::PathBuf;
+// --- Libinput Imports END ---
 
 
 fn main() {
@@ -138,106 +152,51 @@ fn main() {
     });
     // --- MCP Service Initialization END ---
 
-    let mut event_loop: EventLoop<'static, DesktopState> = EventLoop::try_new()
-        .unwrap_or_else(|e| {
-            tracing::error!("Failed to create event loop: {}", e);
-            panic!("Failed to create event loop: {}", e);
-        });
+    let mut event_loop: EventLoop<'static, DesktopState /* NovadeCompositorState */> = EventLoop::try_new()
+        .expect("Failed to create event loop");
+    let mut display: Display<DesktopState /* NovadeCompositorState */> = Display::new()
+        .expect("Failed to create Wayland display");
+    
+    let (mut backend, mut winit_event_loop) = winit::init_from_builder(
+        winit::WinitEventLoopBuilder::new().with_title("NovaDE Compositor (Winit)"),
+        None // No specific calloop handle needed here for init
+    ).expect("Failed to initialize Winit backend");
 
-    let mut display: Display<DesktopState> = Display::new()
-        .unwrap_or_else(|e| {
-            tracing::error!("Failed to create Wayland display: {}", e);
-            panic!("Failed to create Wayland display: {}", e);
-        });
+    // Create the GlowRenderer using WinitGraphicsBackend
+    let mut renderer = unsafe { GlowRenderer::new(backend.renderer()) }
+        .expect("Failed to initialize GlowRenderer");
+    
+    let display_handle = display.handle();
+    let loop_handle = event_loop.handle(); // Get loop_handle before moving event_loop into run
 
-    // --- Placeholder EGL/Renderer Setup START ---
-    tracing::warn!("Using placeholder EGL/Renderer setup. Visual output will not work.");
-    let egl_instance = Rc::new(unsafe {
-        egl::Instance::new(egl::Dynamic::from_name("libEGL.so.1").unwrap_or_else(|_| egl::Dynamic::from_name("libEGL.so").expect("Failed to load libEGL")))
-    });
-    let egl_display_placeholder: egl::Display = unsafe { 
-        egl_instance.get_display(egl::DEFAULT_DISPLAY).unwrap_or(std::mem::zeroed())
-    };
-     if egl_display_placeholder == unsafe { std::mem::zeroed() } {
-        tracing::warn!("EGL_DEFAULT_DISPLAY was zeroed, EGL display placeholder might be invalid.");
-    }
-    let egl_context_placeholder: egl::Context = unsafe { std::mem::zeroed() }; 
-    let initial_screen_size_placeholder = Size::from((800, 600));
-    let glow_context_placeholder = unsafe {
-        glow::Context::from_loader_function(|symbol| {
-            let addr = egl_instance.get_proc_address(symbol);
-            addr.map_or(std::ptr::null(), |p| p as *const _)
-        })
-    };
-    let renderer_placeholder = Gles2Renderer::new(
-        glow_context_placeholder,
-        egl_display_placeholder,
-        egl_context_placeholder,
-        egl_instance.clone(), 
-        initial_screen_size_placeholder,
-        None, 
-    ).expect("Failed to create placeholder Gles2Renderer");
-    tracing::info!("Placeholder Gles2Renderer created.");
-    // --- Placeholder EGL/Renderer Setup END ---
-
-    let display_handle: DisplayHandle = display.handle();
-    let loop_handle = event_loop.handle();
-
-    let mut desktop_state = DesktopState::new( // DesktopState::new() now initializes service fields to None
-        loop_handle, 
+    // NovadeCompositorState initialization
+    // Passing None for Gles2Renderer and Vulkan components as we are using GlowRenderer with Winit.
+    // This implies NovadeCompositorState needs to be adapted or a new field for GlowRenderer added.
+    // For this subtask, we focus on main.rs changes.
+    let mut desktop_state = DesktopState::new( 
+        loop_handle, // Pass the loop_handle here
         display_handle.clone(),
+        // None, // old gles_renderer
+        // None, None, None, None, None, // Vulkan parts
+        // smithay::compositor::ActiveRendererType::Gles, // This would be Glow/Winit specific if adapted
     );
-    tracing::info!("DesktopState created.");
+    // If DesktopState is adapted to hold GlowRenderer:
+    // desktop_state.glow_renderer = Some(renderer); 
+    // Or, renderer is passed around/accessed via Winit backend.
+    // For now, `renderer` variable will be moved into the winit timer closure.
 
-    // --- Store initialized services in DesktopState ---
+    tracing::info!("DesktopState created for Winit backend.");
+
+    // Store initialized services in DesktopState (MCP, CPU Usage) - this part remains
     desktop_state.mcp_connection_service = Some(initialized_mcp_connection_service);
     desktop_state.cpu_usage_service = Some(initialized_cpu_usage_service);
-    // if let Some(spawner) = initialized_mcp_client_spawner {
-    //     desktop_state.mcp_client_spawner = Some(spawner);
-    // }
     tracing::info!("MCPConnectionService and CpuUsageService stored in DesktopState.");
-    // --- End Storing services ---
 
-    desktop_state.renderer = Some(renderer_placeholder);
-    tracing::info!("Placeholder renderer assigned to DesktopState.");
+    create_all_wayland_globals(&mut desktop_state, &display_handle)
+        .expect("Failed to ensure Wayland globals");
+    tracing::info!("Wayland globals initialized.");
 
-    create_all_wayland_globals(&mut desktop_state, &display_handle) 
-        .expect("Failed to ensure Wayland globals were created/logged.");
-    tracing::info!("Wayland globals initialized/logged.");
-
-    // --- Placeholder Output Setup START ---
-    let physical_properties = smithay::output::PhysicalProperties {
-        size: (527, 296).into(),
-        subpixel: smithay::output::Subpixel::Unknown,
-        make: "NovaDE Placeholder Inc.".into(),
-        model: "Virtual Display 1".into(),
-    };
-    let initial_mode = smithay::output::Mode {
-        size: (1920, 1080).into(),
-        refresh: 60_000,
-    };
-    let output_name = "placeholder-1".to_string();
-    let placeholder_output = smithay::output::Output::new(
-        output_name.clone(),
-        physical_properties,
-        Some(tracing::info_span!("placeholder_output", name = %output_name))
-    );
-    placeholder_output.change_current_state(
-        Some(initial_mode),
-        Some(smithay::utils::Transform::Normal),
-        Some(smithay::output::Scale::Fractional(1.0.into())),
-        Some((0, 0).into())
-    );
-    placeholder_output.set_preferred(initial_mode);
-    let _placeholder_output_global = placeholder_output.create_global::<DesktopState>(
-        &desktop_state.display_handle,
-    );
-    desktop_state.outputs.push(placeholder_output.clone());
-    desktop_state.space.map_output(&placeholder_output, (0,0));
-    desktop_state.space.damage_all_outputs();
-    tracing::info!("Created and registered placeholder output: {}", output_name);
-    // --- Placeholder Output Setup END ---
-
+    // Initialize input capabilities on the seat
     if let Err(e) = desktop_state.seat.add_keyboard(Default::default(), 200, 25) {
         tracing::warn!("Failed to add keyboard capability to seat: {}", e);
     } else {
@@ -248,78 +207,231 @@ fn main() {
     } else {
         tracing::info!("Added pointer capability to seat '{}'.", desktop_state.seat.name());
     }
+    if let Err(e) = desktop_state.seat.add_touch() { // Add touch capability
+        tracing::warn!("Failed to add touch capability to seat: {}", e);
+    } else {
+        tracing::info!("Added touch capability to seat '{}'.", desktop_state.seat.name());
+    }
 
+
+    // Insert the Wayland display first
     event_loop.handle().insert_source(
-        display, 
-        |client_stream, _, state: &mut DesktopState| {
-            match client_stream.dispatch(state) {
-                Ok(_) => {}
-                Err(e) => tracing::error!("Error dispatching Wayland client: {}", e),
+        display,
+        |client_stream, _, state: &mut DesktopState /* NovadeCompositorState */| {
+            if let Err(err) = client_stream.dispatch(state) {
+                tracing::error!("Error dispatching Wayland client: {}", err);
             }
         },
     ).expect("Failed to insert Wayland display source into event loop.");
-    tracing::info!("Wayland display event source registered with Calloop.");
 
-    tracing::info!("NovaDE System event loop starting...");
-    loop {
-        match event_loop.dispatch(Some(std::time::Duration::from_millis(16)), &mut desktop_state) {
-            Ok(_) => {}
-            Err(e) => {
-                tracing::error!("Error during event loop dispatch: {}", e);
-                break; 
+    // Insert the libinput backend
+    let mut libinput_backend = LibinputInputBackend::new(None::<fn(_)>);
+    if libinput_backend.link_seat(&desktop_state.seat_name).is_ok() {
+        event_loop.handle().insert_source(libinput_backend, move |event, _, state: &mut DesktopState| {
+            // This is the existing libinput processing logic.
+            // It should be adapted if process_input_event is implemented on DesktopState.
+            match event {
+                InputEvent::Keyboard { event, .. } => {
+                    if let Some(keyboard) = state.seat.get_keyboard() {
+                        let serial = smithay::utils::Serial::next();
+                        keyboard.input(state, event.key_code(), event.state(), serial, event.time_msec(), |_, _, _| true);
+                    }
+                }
+                InputEvent::PointerMotion { event, .. } => {
+                    if let Some(pointer) = state.seat.get_pointer() {
+                        let pos = pointer.current_position() + event.delta();
+                        state.pointer_location = pos; 
+                        pointer.motion(state, state.pointer_location, event.time_msec());
+                    }
+                }
+                InputEvent::PointerButton { event, .. } => {
+                    if let Some(pointer) = state.seat.get_pointer() {
+                        pointer.button(state, event.button_code(), event.state(), event.time_msec());
+                    }
+                }
+                InputEvent::PointerAxis { event, .. } => {
+                    if let Some(pointer) = state.seat.get_pointer() {
+                        let h = event.amount_discrete(Axis::Horizontal).unwrap_or(0.0);
+                        let v = event.amount_discrete(Axis::Vertical).unwrap_or(0.0);
+                        let h_c = event.amount(Axis::Horizontal).unwrap_or(0.0);
+                        let v_c = event.amount(Axis::Vertical).unwrap_or(0.0);
+                        let source = match event.source() {
+                            smithay::backend::input::AxisSource::Wheel => smithay::input::pointer::AxisSource::Wheel,
+                            smithay::backend::input::AxisSource::Finger => smithay::input::pointer::AxisSource::Finger,
+                            smithay::backend::input::AxisSource::Continuous => smithay::input::pointer::AxisSource::Continuous,
+                            smithay::backend::input::AxisSource::WheelTilt => smithay::input::pointer::AxisSource::WheelTilt,
+                        };
+                        if h != 0.0 || v != 0.0 || h_c != 0.0 || v_c != 0.0 {
+                            pointer.axis(state, smithay::input::pointer::AxisFrame::new(event.time_msec())
+                                .discrete(Axis::Horizontal, h as i32)
+                                .discrete(Axis::Vertical, v as i32)
+                                .value_continuous(Axis::Horizontal, h_c)
+                                .value_continuous(Axis::Vertical, v_c)
+                                .source(source).build());
+                        }
+                    }
+                }
+                InputEvent::TouchDown { event, .. } => {
+                    if let Some(touch) = state.seat.get_touch() {
+                        let serial = smithay::utils::Serial::next();
+                        touch.down(state, serial, event.time_msec(), event.slot(), event.position(state.pointer_location.to_i32_round()));
+                    }
+                }
+                InputEvent::TouchUp { event, .. } => {
+                    if let Some(touch) = state.seat.get_touch() {
+                        let serial = smithay::utils::Serial::next();
+                        touch.up(state, serial, event.time_msec(), event.slot());
+                    }
+                }
+                InputEvent::TouchMotion { event, .. } => {
+                     if let Some(touch) = state.seat.get_touch() {
+                        let serial = smithay::utils::Serial::next();
+                        touch.motion(state, serial, event.time_msec(), event.slot(), event.position(state.pointer_location.to_i32_round()));
+                    }
+                }
+                InputEvent::TouchFrame { .. } => { if let Some(touch) = state.seat.get_touch() { touch.frame(state); } }
+                InputEvent::TouchCancel { .. } => { if let Some(touch) = state.seat.get_touch() { touch.cancel(state); } }
+                _ => { tracing::trace!("Unhandled libinput event: {:?}", event); }
             }
-        }
+        }).expect("Failed to insert libinput event source");
+    } else {
+        tracing::warn!("Failed to link libinput backend to seat, input will not work.");
+    }
+    
+    // Winit event processing timer
+    let winit_timer = Timer::immediate();
+    let mut winit_renderer = renderer; // Move renderer here to be captured by the closure
+
+    event_loop.handle().insert_source(winit_timer, move |_, _, state: &mut DesktopState /* NovadeCompositorState */| {
+        let mut calloop_timeout_action = TimeoutAction::ToDuration(Duration::from_millis(16)); // Default reschedule
         
-        let renderer_mut_opt = desktop_state.renderer.as_mut();
-        let mut renderer = if let Some(r) = renderer_mut_opt { r } else {
-            tracing::error!("Renderer not available, skipping frame rendering.");
-            std::thread::sleep(std::time::Duration::from_millis(16));
-            if let Err(e) = desktop_state.display_handle.flush_clients() {
-                 tracing::warn!("Failed to flush clients (no renderer): {}", e);
+        if let Err(e) = winit_event_loop.dispatch_new_events(|event| {
+            match event {
+                WinitEvent::Resized { size, .. } => {
+                    // Resize the renderer. WinitGraphicsBackend's resize is usually called by winit::init or through OutputHandler.
+                    // For GlowRenderer, it might need explicit resize.
+                    // state.glow_renderer.as_mut().unwrap().resize(size.width, size.height); // If state stores GlowRenderer
+                    // For now, we assume the Winit backend handles output size changes which trigger OutputHandler.
+                    tracing::info!("Winit window resized to: {:?}", size);
+                }
+                WinitEvent::CloseRequested { .. } => {
+                    tracing::info!("Winit window close requested, initiating shutdown.");
+                    calloop_timeout_action = TimeoutAction::Break; // Set action to break from event_loop.run
+                }
+                WinitEvent::Input(input_event) => {
+                    // If not using LibinputInputBackend source, or for winit-specific inputs:
+                    // state.process_winit_input_event(input_event);
+                    tracing::trace!("Winit input event: {:?}", input_event);
+                }
+                WinitEvent::OutputCreated { output, .. } => {
+                    tracing::info!("Winit backend created an output: {}", output.name());
+                    // OutputHandler::new_output will be called for this.
+                }
+                WinitEvent::OutputResized { output, ..} => {
+                    tracing::info!("Winit backend resized an output: {}", output.name());
+                    // OutputHandler::output_mode_updated will be called.
+                }
+                WinitEvent::OutputDestroyed { output, .. } => {
+                    tracing::info!("Winit backend destroyed an output: {}", output.name());
+                    // OutputHandler::output_destroyed will be called.
+                }
+                // WinitEvent::Redraw => { /* Handled by rendering logic below */ }
+                _ => {
+                    // tracing::trace!("Other Winit event: {:?}", event);
+                }
             }
-            continue;
-        };
+        }) {
+            tracing::error!("Error dispatching winit events: {}", e);
+            calloop_timeout_action = TimeoutAction::Break; // Exit loop on error
+        }
 
-        if let Some(output) = desktop_state.outputs.first() {
-            let output_geometry = output.current_mode().map_or_else(
-                || smithay::utils::Rectangle::from_loc_and_size((0,0), renderer.screen_size()),
-                |mode| smithay::utils::Rectangle::from_loc_and_size((0,0), mode.size)
-            );
+        if calloop_timeout_action == TimeoutAction::Break {
+            return TimeoutAction::Break; // Propagate break request
+        }
+
+        // Perform rendering using Winit backend and GlowRenderer
+        // This replaces the old manual rendering loop.
+        let damage = state.space.damage_for_outputs(&state.outputs); // Get damage for all outputs known to space
+
+        if let Err(e) = backend.bind() {
+            tracing::error!("Failed to bind winit backend for rendering: {}", e);
+            return calloop_timeout_action; // Reschedule or break
+        }
+
+        // Iterate over outputs known to the compositor state (which Winit should have created)
+        for output in &state.outputs {
+            let output_geometry = state.space.output_geometry(output).unwrap_or_else(|| {
+                let fallback_size = backend.window_size().physical_size; // Use winit window size as fallback
+                tracing::warn!("Output {} not found in space, using winit window size for geometry.", output.name());
+                smithay::utils::Rectangle::from_loc_and_size((0,0), fallback_size)
+            });
             let output_scale = output.current_scale().fractional_scale();
+            
+            // Collect render elements for this output
             let mut render_elements: Vec<crate::compositor::renderer_interface::abstraction::RenderElement> = Vec::new();
-
-            for window_arc in desktop_state.space.elements() {
+            for window_arc in state.space.elements_for_output(output) {
                 if !window_arc.is_mapped() { continue; }
                 let window_geometry = window_arc.geometry();
                 let window_wl_surface = match window_arc.wl_surface() { Some(s) => s, None => continue };
+                
+                // Get SurfaceData - Assuming it's stored in WlSurface's user_data
                 let surface_data_arc = match window_wl_surface.data_map().get::<std::sync::Arc<std::sync::Mutex<crate::compositor::surface_management::SurfaceData>>>() {
-                    Some(data) => data.clone(), None => continue
+                    Some(data) => data.clone(), 
+                    None => {
+                        tracing::warn!("SurfaceData not found for WlSurface {:?} during Winit rendering.", window_wl_surface.id());
+                        continue;
+                    }
                 };
+
                 render_elements.push(crate::compositor::renderer_interface::abstraction::RenderElement::WaylandSurface {
-                    surface_wl: &window_wl_surface,
-                    surface_data_arc,
-                    geometry: window_geometry,
-                    damage_surface_local: vec![], 
+                    surface_wl: &window_wl_surface, // This is a short-lived reference. Ensure it's valid.
+                    surface_data_arc, // This Arc keeps SurfaceData alive.
+                    geometry: window_geometry, // Geometry in space coordinates.
+                    damage_surface_local: vec![], // TODO: Pass actual surface damage.
                 });
             }
-
-            if let Err(err) = renderer.render_frame(render_elements.iter(), output_geometry, output_scale) {
-                tracing::error!("Error rendering frame: {:?}", err);
-            }
-            if let Err(err) = renderer.present_frame() {
-                tracing::error!("Error presenting frame: {:?}", err);
+            
+            // Actual rendering call
+            // The GlowRenderer::render_frame needs to be adapted to take elements by reference or similar.
+            // Or, elements need to be structured to be clonable or passed differently.
+            // For now, assuming render_frame can work with this structure or will be adapted.
+            // The render_frame method from the old loop might need to be a method on GlowRenderer or a helper.
+            // This part is a placeholder for the actual rendering invocation.
+            match unsafe { winit_renderer.render_frame_legacy_wrapper(&render_elements, output_geometry, output_scale) } {
+                Ok(_) => {
+                    tracing::trace!("Rendered frame for output {}", output.name());
+                }
+                Err(e) => {
+                    tracing::error!("Error rendering frame for output {}: {:?}", output.name(), e);
+                }
             }
         }
-        desktop_state.last_render_time = std::time::Instant::now();
-        if let Err(e) = desktop_state.display_handle.flush_clients() {
-            tracing::warn!("Failed to flush clients post-render: {}", e);
+        
+        if let Err(e) = backend.submit(None) { // Present to all windows/outputs managed by Winit backend
+            tracing::error!("Failed to submit frame via winit backend: {}", e);
         }
 
-        // Dispatch frame callbacks
-        let now_ns = desktop_state.clock.now();
+        state.space.damage_all_outputs(); // Request redraw for next frame unconditionally for now
+        
+        // Dispatch frame callbacks to clients
+        let now_ns = state.clock.now();
         let time_for_send_frames = std::time::Duration::from_nanos(now_ns);
-        desktop_state.space.send_frames(time_for_send_frames);
+        state.space.send_frames(time_for_send_frames);
         tracing::trace!("Dispatched frame callbacks via space.send_frames() at time (ns): {}", now_ns);
-    }
+
+        if let Err(e) = state.display_handle.flush_clients() {
+            tracing::warn!("Failed to flush clients post-winit-render: {}", e);
+        }
+
+        calloop_timeout_action // Reschedule or break
+    }).expect("Failed to insert Winit event timer");
+
+    tracing::info!("NovaDE System with Winit backend event loop starting...");
+    event_loop.run(None, &mut desktop_state, |data| {
+        // This closure is called after each event loop dispatch cycle.
+        // Can be used for cleanup or periodic tasks not fitting other handlers.
+        // For example, if we needed to manually clear damage: data.space.clear_damage();
+    }).expect("Event loop failed");
+
     tracing::info!("NovaDE System shutting down.");
 }
