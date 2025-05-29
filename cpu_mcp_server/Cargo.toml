@@ -2,6 +2,9 @@
 name = "cpu_mcp_server"
 version = "0.1.0"
 edition = "2021"
+authors = ["NovaDE Team <nova-de@example.com>"]
+license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }

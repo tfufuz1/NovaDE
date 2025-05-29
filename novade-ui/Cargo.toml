@@ -2,9 +2,10 @@
 name = "novade-ui"
 version = "0.1.0"
 edition = "2021"
+publish = false
 description = "UI layer for the NovaDE desktop environment"
-authors = ["NovaDE Team"]
-license = "MIT"
+authors = ["NovaDE Team <nova-de@example.com>"]
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 novade-core = { path = "../novade-core" }
