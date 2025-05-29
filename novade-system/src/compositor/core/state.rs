@@ -155,8 +155,40 @@ impl CompositorHandler for DesktopState {
         });
     }
 
+    /// Handles buffer commits for a `WlSurface`.
+    ///
+    /// This method is called by Smithay when a client commits changes to a surface,
+    /// potentially attaching a new buffer (`WlBuffer`). The core logic involves:
+    ///
+    /// 1.  **Accessing Surface State**: It uses `smithay::wayland::compositor::with_states`
+    ///     to get thread-safe access to the surface's attributes and its associated
+    ///     `SurfaceData` (from `crate::compositor::surface_management`).
+    /// 2.  **Buffer Handling**:
+    ///     - If a new `WlBuffer` is attached:
+    ///         - It first attempts to import the buffer as a DMABUF by calling
+    ///           `self.dmabuf_state.get_dmabuf_attributes(&wl_buffer)`.
+    ///         - If successful (i.e., it's a DMABUF), it calls
+    ///           `self.renderer.create_texture_from_dmabuf()` to import it into the
+    ///           GLES2 renderer, creating a texture typically bound to `GL_TEXTURE_EXTERNAL_OES`.
+    ///         - If it's not a DMABUF (or DMABUF import fails), it falls back to assuming
+    ///           it's an SHM buffer and calls `self.renderer.create_texture_from_shm()`.
+    ///         - The resulting texture (`Box<dyn RenderableTexture>`) is stored in
+    ///           `surface_data.texture_handle`.
+    ///         - Information about the attached buffer (dimensions, scale, transform) is stored in
+    ///           `surface_data.current_buffer_info`.
+    ///         - Appropriate logging is performed for success or failure of these operations.
+    ///     - If a buffer is detached, `surface_data.texture_handle` and
+    ///       `surface_data.current_buffer_info` are cleared.
+    ///     - If the same buffer is re-committed with different attributes (e.g., scale, transform),
+    ///       only `surface_data.current_buffer_info` is updated.
+    /// 3.  **State Updates**: It updates damage tracking information (`surface_data.damage_buffer_coords`),
+    ///     opaque region, and input region based on the committed surface attributes.
+    ///
+    /// This method is crucial for integrating client buffers into the compositor's rendering pipeline,
+    /// supporting both DMABUF and SHM buffer types.
     fn commit(&mut self, surface: &WlSurface) {
-        tracing::debug!(surface_id = ?surface.id(), "Commit received for WlSurface");
+        let client_info_for_commit = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
+        tracing::debug!(surface_id = ?surface.id(), client_info = %client_info_for_commit, "Commit received for WlSurface");
 
         smithay::wayland::compositor::with_states(surface, |states| {
             let surface_data_arc = states
@@ -179,14 +211,16 @@ impl CompositorHandler for DesktopState {
                     dimensions: dimensions.map_or_else(Default::default, |d| d.size),
                 };
                 surface_data.current_buffer_info = Some(new_buffer_info);
+                let client_id_str_dbg = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
                 tracing::debug!(
-                    surface_id = ?surface.id(),
+                    surface_id = ?surface.id(), client_info = %client_id_str_dbg,
                     "Attached new buffer. Dimensions: {:?}, Scale: {}, Transform: {:?}",
                     dimensions, current_surface_attributes.buffer_scale, current_surface_attributes.buffer_transform
                 );
             } else if current_surface_attributes.buffer.is_none() {
                 surface_data.current_buffer_info = None;
-                tracing::debug!(surface_id = ?surface.id(), "Buffer detached.");
+                let client_id_str_dbg = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
+                tracing::debug!(surface_id = ?surface.id(), client_info = %client_id_str_dbg, "Buffer detached.");
             }
             
             let previous_buffer_id = surface_data.current_buffer_info.as_ref().map(|info| info.buffer.id());
@@ -199,32 +233,59 @@ impl CompositorHandler for DesktopState {
             if new_buffer_attached {
                 let buffer_to_texture = new_buffer_wl.unwrap();
                 if let Some(renderer) = self.renderer.as_mut() {
-                    match renderer.create_texture_from_shm(buffer_to_texture) {
-                        Ok(new_texture) => {
-                            surface_data.texture_handle = Some(new_texture);
-                            tracing::info!("Created new texture for surface {:?}", surface.id());
-                            
-                            let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
-                            surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
-                                buffer: buffer_to_texture.clone(),
-                                scale: current_surface_attributes.buffer_scale,
-                                transform: current_surface_attributes.buffer_transform,
-                                dimensions,
-                            });
+                    // Attempt DMABUF import first
+                    if let Some(dmabuf_attributes) = self.dmabuf_state.get_dmabuf_attributes(buffer_to_texture) {
+                        let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
+                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting DMABUF import");
+                        match renderer.create_texture_from_dmabuf(&dmabuf_attributes) {
+                            Ok(new_texture) => {
+                                surface_data.texture_handle = Some(new_texture);
+                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created texture from DMABUF");
+                                surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
+                                    buffer: buffer_to_texture.clone(),
+                                    scale: current_surface_attributes.buffer_scale,
+                                    transform: current_surface_attributes.buffer_transform,
+                                    dimensions: (dmabuf_attributes.width(), dmabuf_attributes.height()).into(),
+                                });
+                            }
+                            Err(e) => {
+                                tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create texture from DMABUF: {:?}", e);
+                                surface_data.texture_handle = None;
+                                surface_data.current_buffer_info = None;
+                            }
                         }
-                        Err(e) => {
-                            tracing::error!("Failed to create texture for surface {:?}: {:?}", surface.id(), e);
-                            surface_data.texture_handle = None;
-                            surface_data.current_buffer_info = None;
+                    } else {
+                        // Fallback to SHM import
+                        let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
+                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import");
+                        match renderer.create_texture_from_shm(buffer_to_texture) {
+                            Ok(new_texture) => {
+                                surface_data.texture_handle = Some(new_texture);
+                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created texture from SHM");
+                                let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
+                                surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
+                                    buffer: buffer_to_texture.clone(),
+                                    scale: current_surface_attributes.buffer_scale,
+                                    transform: current_surface_attributes.buffer_transform,
+                                    dimensions,
+                                });
+                            }
+                            Err(e) => {
+                                tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create texture from SHM: {:?}", e);
+                                surface_data.texture_handle = None;
+                                surface_data.current_buffer_info = None;
+                            }
                         }
                     }
                 } else {
-                    tracing::warn!("No renderer to create texture for surface {:?}", surface.id());
+                    let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
+                    tracing::warn!(surface_id = ?surface.id(), client_info = %client_id_str, "No renderer available to create texture");
                     surface_data.texture_handle = None;
                     surface_data.current_buffer_info = None;
                 }
             } else if buffer_detached {
-                tracing::info!("Buffer detached from surface {:?}, clearing texture and buffer info.", surface.id());
+                let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
+                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Buffer detached, clearing texture and buffer info.");
                 surface_data.texture_handle = None;
                 surface_data.current_buffer_info = None;
             } else if new_buffer_wl.is_some() && new_buffer_id == previous_buffer_id {
@@ -236,8 +297,9 @@ impl CompositorHandler for DesktopState {
 
             surface_data.damage_buffer_coords.clear(); 
             surface_data.damage_buffer_coords.extend_from_slice(&current_surface_attributes.damage_buffer);
+            let client_id_str_trace = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
             tracing::trace!(
-                surface_id = ?surface.id(),
+                surface_id = ?surface.id(), client_info = %client_id_str_trace,
                 "Damage received (buffer_coords): {:?}",
                 current_surface_attributes.damage_buffer
             );

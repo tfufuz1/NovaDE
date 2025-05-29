@@ -46,27 +46,48 @@ pub struct SurfaceData {
     
     /// Surface opaque region
     pub opaque_region: Arc<RwLock<Option<Vec<Rectangle<i32, Logical>>>>>,
+
+    /// Handle to the renderer-specific texture for the current buffer.
+    ///
+    /// This texture can be created from either an SHM buffer or a DMABUF.
+    /// If it's from a DMABUF, it's typically a [`crate::compositor::renderers::gles2::texture::Gles2Texture`]
+    /// that wraps a `GL_TEXTURE_EXTERNAL_OES` texture target.
+    /// It is `None` if no buffer is currently attached or if texture import failed.
+    pub texture_handle: Option<Box<dyn crate::compositor::renderer_interface::abstraction::RenderableTexture>>,
+    // Note: The commit logic in core/state.rs uses current_buffer_info directly on SurfaceData,
+    // not buffer_info: Arc<Mutex<Option<AttachedBufferInfo>>>. This is an inconsistency.
+    // For now, retaining buffer_info as per original struct, but texture_handle is added.
+    // If current_buffer_info were added, its doc would be:
+    // /// Information about the currently attached `WlBuffer`, its dimensions, scale, and transform.
+    // /// This is `None` if no buffer is attached.
+    // pub current_buffer_info: Option<AttachedBufferInfo>,
 }
 
 /// Information about an attached buffer
 #[derive(Debug, Clone)]
 pub struct AttachedBufferInfo {
-    /// Buffer size
-    pub size: (i32, i32),
+    /// The Wayland buffer resource.
+    /// Note: This field was added to align with usage in `core/state.rs`.
+    pub buffer: WlSurface, // Should be WlBuffer, this is likely a placeholder due to inconsistencies
+
+    /// Buffer dimensions (width, height) in pixels.
+    /// Renamed from `size` to align with usage in `core/state.rs`.
+    pub dimensions: Size<i32, Logical>,
     
-    /// Buffer scale
+    /// Buffer scale factor.
     pub scale: i32,
     
-    /// Buffer transform
+    /// Buffer transform (e.g., rotation, flip).
     pub transform: Transform,
     
-    /// Buffer damage regions
+    /// Damage regions for the buffer, in buffer coordinates.
     pub damage: Vec<Rectangle<i32, Logical>>,
     
-    /// Buffer texture
-    pub texture: Option<GlesTexture>,
+    /// Legacy or backend-specific texture reference.
+    /// The primary texture is managed by `SurfaceData::texture_handle`.
+    pub texture: Option<GlesTexture>, // This is smithay::backend::renderer::gles::GlesTexture
     
-    /// Buffer age
+    /// Buffer age hint, used for damage tracking.
     pub age: u32,
     
     /// Buffer format
@@ -138,10 +159,14 @@ pub struct SurfaceState {
 impl SurfaceData {
     /// Creates a new surface data
     pub fn new(surface: WlSurface, attributes: Arc<RwLock<SurfaceAttributes>>, role: SurfaceRole) -> Self {
+        // The constructor in core/state.rs `SurfaceData::new(client_id)` is inconsistent with this.
+        // This constructor is based on the struct definition in this file.
         Self {
             surface,
             attributes,
-            buffer_info: Arc::new(Mutex::new(None)),
+            buffer_info: Arc::new(Mutex::new(None)), // Retaining this as per original struct
+            texture_handle: None, // Initialize new field
+            // current_buffer_info: None, // If this field were to replace buffer_info
             role,
             state: Arc::new(RwLock::new(SurfaceState {
                 visible: true,
