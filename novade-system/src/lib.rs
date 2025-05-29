@@ -18,6 +18,7 @@ pub mod audio;
 pub mod mcp_client_service; // New service for managing MCP client processes
 pub mod portals;
 pub mod power_management;
+pub mod window_mechanics; // Added this line
 
 // Re-export common types and interfaces
 pub use error::SystemError;
