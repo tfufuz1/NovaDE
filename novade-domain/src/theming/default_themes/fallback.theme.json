@@ -1,66 +1,32 @@
 {
-  "id": "fallback-dark",
-  "name": "Fallback Dark Theme",
-  "description": "A very basic fallback theme for when other themes fail to load.",
-  "author": "NovaDE System",
+  "id": "fallback",
+  "name": "Fallback Theme",
+  "description": "A very basic theme that is used if no other themes can be loaded.",
+  "author": "Novade System",
   "version": "1.0.0",
   "base_tokens": {
-    "color-background": {
-      "id": "color-background",
-      "value": { "color": "#1E1E1EFF" },
-      "description": "Dark background color."
+    "color.text.primary": {
+      "id": "color.text.primary",
+      "value": { "color": "#eeeeee" },
+      "description": "Primary text color for fallback theme."
     },
-    "color-foreground": {
-      "id": "color-foreground",
-      "value": { "color": "#D4D4D4FF" },
-      "description": "Light foreground color for text."
+    "color.background.primary": {
+      "id": "color.background.primary",
+      "value": { "color": "#222222" },
+      "description": "Primary background color for fallback theme."
     },
-    "color-primary": {
-      "id": "color-primary",
-      "value": { "color": "#007ACCFF" },
-      "description": "Primary accent color (e.g., for buttons, highlights)."
+    "font.size.default": {
+      "id": "font.size.default",
+      "value": { "font-size": "10pt" },
+      "description": "Default font size for fallback theme."
     },
-    "color-error": {
-      "id": "color-error",
-      "value": { "color": "#F44747FF" },
-      "description": "Color for error messages and indicators."
-    },
-    "font-family-default": {
-        "id": "font-family-default",
-        "value": { "font-family": "sans-serif" },
-        "description": "Default system sans-serif font."
-    },
-    "spacing-default": {
-        "id": "spacing-default",
-        "value": { "reference": "spacing-medium" },
-        "description": "Default spacing, references global token."
+    "spacing.medium": {
+      "id": "spacing.medium",
+      "value": { "dimension": "8px" }, 
+      "description": "Medium spacing unit for fallback theme."
     }
   },
-  "variants": [
-    {
-      "applies_to_scheme": "dark",
-      "tokens": {
-        "color-panel-background": {
-            "id": "color-panel-background",
-            "value": { "color": "#252526FF" },
-            "description": "Background for panels and sidebars in dark mode."
-        }
-      }
-    },
-    {
-      "applies_to_scheme": "light",
-      "tokens": {
-         "color-background": { "id": "color-background", "value": { "color": "#FFFFFFFF" } },
-         "color-foreground": { "id": "color-foreground", "value": { "color": "#000000FF" } },
-         "color-panel-background": { "id": "color-panel-background", "value": { "color": "#F3F3F3FF" } }
-      }
-    }
-  ],
-  "supported_accent_colors": [
-    { "name": "Default Blue", "value": "#007ACCFF" },
-    { "name": "Crimson Red", "value": "#DC143CFF" }
-  ],
-  "accentable_tokens": {
-    "color-primary": { "direct-replace": null }
-  }
+  "variants": [],
+  "supported_accent_colors": [],
+  "accentable_tokens": {}
 }

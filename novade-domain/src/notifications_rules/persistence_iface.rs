@@ -7,3 +7,5 @@ pub trait NotificationRulesProvider: Send + Sync {
     async fn load_rules(&self) -> Result<NotificationRuleSet, NotificationRulesError>;
     async fn save_rules(&self, rules: &NotificationRuleSet) -> Result<(), NotificationRulesError>;
 }
+
+// No unit tests needed for a file containing only trait definitions.

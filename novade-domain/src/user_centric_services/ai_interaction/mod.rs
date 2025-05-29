@@ -1,34 +1,29 @@
-// Declare submodules
+// Main module for AI Interaction specific logic, types, and services.
+
 pub mod types;
 pub mod errors;
 pub mod persistence_iface;
-pub mod service;
-pub mod persistence; // Added for Iteration 2
+pub mod persistence; // Placeholder for actual implementations
+pub mod service;     // Placeholder for the AIInteractionLogicService trait and its impl
 
-// Re-export main public types, traits, and errors
-pub use self::types::{
+// Re-exports for easier access by consumers of this submodule or parent modules.
+pub use types::{
     AIDataCategory,
     AIConsentStatus,
-    AIModelCapability,
-    AIModelProfile,
-    AIConsentScope,
-    AIConsent,
-    // Iteration 2 types
     AttachmentData,
     InteractionParticipant,
     InteractionHistoryEntry,
     AIInteractionContext,
+    AIConsentScope,
+    AIConsent,
+    AIModelCapability,
+    AIModelProfile,
 };
-pub use self::errors::AIInteractionError;
-pub use self::persistence_iface::{
-    AIConsentProvider,
-    AIModelProfileProvider,
-};
-pub use self::persistence::{ // Added for Iteration 2
-    FilesystemAIConsentProvider,
-    FilesystemAIModelProfileProvider,
-};
-pub use self::service::{
-    AIInteractionLogicService,
-    DefaultAIInteractionLogicService,
-};
+pub use errors::AIInteractionError;
+pub use persistence_iface::{AIConsentProvider, AIModelProfileProvider};
+pub use persistence::{FilesystemAIConsentProvider, FilesystemAIModelProfileProvider};
+
+// Re-export service trait and its default implementation:
+pub use service::{AIInteractionLogicService, DefaultAIInteractionLogicService};
+
+// No unit tests in this mod.rs file. Tests are in respective files.

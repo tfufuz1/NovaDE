@@ -1,557 +1,488 @@
-use std::sync::Arc;
 use async_trait::async_trait;
-use log::{debug, info, warn, error};
 use serde_json::Value as JsonValue;
+use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
+use tracing::{debug, error, warn};
 
-use super::types::{
-    GlobalDesktopSettings, AppearanceSettings, InputBehaviorSettings, ColorScheme,
-    FontSettings, FontHinting, FontAntialiasing,
-    WorkspaceSettings, WorkspaceSwitchingBehavior,
-    PowerManagementPolicySettings, LidCloseAction,
-    DefaultApplicationsSettings,
-};
-use super::paths::{
-    SettingPath, AppearanceSettingPath, InputBehaviorSettingPath, FontSettingPath,
-    WorkspaceSettingPath, PowerManagementSettingPath, DefaultApplicationSettingPath,
-};
+use super::types::GlobalDesktopSettings;
+use super::paths::{SettingPath, AppearanceSettingPath, FontSettingPath, WorkspaceSettingPath, InputBehaviorSettingPath, PowerManagementPolicySettingPath, DefaultApplicationsSettingPath};
 use super::errors::GlobalSettingsError;
 use super::events::{SettingChangedEvent, SettingsLoadedEvent, SettingsSavedEvent};
 use super::persistence_iface::SettingsPersistenceProvider;
 
+// --- GlobalSettingsService Trait ---
+
 #[async_trait]
 pub trait GlobalSettingsService: Send + Sync {
-    async fn load_settings(&mut self) -> Result<(), GlobalSettingsError>;
+    async fn load_settings(&self) -> Result<(), GlobalSettingsError>;
     async fn save_settings(&self) -> Result<(), GlobalSettingsError>;
     fn get_current_settings(&self) -> GlobalDesktopSettings;
-    async fn update_setting(&mut self, path: SettingPath, value: JsonValue) -> Result<(), GlobalSettingsError>;
+    async fn update_setting(&self, path: SettingPath, value: JsonValue) -> Result<(), GlobalSettingsError>;
     fn get_setting(&self, path: &SettingPath) -> Result<JsonValue, GlobalSettingsError>;
-    async fn reset_to_defaults(&mut self) -> Result<(), GlobalSettingsError>;
-    fn subscribe_to_changes(&self) -> broadcast::Receiver<SettingChangedEvent>;
-    fn subscribe_to_load_events(&self) -> broadcast::Receiver<SettingsLoadedEvent>;
-    fn subscribe_to_save_events(&self) -> broadcast::Receiver<SettingsSavedEvent>;
+    async fn reset_to_defaults(&self) -> Result<(), GlobalSettingsError>;
+    fn subscribe_to_setting_changes(&self) -> broadcast::Receiver<SettingChangedEvent>;
+    fn subscribe_to_settings_loaded(&self) -> broadcast::Receiver<SettingsLoadedEvent>;
+    fn subscribe_to_settings_saved(&self) -> broadcast::Receiver<SettingsSavedEvent>;
+    // async fn get_typed_setting<T: serde::de::DeserializeOwned + Send>(&self, path: &SettingPath) -> Result<T, GlobalSettingsError>;
 }
+
+// --- DefaultGlobalSettingsService Implementation ---
 
 pub struct DefaultGlobalSettingsService {
     settings: Arc<RwLock<GlobalDesktopSettings>>,
     persistence_provider: Arc<dyn SettingsPersistenceProvider>,
     event_sender: broadcast::Sender<SettingChangedEvent>,
-    settings_loaded_event_sender: broadcast::Sender<SettingsLoadedEvent>,
-    settings_saved_event_sender: broadcast::Sender<SettingsSavedEvent>,
+    loaded_event_sender: broadcast::Sender<SettingsLoadedEvent>,
+    saved_event_sender: broadcast::Sender<SettingsSavedEvent>,
 }
 
 impl DefaultGlobalSettingsService {
-    pub fn new(persistence_provider: Arc<dyn SettingsPersistenceProvider>) -> Self {
-        let (event_sender, _) = broadcast::channel(32); 
-        let (settings_loaded_event_sender, _) = broadcast::channel(8);
-        let (settings_saved_event_sender, _) = broadcast::channel(8);
+    pub fn new(persistence_provider: Arc<dyn SettingsPersistenceProvider>, broadcast_capacity: usize) -> Self {
+        let (event_sender, _) = broadcast::channel(broadcast_capacity);
+        let (loaded_event_sender, _) = broadcast::channel(broadcast_capacity);
+        let (saved_event_sender, _) = broadcast::channel(broadcast_capacity);
         Self {
             settings: Arc::new(RwLock::new(GlobalDesktopSettings::default())),
             persistence_provider,
             event_sender,
-            settings_loaded_event_sender,
-            settings_saved_event_sender,
+            loaded_event_sender,
+            saved_event_sender,
         }
-    }
-
-    // Helper to deserialize a specific field within a settings group
-    fn deserialize_field<T: serde::de::DeserializeOwned>(value: JsonValue, path_str: &str) -> Result<T, GlobalSettingsError> {
-        serde_json::from_value(value).map_err(|e| GlobalSettingsError::DeserializationError {
-            path_description: path_str.to_string(),
-            source: e,
-        })
     }
 }
 
 #[async_trait]
 impl GlobalSettingsService for DefaultGlobalSettingsService {
-    async fn load_settings(&mut self) -> Result<(), GlobalSettingsError> {
-        info!("Loading global settings...");
+    async fn load_settings(&self) -> Result<(), GlobalSettingsError> {
+        debug!("Service: Attempting to load settings from persistence provider.");
         let loaded_settings = self.persistence_provider.load_global_settings().await?;
         
-        loaded_settings.validate_recursive().map_err(|err_msg| {
-            error!("Loaded settings failed validation: {}. Using defaults.", err_msg);
-            GlobalSettingsError::ValidationError {
-                path_description: "root".to_string(),
-                reason: err_msg,
-            }
-        })?;
+        let mut settings_guard = self.settings.write().await;
+        *settings_guard = loaded_settings.clone();
+        debug!("Service: Settings loaded and updated internally.");
 
-        let mut current_settings_lock = self.settings.write().await;
-        *current_settings_lock = loaded_settings.clone();
-        info!("Global settings loaded and applied successfully.");
-
-        if let Err(e) = self.settings_loaded_event_sender.send(SettingsLoadedEvent::new(loaded_settings)) {
-            warn!("Failed to send SettingsLoadedEvent: {}", e);
+        if let Err(e) = self.loaded_event_sender.send(SettingsLoadedEvent::new(loaded_settings)) {
+            error!("Failed to send SettingsLoadedEvent: {}", e);
         }
         Ok(())
     }
 
     async fn save_settings(&self) -> Result<(), GlobalSettingsError> {
-        info!("Saving global settings...");
-        let settings_lock = self.settings.read().await;
-        let settings_to_save = (*settings_lock).clone(); // Clone to release lock before async call if provider is slow
-        drop(settings_lock); // Release read lock
+        debug!("Service: Attempting to save settings using persistence provider.");
+        let settings_clone = self.settings.read().await.clone();
+        self.persistence_provider.save_global_settings(&settings_clone).await?;
+        debug!("Service: Settings saved successfully by persistence provider.");
 
-        self.persistence_provider.save_global_settings(&settings_to_save).await?;
-        info!("Global settings saved successfully.");
-
-        if let Err(e) = self.settings_saved_event_sender.send(SettingsSavedEvent::new(settings_to_save)) {
-            warn!("Failed to send SettingsSavedEvent: {}", e);
+        if let Err(e) = self.saved_event_sender.send(SettingsSavedEvent::new()) {
+            error!("Failed to send SettingsSavedEvent: {}", e);
         }
         Ok(())
     }
 
     fn get_current_settings(&self) -> GlobalDesktopSettings {
-        futures::executor::block_on(self.settings.read()).clone()
+        self.settings.blocking_read().clone()
     }
 
-    async fn update_setting(&mut self, path: SettingPath, value: JsonValue) -> Result<(), GlobalSettingsError> {
-        debug!("Attempting to update setting: {:?} to value: {:?}", path, value);
-        let mut settings_lock = self.settings.write().await;
-        let mut new_settings = (*settings_lock).clone(); // Clone to modify
-        let path_str = path.to_string(); // For error reporting
+    async fn update_setting(&self, path: SettingPath, value: JsonValue) -> Result<(), GlobalSettingsError> {
+        debug!("Service: Attempting to update setting at path: {:?}, with value: {:?}", path, value);
+        let mut settings_guard = self.settings.write().await;
+        let mut new_settings = (*settings_guard).clone();
 
-        match path {
-            SettingPath::Appearance(ref ap_path) => {
-                let appearance = &mut new_settings.appearance;
-                match ap_path {
-                    AppearanceSettingPath::ActiveThemeName => appearance.active_theme_name = Self::deserialize_field(value.clone(), &path_str)?,
-                    AppearanceSettingPath::ColorScheme => appearance.color_scheme = Self::deserialize_field(value.clone(), &path_str)?,
-                    AppearanceSettingPath::EnableAnimations => appearance.enable_animations = Self::deserialize_field(value.clone(), &path_str)?,
+        macro_rules! update_field {
+            ($target_struct:expr, $field_name:ident, $json_value:expr, $error_path:expr, $expected_type_name:expr) => {
+                match serde_json::from_value($json_value.clone()) {
+                    Ok(val) => $target_struct.$field_name = val,
+                    Err(_e) => return Err(GlobalSettingsError::InvalidValueType {
+                        path: $error_path,
+                        expected_type: $expected_type_name.to_string(),
+                        actual_value_preview: format!("{:.50}", $json_value.to_string()),
+                    }),
                 }
-            }
-            SettingPath::InputBehavior(ref ib_path) => {
-                let input_behavior = &mut new_settings.input_behavior;
-                match ib_path {
-                    InputBehaviorSettingPath::MouseSensitivity => input_behavior.mouse_sensitivity = Self::deserialize_field(value.clone(), &path_str)?,
-                    InputBehaviorSettingPath::NaturalScrollingTouchpad => input_behavior.natural_scrolling_touchpad = Self::deserialize_field(value.clone(), &path_str)?,
+            };
+        }
+        
+        match path.clone() {
+            SettingPath::Appearance(ref ap_path) => match ap_path {
+                AppearanceSettingPath::ActiveThemeName => update_field!(new_settings.appearance, active_theme_name, value, path, "String"),
+                AppearanceSettingPath::ColorScheme => update_field!(new_settings.appearance, color_scheme, value, path, "ColorScheme"),
+                AppearanceSettingPath::AccentColorToken => update_field!(new_settings.appearance, accent_color_token, value, path, "String"),
+                AppearanceSettingPath::IconThemeName => update_field!(new_settings.appearance, icon_theme_name, value, path, "String"),
+                AppearanceSettingPath::CursorThemeName => update_field!(new_settings.appearance, cursor_theme_name, value, path, "String"),
+                AppearanceSettingPath::EnableAnimations => update_field!(new_settings.appearance, enable_animations, value, path, "bool"),
+                AppearanceSettingPath::InterfaceScalingFactor => update_field!(new_settings.appearance, interface_scaling_factor, value, path, "f64"),
+                AppearanceSettingPath::FontSettings(ref fs_path) => match fs_path {
+                    FontSettingPath::DefaultFontFamily => update_field!(new_settings.appearance.font_settings, default_font_family, value, path, "String"),
+                    FontSettingPath::DefaultFontSize => update_field!(new_settings.appearance.font_settings, default_font_size, value, path, "u8"),
+                    FontSettingPath::MonospaceFontFamily => update_field!(new_settings.appearance.font_settings, monospace_font_family, value, path, "String"),
+                    FontSettingPath::DocumentFontFamily => update_field!(new_settings.appearance.font_settings, document_font_family, value, path, "String"),
+                    FontSettingPath::Hinting => update_field!(new_settings.appearance.font_settings, hinting, value, path, "FontHinting"),
+                    FontSettingPath::Antialiasing => update_field!(new_settings.appearance.font_settings, antialiasing, value, path, "FontAntialiasing"),
                 }
-            }
-            SettingPath::Font(ref f_path) => {
-                let font_settings = &mut new_settings.font_settings;
-                match f_path {
-                    FontSettingPath::DefaultFontFamily => font_settings.default_font_family = Self::deserialize_field(value.clone(), &path_str)?,
-                    FontSettingPath::DefaultFontSize => font_settings.default_font_size = Self::deserialize_field(value.clone(), &path_str)?,
-                    FontSettingPath::MonospaceFontFamily => font_settings.monospace_font_family = Self::deserialize_field(value.clone(), &path_str)?,
-                    FontSettingPath::DocumentFontFamily => font_settings.document_font_family = Self::deserialize_field(value.clone(), &path_str)?,
-                    FontSettingPath::Hinting => font_settings.hinting = Self::deserialize_field(value.clone(), &path_str)?,
-                    FontSettingPath::Antialiasing => font_settings.antialiasing = Self::deserialize_field(value.clone(), &path_str)?,
-                }
-            }
-            SettingPath::Workspace(ref w_path) => {
-                let workspace_config = &mut new_settings.workspace_config;
-                match w_path {
-                    WorkspaceSettingPath::DynamicWorkspaces => workspace_config.dynamic_workspaces = Self::deserialize_field(value.clone(), &path_str)?,
-                    WorkspaceSettingPath::DefaultWorkspaceCount => workspace_config.default_workspace_count = Self::deserialize_field(value.clone(), &path_str)?,
-                    WorkspaceSettingPath::WorkspaceSwitchingBehavior => workspace_config.workspace_switching_behavior = Self::deserialize_field(value.clone(), &path_str)?,
-                    WorkspaceSettingPath::ShowWorkspaceIndicator => workspace_config.show_workspace_indicator = Self::deserialize_field(value.clone(), &path_str)?,
-                }
-            }
-            SettingPath::PowerManagement(ref pm_path) => {
-                let power_policy = &mut new_settings.power_management_policy;
-                match pm_path {
-                    PowerManagementSettingPath::ScreenBlankTimeoutAcSecs => power_policy.screen_blank_timeout_ac_secs = Self::deserialize_field(value.clone(), &path_str)?,
-                    PowerManagementSettingPath::ScreenBlankTimeoutBatterySecs => power_policy.screen_blank_timeout_battery_secs = Self::deserialize_field(value.clone(), &path_str)?,
-                    PowerManagementSettingPath::SuspendActionOnLidCloseAc => power_policy.suspend_action_on_lid_close_ac = Self::deserialize_field(value.clone(), &path_str)?,
-                    PowerManagementSettingPath::SuspendActionOnLidCloseBattery => power_policy.suspend_action_on_lid_close_battery = Self::deserialize_field(value.clone(), &path_str)?,
-                    PowerManagementSettingPath::AutomaticSuspendDelayAcSecs => power_policy.automatic_suspend_delay_ac_secs = Self::deserialize_field(value.clone(), &path_str)?,
-                    PowerManagementSettingPath::AutomaticSuspendDelayBatterySecs => power_policy.automatic_suspend_delay_battery_secs = Self::deserialize_field(value.clone(), &path_str)?,
-                    PowerManagementSettingPath::ShowBatteryPercentage => power_policy.show_battery_percentage = Self::deserialize_field(value.clone(), &path_str)?,
-                }
-            }
-            SettingPath::DefaultApplications(ref da_path) => {
-                let def_apps = &mut new_settings.default_applications;
-                match da_path {
-                    DefaultApplicationSettingPath::WebBrowserDesktopFile => def_apps.web_browser_desktop_file = Self::deserialize_field(value.clone(), &path_str)?,
-                    DefaultApplicationSettingPath::EmailClientDesktopFile => def_apps.email_client_desktop_file = Self::deserialize_field(value.clone(), &path_str)?,
-                    DefaultApplicationSettingPath::TerminalEmulatorDesktopFile => def_apps.terminal_emulator_desktop_file = Self::deserialize_field(value.clone(), &path_str)?,
-                    DefaultApplicationSettingPath::FileManagerDesktopFile => def_apps.file_manager_desktop_file = Self::deserialize_field(value.clone(), &path_str)?,
-                    DefaultApplicationSettingPath::TextEditorDesktopFile => def_apps.text_editor_desktop_file = Self::deserialize_field(value.clone(), &path_str)?,
-                }
+            },
+            SettingPath::Workspaces(ref ws_path) => match ws_path {
+                WorkspaceSettingPath::DynamicWorkspaces => update_field!(new_settings.workspaces, dynamic_workspaces, value, path, "bool"),
+                WorkspaceSettingPath::DefaultWorkspaceCount => update_field!(new_settings.workspaces, default_workspace_count, value, path, "u8"),
+                WorkspaceSettingPath::WorkspaceSwitchingBehavior => update_field!(new_settings.workspaces, workspace_switching_behavior, value, path, "WorkspaceSwitchingBehavior"),
+                WorkspaceSettingPath::ShowWorkspaceIndicator => update_field!(new_settings.workspaces, show_workspace_indicator, value, path, "bool"),
+            },
+            SettingPath::InputBehavior(ref ib_path) => match ib_path {
+                InputBehaviorSettingPath::MouseAccelerationProfile => update_field!(new_settings.input_behavior, mouse_acceleration_profile, value, path, "MouseAccelerationProfile"),
+                InputBehaviorSettingPath::CustomMouseAccelerationFactor => update_field!(new_settings.input_behavior, custom_mouse_acceleration_factor, value, path, "Option<f32>"),
+                InputBehaviorSettingPath::MouseSensitivity => update_field!(new_settings.input_behavior, mouse_sensitivity, value, path, "f32"),
+                InputBehaviorSettingPath::NaturalScrollingMouse => update_field!(new_settings.input_behavior, natural_scrolling_mouse, value, path, "bool"),
+                InputBehaviorSettingPath::NaturalScrollingTouchpad => update_field!(new_settings.input_behavior, natural_scrolling_touchpad, value, path, "bool"),
+                InputBehaviorSettingPath::TapToClickTouchpad => update_field!(new_settings.input_behavior, tap_to_click_touchpad, value, path, "bool"),
+                InputBehaviorSettingPath::TouchpadPointerSpeed => update_field!(new_settings.input_behavior, touchpad_pointer_speed, value, path, "f32"),
+                InputBehaviorSettingPath::KeyboardRepeatDelayMs => update_field!(new_settings.input_behavior, keyboard_repeat_delay_ms, value, path, "u32"),
+                InputBehaviorSettingPath::KeyboardRepeatRateCps => update_field!(new_settings.input_behavior, keyboard_repeat_rate_cps, value, path, "u32"),
+            },
+            SettingPath::PowerManagementPolicy(ref pmp_path) => match pmp_path {
+                PowerManagementPolicySettingPath::ScreenBlankTimeoutAcSecs => update_field!(new_settings.power_management_policy, screen_blank_timeout_ac_secs, value, path, "u32"),
+                PowerManagementPolicySettingPath::ScreenBlankTimeoutBatterySecs => update_field!(new_settings.power_management_policy, screen_blank_timeout_battery_secs, value, path, "u32"),
+                PowerManagementPolicySettingPath::SuspendActionOnLidCloseAc => update_field!(new_settings.power_management_policy, suspend_action_on_lid_close_ac, value, path, "LidCloseAction"),
+                PowerManagementPolicySettingPath::SuspendActionOnLidCloseBattery => update_field!(new_settings.power_management_policy, suspend_action_on_lid_close_battery, value, path, "LidCloseAction"),
+                PowerManagementPolicySettingPath::AutomaticSuspendDelayAcSecs => update_field!(new_settings.power_management_policy, automatic_suspend_delay_ac_secs, value, path, "u32"),
+                PowerManagementPolicySettingPath::AutomaticSuspendDelayBatterySecs => update_field!(new_settings.power_management_policy, automatic_suspend_delay_battery_secs, value, path, "u32"),
+                PowerManagementPolicySettingPath::ShowBatteryPercentage => update_field!(new_settings.power_management_policy, show_battery_percentage, value, path, "bool"),
+            },
+            SettingPath::DefaultApplications(ref da_path) => match da_path {
+                DefaultApplicationsSettingPath::WebBrowser => update_field!(new_settings.default_applications, web_browser, value, path, "String"),
+                DefaultApplicationsSettingPath::EmailClient => update_field!(new_settings.default_applications, email_client, value, path, "String"),
+                DefaultApplicationsSettingPath::TerminalEmulator => update_field!(new_settings.default_applications, terminal_emulator, value, path, "String"),
+                DefaultApplicationsSettingPath::FileManager => update_field!(new_settings.default_applications, file_manager, value, path, "String"),
+                DefaultApplicationsSettingPath::MusicPlayer => update_field!(new_settings.default_applications, music_player, value, path, "String"),
+                DefaultApplicationsSettingPath::VideoPlayer => update_field!(new_settings.default_applications, video_player, value, path, "String"),
+                DefaultApplicationsSettingPath::ImageViewer => update_field!(new_settings.default_applications, image_viewer, value, path, "String"),
+                DefaultApplicationsSettingPath::TextEditor => update_field!(new_settings.default_applications, text_editor, value, path, "String"),
+            },
+            SettingPath::Root | SettingPath::AppearanceRoot | SettingPath::WorkspacesRoot | 
+            SettingPath::InputBehaviorRoot | SettingPath::PowerManagementPolicyRoot | SettingPath::DefaultApplicationsRoot => {
+                return Err(GlobalSettingsError::InvalidValueType {
+                    path: path.clone(),
+                    expected_type: "Specific setting path".to_string(),
+                    actual_value_preview: "Attempted to update a root/category path.".to_string(),
+                });
             }
         }
 
-        new_settings.validate_recursive().map_err(|reason| {
-            error!("Validation failed for updated setting {:?}: {}", path, reason);
-            GlobalSettingsError::ValidationError { path_description: path.to_string(), reason }
-        })?;
+        new_settings.validate_recursive()?;
+        
+        *settings_guard = new_settings;
+        debug!("Service: Setting updated and validated successfully for path: {:?}", path);
 
-        *settings_lock = new_settings;
-        debug!("Setting {:?} updated successfully.", path);
-
-        let event = SettingChangedEvent::new(path.clone(), value);
-        if let Err(e) = self.event_sender.send(event) {
-            warn!("Failed to send SettingChangedEvent for path {:?}: {}", path, e);
+        if let Err(e) = self.event_sender.send(SettingChangedEvent { path, new_value: value }) {
+            error!("Failed to send SettingChangedEvent: {}", e);
         }
-
-        drop(settings_lock); // Release write lock before calling save_settings
-        if let Err(e) = self.save_settings().await {
-            error!("Failed to save settings after update for path {:?}: {}", path, e);
-            return Err(e);
-        }
+        
+        self.save_settings().await?;
         
         Ok(())
     }
 
     fn get_setting(&self, path: &SettingPath) -> Result<JsonValue, GlobalSettingsError> {
-        debug!("Attempting to get setting: {:?}", path);
-        let settings_lock = futures::executor::block_on(self.settings.read());
-        let path_str = path.to_string();
-
-        let result = match path {
-            SettingPath::Appearance(ap_path) => {
-                let appearance = &settings_lock.appearance;
-                match ap_path {
-                    AppearanceSettingPath::ActiveThemeName => serde_json::to_value(&appearance.active_theme_name),
-                    AppearanceSettingPath::ColorScheme => serde_json::to_value(&appearance.color_scheme),
-                    AppearanceSettingPath::EnableAnimations => serde_json::to_value(&appearance.enable_animations),
-                }
-            }
-            SettingPath::InputBehavior(ib_path) => {
-                let input_behavior = &settings_lock.input_behavior;
-                match ib_path {
-                    InputBehaviorSettingPath::MouseSensitivity => serde_json::to_value(&input_behavior.mouse_sensitivity),
-                    InputBehaviorSettingPath::NaturalScrollingTouchpad => serde_json::to_value(&input_behavior.natural_scrolling_touchpad),
-                }
-            }
-            SettingPath::Font(f_path) => {
-                let font_settings = &settings_lock.font_settings;
-                match f_path {
-                    FontSettingPath::DefaultFontFamily => serde_json::to_value(&font_settings.default_font_family),
-                    FontSettingPath::DefaultFontSize => serde_json::to_value(&font_settings.default_font_size),
-                    FontSettingPath::MonospaceFontFamily => serde_json::to_value(&font_settings.monospace_font_family),
-                    FontSettingPath::DocumentFontFamily => serde_json::to_value(&font_settings.document_font_family),
-                    FontSettingPath::Hinting => serde_json::to_value(&font_settings.hinting),
-                    FontSettingPath::Antialiasing => serde_json::to_value(&font_settings.antialiasing),
-                }
-            }
-            SettingPath::Workspace(w_path) => {
-                let workspace_config = &settings_lock.workspace_config;
-                match w_path {
-                    WorkspaceSettingPath::DynamicWorkspaces => serde_json::to_value(&workspace_config.dynamic_workspaces),
-                    WorkspaceSettingPath::DefaultWorkspaceCount => serde_json::to_value(&workspace_config.default_workspace_count),
-                    WorkspaceSettingPath::WorkspaceSwitchingBehavior => serde_json::to_value(&workspace_config.workspace_switching_behavior),
-                    WorkspaceSettingPath::ShowWorkspaceIndicator => serde_json::to_value(&workspace_config.show_workspace_indicator),
-                }
-            }
-            SettingPath::PowerManagement(pm_path) => {
-                let power_policy = &settings_lock.power_management_policy;
-                match pm_path {
-                    PowerManagementSettingPath::ScreenBlankTimeoutAcSecs => serde_json::to_value(&power_policy.screen_blank_timeout_ac_secs),
-                    PowerManagementSettingPath::ScreenBlankTimeoutBatterySecs => serde_json::to_value(&power_policy.screen_blank_timeout_battery_secs),
-                    PowerManagementSettingPath::SuspendActionOnLidCloseAc => serde_json::to_value(&power_policy.suspend_action_on_lid_close_ac),
-                    PowerManagementSettingPath::SuspendActionOnLidCloseBattery => serde_json::to_value(&power_policy.suspend_action_on_lid_close_battery),
-                    PowerManagementSettingPath::AutomaticSuspendDelayAcSecs => serde_json::to_value(&power_policy.automatic_suspend_delay_ac_secs),
-                    PowerManagementSettingPath::AutomaticSuspendDelayBatterySecs => serde_json::to_value(&power_policy.automatic_suspend_delay_battery_secs),
-                    PowerManagementSettingPath::ShowBatteryPercentage => serde_json::to_value(&power_policy.show_battery_percentage),
-                }
-            }
-            SettingPath::DefaultApplications(da_path) => {
-                let def_apps = &settings_lock.default_applications;
-                match da_path {
-                    DefaultApplicationSettingPath::WebBrowserDesktopFile => serde_json::to_value(&def_apps.web_browser_desktop_file),
-                    DefaultApplicationSettingPath::EmailClientDesktopFile => serde_json::to_value(&def_apps.email_client_desktop_file),
-                    DefaultApplicationSettingPath::TerminalEmulatorDesktopFile => serde_json::to_value(&def_apps.terminal_emulator_desktop_file),
-                    DefaultApplicationSettingPath::FileManagerDesktopFile => serde_json::to_value(&def_apps.file_manager_desktop_file),
-                    DefaultApplicationSettingPath::TextEditorDesktopFile => serde_json::to_value(&def_apps.text_editor_desktop_file),
-                }
-            }
-        };
-        result.map_err(|e| GlobalSettingsError::SerializationError { path_description: path_str, source: e })
-    }
-    
-    async fn reset_to_defaults(&mut self) -> Result<(), GlobalSettingsError> {
-        info!("Resetting global settings to defaults...");
-        let mut settings_lock = self.settings.write().await;
-        let old_settings = (*settings_lock).clone();
-        let default_settings = GlobalDesktopSettings::default();
-
-        *settings_lock = default_settings.clone();
-        info!("Global settings have been reset to defaults in memory.");
-
-        // Helper to send event if a sub-setting changed
-        let mut send_change_event = |path_enum_constructor: fn(AppearanceSettingPath) -> SettingPath, old_val: JsonValue, new_val: JsonValue, sub_path: AppearanceSettingPath| {
-            // This is a simplified example. Ideally, we'd iterate through each field of each sub-setting.
-            // For brevity, let's assume the whole AppearanceSettings struct is one "value" for an event.
-            // A more granular approach would compare each field: old_settings.appearance.active_theme_name vs default_settings.appearance.active_theme_name
-            if old_val != new_val {
-                 // This is not quite right. The `path` for `SettingChangedEvent` should be specific.
-                 // For a full reset, we'd need to iterate over all SettingPath variants.
-                 // Example for AppearanceSettings as a whole (if we had a path for it):
-                 // if serde_json::to_value(&old_settings.appearance)? != serde_json::to_value(&default_settings.appearance)? {
-                 //    self.event_sender.send(... path for AppearanceSettings ... )
-                 // }
-                 // For this task, sending events for each top-level category:
-                 // This requires defining SettingPath variants for categories or using a special "reset" event.
-                 // Let's assume we iterate through known top-level fields and emit if they changed.
-                 // This is illustrative and would need proper paths for each category.
-                 // The prompt asks for events for each *top-level setting category*.
-                 // This means paths like "appearance", "input_behavior", etc.
-                 // However, our SettingPath enum is for individual leaf settings.
-                 // This creates a mismatch.
-                 // A pragmatic approach for now: iterate through each leaf path and send an event.
-                 // This is very verbose. A better way would be a specific "CategoryResetEvent" or similar.
-
-                 // For now, let's send events for a few representative leaf paths if their category changed.
-                 // This is a compromise given the current SettingPath structure.
-                 // A full implementation would iterate ALL leaf paths.
-
-                 // Example: if appearance settings as a whole changed, send an event for one of its paths.
-                 // This is not ideal. The prompt's intent might be one event per category like "appearance.* reset".
-            }
-        };
+        let settings_guard = self.settings.blocking_read();
         
-        // Emit events for changed categories by comparing old and new values
-        // This is simplified. A real implementation would compare each field of each category.
-        if old_settings.appearance != default_settings.appearance {
-            if let Ok(val) = serde_json::to_value(&default_settings.appearance) { // Send whole struct as value
-                 let _ = self.event_sender.send(SettingChangedEvent::new(SettingPath::Appearance(AppearanceSettingPath::ActiveThemeName), val.get("active_theme_name").unwrap_or(&JsonValue::Null).clone())); // Example path
-            }
-        }
-        if old_settings.input_behavior != default_settings.input_behavior {
-             if let Ok(val) = serde_json::to_value(&default_settings.input_behavior) {
-                 let _ = self.event_sender.send(SettingChangedEvent::new(SettingPath::InputBehavior(InputBehaviorSettingPath::MouseSensitivity), val.get("mouse_sensitivity").unwrap_or(&JsonValue::Null).clone()));
-            }
-        }
-        if old_settings.font_settings != default_settings.font_settings {
-             if let Ok(val) = serde_json::to_value(&default_settings.font_settings) {
-                 let _ = self.event_sender.send(SettingChangedEvent::new(SettingPath::Font(FontSettingPath::DefaultFontSize), val.get("default_font_size").unwrap_or(&JsonValue::Null).clone()));
-            }
-        }
-        if old_settings.workspace_config != default_settings.workspace_config {
-            if let Ok(val) = serde_json::to_value(&default_settings.workspace_config) {
-                 let _ = self.event_sender.send(SettingChangedEvent::new(SettingPath::Workspace(WorkspaceSettingPath::DynamicWorkspaces), val.get("dynamic_workspaces").unwrap_or(&JsonValue::Null).clone()));
-            }
-        }
-        if old_settings.power_management_policy != default_settings.power_management_policy {
-             if let Ok(val) = serde_json::to_value(&default_settings.power_management_policy) {
-                 let _ = self.event_sender.send(SettingChangedEvent::new(SettingPath::PowerManagement(PowerManagementSettingPath::ShowBatteryPercentage), val.get("show_battery_percentage").unwrap_or(&JsonValue::Null).clone()));
-            }
-        }
-        if old_settings.default_applications != default_settings.default_applications {
-            if let Ok(val) = serde_json::to_value(&default_settings.default_applications) {
-                 let _ = self.event_sender.send(SettingChangedEvent::new(SettingPath::DefaultApplications(DefaultApplicationSettingPath::WebBrowserDesktopFile), val.get("web_browser_desktop_file").unwrap_or(&JsonValue::Null).clone()));
-            }
+        macro_rules! get_json_value {
+            ($field_val:expr) => {
+                serde_json::to_value($field_val).map_err(|e| GlobalSettingsError::SerializationError {
+                    path: path.clone(),
+                    source: e,
+                })
+            };
         }
 
-
-        drop(settings_lock); // Release lock before save
-        self.save_settings().await // This will emit SettingsSavedEvent
+        match path {
+            SettingPath::Appearance(ap_path) => match ap_path {
+                AppearanceSettingPath::ActiveThemeName => get_json_value!(&settings_guard.appearance.active_theme_name),
+                AppearanceSettingPath::ColorScheme => get_json_value!(&settings_guard.appearance.color_scheme),
+                AppearanceSettingPath::AccentColorToken => get_json_value!(&settings_guard.appearance.accent_color_token),
+                AppearanceSettingPath::IconThemeName => get_json_value!(&settings_guard.appearance.icon_theme_name),
+                AppearanceSettingPath::CursorThemeName => get_json_value!(&settings_guard.appearance.cursor_theme_name),
+                AppearanceSettingPath::EnableAnimations => get_json_value!(&settings_guard.appearance.enable_animations),
+                AppearanceSettingPath::InterfaceScalingFactor => get_json_value!(&settings_guard.appearance.interface_scaling_factor),
+                AppearanceSettingPath::FontSettings(fs_path) => match fs_path {
+                    FontSettingPath::DefaultFontFamily => get_json_value!(&settings_guard.appearance.font_settings.default_font_family),
+                    FontSettingPath::DefaultFontSize => get_json_value!(&settings_guard.appearance.font_settings.default_font_size),
+                    FontSettingPath::MonospaceFontFamily => get_json_value!(&settings_guard.appearance.font_settings.monospace_font_family),
+                    FontSettingPath::DocumentFontFamily => get_json_value!(&settings_guard.appearance.font_settings.document_font_family),
+                    FontSettingPath::Hinting => get_json_value!(&settings_guard.appearance.font_settings.hinting),
+                    FontSettingPath::Antialiasing => get_json_value!(&settings_guard.appearance.font_settings.antialiasing),
+                }
+            },
+            SettingPath::Workspaces(ws_path) => match ws_path {
+                WorkspaceSettingPath::DynamicWorkspaces => get_json_value!(&settings_guard.workspaces.dynamic_workspaces),
+                WorkspaceSettingPath::DefaultWorkspaceCount => get_json_value!(&settings_guard.workspaces.default_workspace_count),
+                WorkspaceSettingPath::WorkspaceSwitchingBehavior => get_json_value!(&settings_guard.workspaces.workspace_switching_behavior),
+                WorkspaceSettingPath::ShowWorkspaceIndicator => get_json_value!(&settings_guard.workspaces.show_workspace_indicator),
+            },
+            SettingPath::InputBehavior(ib_path) => match ib_path {
+                InputBehaviorSettingPath::MouseAccelerationProfile => get_json_value!(&settings_guard.input_behavior.mouse_acceleration_profile),
+                InputBehaviorSettingPath::CustomMouseAccelerationFactor => get_json_value!(&settings_guard.input_behavior.custom_mouse_acceleration_factor),
+                InputBehaviorSettingPath::MouseSensitivity => get_json_value!(&settings_guard.input_behavior.mouse_sensitivity),
+                InputBehaviorSettingPath::NaturalScrollingMouse => get_json_value!(&settings_guard.input_behavior.natural_scrolling_mouse),
+                InputBehaviorSettingPath::NaturalScrollingTouchpad => get_json_value!(&settings_guard.input_behavior.natural_scrolling_touchpad),
+                InputBehaviorSettingPath::TapToClickTouchpad => get_json_value!(&settings_guard.input_behavior.tap_to_click_touchpad),
+                InputBehaviorSettingPath::TouchpadPointerSpeed => get_json_value!(&settings_guard.input_behavior.touchpad_pointer_speed),
+                InputBehaviorSettingPath::KeyboardRepeatDelayMs => get_json_value!(&settings_guard.input_behavior.keyboard_repeat_delay_ms),
+                InputBehaviorSettingPath::KeyboardRepeatRateCps => get_json_value!(&settings_guard.input_behavior.keyboard_repeat_rate_cps),
+            },
+            SettingPath::PowerManagementPolicy(pmp_path) => match pmp_path {
+                PowerManagementPolicySettingPath::ScreenBlankTimeoutAcSecs => get_json_value!(&settings_guard.power_management_policy.screen_blank_timeout_ac_secs),
+                PowerManagementPolicySettingPath::ScreenBlankTimeoutBatterySecs => get_json_value!(&settings_guard.power_management_policy.screen_blank_timeout_battery_secs),
+                PowerManagementPolicySettingPath::SuspendActionOnLidCloseAc => get_json_value!(&settings_guard.power_management_policy.suspend_action_on_lid_close_ac),
+                PowerManagementPolicySettingPath::SuspendActionOnLidCloseBattery => get_json_value!(&settings_guard.power_management_policy.suspend_action_on_lid_close_battery),
+                PowerManagementPolicySettingPath::AutomaticSuspendDelayAcSecs => get_json_value!(&settings_guard.power_management_policy.automatic_suspend_delay_ac_secs),
+                PowerManagementPolicySettingPath::AutomaticSuspendDelayBatterySecs => get_json_value!(&settings_guard.power_management_policy.automatic_suspend_delay_battery_secs),
+                PowerManagementPolicySettingPath::ShowBatteryPercentage => get_json_value!(&settings_guard.power_management_policy.show_battery_percentage),
+            },
+            SettingPath::DefaultApplications(da_path) => match da_path {
+                DefaultApplicationsSettingPath::WebBrowser => get_json_value!(&settings_guard.default_applications.web_browser),
+                DefaultApplicationsSettingPath::EmailClient => get_json_value!(&settings_guard.default_applications.email_client),
+                DefaultApplicationsSettingPath::TerminalEmulator => get_json_value!(&settings_guard.default_applications.terminal_emulator),
+                DefaultApplicationsSettingPath::FileManager => get_json_value!(&settings_guard.default_applications.file_manager),
+                DefaultApplicationsSettingPath::MusicPlayer => get_json_value!(&settings_guard.default_applications.music_player),
+                DefaultApplicationsSettingPath::VideoPlayer => get_json_value!(&settings_guard.default_applications.video_player),
+                DefaultApplicationsSettingPath::ImageViewer => get_json_value!(&settings_guard.default_applications.image_viewer),
+                DefaultApplicationsSettingPath::TextEditor => get_json_value!(&settings_guard.default_applications.text_editor),
+            },
+            SettingPath::AppearanceRoot => get_json_value!(&settings_guard.appearance),
+            SettingPath::WorkspacesRoot => get_json_value!(&settings_guard.workspaces),
+            SettingPath::InputBehaviorRoot => get_json_value!(&settings_guard.input_behavior),
+            SettingPath::PowerManagementPolicyRoot => get_json_value!(&settings_guard.power_management_policy),
+            SettingPath::DefaultApplicationsRoot => get_json_value!(&settings_guard.default_applications),
+            SettingPath::Root => get_json_value!(&*settings_guard),
+        }
     }
 
+    async fn reset_to_defaults(&self) -> Result<(), GlobalSettingsError> {
+        debug!("Service: Resetting settings to defaults.");
+        let mut settings_guard = self.settings.write().await;
+        let defaults = GlobalDesktopSettings::default();
+        
+        *settings_guard = defaults.clone();
 
-    fn subscribe_to_changes(&self) -> broadcast::Receiver<SettingChangedEvent> {
+        let paths_to_notify = [
+            (SettingPath::AppearanceRoot, serde_json::to_value(&defaults.appearance).unwrap_or(JsonValue::Null)),
+            (SettingPath::WorkspacesRoot, serde_json::to_value(&defaults.workspaces).unwrap_or(JsonValue::Null)),
+            (SettingPath::InputBehaviorRoot, serde_json::to_value(&defaults.input_behavior).unwrap_or(JsonValue::Null)),
+            (SettingPath::PowerManagementPolicyRoot, serde_json::to_value(&defaults.power_management_policy).unwrap_or(JsonValue::Null)),
+            (SettingPath::DefaultApplicationsRoot, serde_json::to_value(&defaults.default_applications).unwrap_or(JsonValue::Null)),
+        ];
+
+        for (path, new_value) in paths_to_notify {
+            if let Err(e) = self.event_sender.send(SettingChangedEvent { path, new_value }) {
+                error!("Failed to send SettingChangedEvent during reset: {}", e);
+            }
+        }
+        
+        self.save_settings().await?;
+        debug!("Service: Settings reset to defaults and saved.");
+        Ok(())
+    }
+
+    fn subscribe_to_setting_changes(&self) -> broadcast::Receiver<SettingChangedEvent> {
         self.event_sender.subscribe()
     }
     
-    fn subscribe_to_load_events(&self) -> broadcast::Receiver<SettingsLoadedEvent> {
-        self.settings_loaded_event_sender.subscribe()
+    fn subscribe_to_settings_loaded(&self) -> broadcast::Receiver<SettingsLoadedEvent> {
+        self.loaded_event_sender.subscribe()
     }
 
-    fn subscribe_to_save_events(&self) -> broadcast::Receiver<SettingsSavedEvent> {
-        self.settings_saved_event_sender.subscribe()
+    fn subscribe_to_settings_saved(&self) -> broadcast::Receiver<SettingsSavedEvent> {
+        self.saved_event_sender.subscribe()
     }
 }
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::global_settings::persistence_iface::SettingsPersistenceProvider;
-    use crate::global_settings::errors::GlobalSettingsError;
-    use crate::global_settings::types::{GlobalDesktopSettings, AppearanceSettings, InputBehaviorSettings, FontSettings, WorkspaceSettings, PowerManagementPolicySettings, DefaultApplicationsSettings, ColorScheme, FontHinting, FontAntialiasing, WorkspaceSwitchingBehavior, LidCloseAction};
-    use crate::global_settings::paths::{SettingPath, AppearanceSettingPath, InputBehaviorSettingPath, FontSettingPath, WorkspaceSettingPath, PowerManagementSettingPath, DefaultApplicationSettingPath};
-    use serde_json::json;
-    use std::sync::Arc;
-    use tokio::sync::broadcast;
-    use tokio::time::{timeout, Duration};
-
-
-    #[derive(Default, Clone)]
-    struct MockPersistenceProvider {
-        settings: Arc<RwLock<GlobalDesktopSettings>>,
-        force_load_error: Option<String>, 
-        force_save_error: Option<String>, 
-    }
-
-    impl MockPersistenceProvider {
-        fn new() -> Self {
-            Self {
-                settings: Arc::new(RwLock::new(GlobalDesktopSettings::default())),
-                force_load_error: None,
-                force_save_error: None,
-            }
-        }
-        
-        async fn set_persisted_settings(&self, settings: GlobalDesktopSettings) {
-            let mut lock = self.settings.write().await;
-            *lock = settings;
-        }
-
-        fn set_force_load_error(&mut self, msg: Option<String>) {
-            self.force_load_error = msg;
-        }
-        
-        fn set_force_save_error(&mut self, msg: Option<String>) {
-            self.force_save_error = msg;
-        }
-    }
-
-    #[async_trait]
-    impl SettingsPersistenceProvider for MockPersistenceProvider {
-        async fn load_global_settings(&self) -> Result<GlobalDesktopSettings, GlobalSettingsError> {
-            if let Some(ref err_msg) = self.force_load_error {
-                 return Err(GlobalSettingsError::PersistenceError{ operation: "load".to_string(), message: err_msg.clone(), source: None});
-            }
-            let lock = self.settings.read().await;
-            Ok(lock.clone())
-        }
-
-        async fn save_global_settings(&self, settings: &GlobalDesktopSettings) -> Result<(), GlobalSettingsError> {
-             if let Some(ref err_msg) = self.force_save_error {
-                return Err(GlobalSettingsError::PersistenceError{ operation: "save".to_string(), message: err_msg.clone(), source: None});
-            }
-            let mut lock = self.settings.write().await;
-            *lock = settings.clone();
-            Ok(())
-        }
-    }
+    use crate::global_settings::persistence_iface::MockSettingsPersistenceProvider;
+    use crate::global_settings::types::{ColorScheme, FontAntialiasing}; // Import necessary types for tests
+    use tokio::sync::broadcast::error::RecvError;
 
     #[tokio::test]
-    async fn test_service_update_and_get_font_settings() {
-        let provider = Arc::new(MockPersistenceProvider::new());
-        let mut service = DefaultGlobalSettingsService::new(provider.clone());
-        let mut changes_rx = service.subscribe_to_changes();
-
-        let path = SettingPath::Font(FontSettingPath::DefaultFontSize);
-        let new_value = json!(12);
+    async fn test_new_and_initial_load_success() {
+        let mut mock_persistence = MockSettingsPersistenceProvider::new();
+        let default_settings = GlobalDesktopSettings::default();
         
-        service.update_setting(path.clone(), new_value.clone()).await.unwrap();
-        
-        let current_settings = service.get_current_settings();
-        assert_eq!(current_settings.font_settings.default_font_size, 12);
+        mock_persistence.expect_load_global_settings()
+            .times(1)
+            .returning(move || Ok(default_settings.clone()));
 
-        let fetched_value = service.get_setting(&path).await.unwrap();
-        assert_eq!(fetched_value, new_value);
-        
-        let event = timeout(Duration::from_millis(10), changes_rx.recv()).await.unwrap().unwrap();
-        assert_eq!(event.path, path);
-        assert_eq!(event.new_value, new_value);
-    }
-
-    #[tokio::test]
-    async fn test_service_update_and_get_workspace_settings() {
-        let provider = Arc::new(MockPersistenceProvider::new());
-        let mut service = DefaultGlobalSettingsService::new(provider.clone());
-
-        let path = SettingPath::Workspace(WorkspaceSettingPath::DynamicWorkspaces);
-        let new_value = json!(false);
-        service.update_setting(path.clone(), new_value.clone()).await.unwrap();
-        assert_eq!(service.get_current_settings().workspace_config.dynamic_workspaces, false);
-        assert_eq!(service.get_setting(&path).await.unwrap(), new_value);
-    }
-
-    #[tokio::test]
-    async fn test_service_update_and_get_power_management_settings() {
-        let provider = Arc::new(MockPersistenceProvider::new());
-        let mut service = DefaultGlobalSettingsService::new(provider.clone());
-
-        let path = SettingPath::PowerManagement(PowerManagementSettingPath::ScreenBlankTimeoutAcSecs);
-        let new_value = json!(600);
-        service.update_setting(path.clone(), new_value.clone()).await.unwrap();
-        assert_eq!(service.get_current_settings().power_management_policy.screen_blank_timeout_ac_secs, 600);
-        assert_eq!(service.get_setting(&path).await.unwrap(), new_value);
-    }
-
-    #[tokio::test]
-    async fn test_service_update_and_get_default_applications_settings() {
-        let provider = Arc::new(MockPersistenceProvider::new());
-        let mut service = DefaultGlobalSettingsService::new(provider.clone());
-
-        let path = SettingPath::DefaultApplications(DefaultApplicationSettingPath::WebBrowserDesktopFile);
-        let new_value = json!("chromium.desktop");
-        service.update_setting(path.clone(), new_value.clone()).await.unwrap();
-        assert_eq!(service.get_current_settings().default_applications.web_browser_desktop_file, "chromium.desktop");
-        assert_eq!(service.get_setting(&path).await.unwrap(), new_value);
-    }
-
-    #[tokio::test]
-    async fn test_service_reset_to_defaults() {
-        let provider = Arc::new(MockPersistenceProvider::new());
-        // Persist some non-default settings first
-        let initial_non_default = GlobalDesktopSettings {
-            appearance: AppearanceSettings { active_theme_name: "custom".to_string(), ..Default::default() },
-            font_settings: FontSettings { default_font_size: 15, ..Default::default()},
-            ..Default::default()
-        };
-        provider.set_persisted_settings(initial_non_default.clone()).await;
-
-        let mut service = DefaultGlobalSettingsService::new(provider.clone());
-        service.load_settings().await.unwrap(); // Load the non-default settings
-        assert_ne!(service.get_current_settings(), GlobalDesktopSettings::default());
-
-        let mut changes_rx = service.subscribe_to_changes();
-        let mut saved_rx = service.subscribe_to_save_events();
-
-        service.reset_to_defaults().await.unwrap();
+        let service = DefaultGlobalSettingsService::new(Arc::new(mock_persistence), 5);
+        let initial_load_result = service.load_settings().await;
+        assert!(initial_load_result.is_ok());
         
         let current_settings = service.get_current_settings();
         assert_eq!(current_settings, GlobalDesktopSettings::default());
-
-        // Check persisted settings are now default
-        let persisted = provider.load_global_settings().await.unwrap();
-        assert_eq!(persisted, GlobalDesktopSettings::default());
-
-        // Check SettingsSavedEvent
-        let saved_event = timeout(Duration::from_millis(10), saved_rx.recv()).await.unwrap().unwrap();
-        assert_eq!(saved_event.saved_settings, GlobalDesktopSettings::default());
-
-        // Check SettingChangedEvents (this is tricky due to multiple events and their order)
-        // We expect at least one event for each category that changed.
-        // The current event emission in reset_to_defaults is simplified.
-        // For this test, let's just ensure *some* change events were likely sent.
-        // A more robust test would count or check specific event paths.
-        let mut received_change_events = 0;
-        loop {
-            match timeout(Duration::from_millis(5), changes_rx.recv()).await {
-                Ok(Ok(_event)) => {
-                    received_change_events += 1;
-                    // Can inspect event.path and event.new_value here if needed
-                }
-                _ => break, // No more events or timeout
-            }
-        }
-        // Given the simplified event logic, we expect events for categories that were different.
-        // initial_non_default changed 'appearance' and 'font_settings'.
-        // So, at least 2 events should be triggered by the simplified logic.
-        assert!(received_change_events >= 2, "Expected at least 2 change events for modified categories, got {}", received_change_events);
     }
     
     #[tokio::test]
-    async fn test_save_settings_emits_event() {
-        let provider = Arc::new(MockPersistenceProvider::new());
-        let service = DefaultGlobalSettingsService::new(provider.clone());
-        let mut saved_rx = service.subscribe_to_save_events();
+    async fn test_initial_load_persistence_error() {
+        let mut mock_persistence = MockSettingsPersistenceProvider::new();
+        mock_persistence.expect_load_global_settings()
+            .times(1)
+            .returning(|| Err(GlobalSettingsError::persistence_error_no_source("load", "Failed to read")));
 
-        let initial_settings = service.get_current_settings(); // Should be default
+        let service = DefaultGlobalSettingsService::new(Arc::new(mock_persistence), 5);
+        let result = service.load_settings().await;
+        assert!(result.is_err());
+        if let Err(GlobalSettingsError::PersistenceError{operation, ..}) = result {
+            assert_eq!(operation, "load");
+        } else {
+            panic!("Expected PersistenceError, got {:?}", result);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_update_setting_successful() {
+        let mut mock_persistence = MockSettingsPersistenceProvider::new();
+        mock_persistence.expect_load_global_settings().returning(|| Ok(GlobalDesktopSettings::default()));
+        mock_persistence.expect_save_global_settings().times(1).returning(|_| Ok(())); // Expect save
+
+        let service = DefaultGlobalSettingsService::new(Arc::new(mock_persistence), 5);
+        service.load_settings().await.unwrap();
+
+        let path = SettingPath::Appearance(AppearanceSettingPath::ColorScheme);
+        let new_value = JsonValue::String("dark".to_string());
+        
+        let mut event_rx = service.subscribe_to_setting_changes();
+
+        let update_result = service.update_setting(path.clone(), new_value.clone()).await;
+        assert!(update_result.is_ok());
+
+        let current_settings = service.get_current_settings();
+        assert_eq!(current_settings.appearance.color_scheme, ColorScheme::Dark);
+        
+        match tokio::time::timeout(std::time::Duration::from_millis(10), event_rx.recv()).await {
+            Ok(Ok(event)) => {
+                assert_eq!(event.path, path);
+                assert_eq!(event.new_value, new_value);
+            }
+            res => panic!("SettingChangedEvent not received or incorrect: {:?}", res),
+        }
+    }
+    
+    #[tokio::test]
+    async fn test_update_setting_invalid_value_type() {
+        let mut mock_persistence = MockSettingsPersistenceProvider::new();
+        mock_persistence.expect_load_global_settings().returning(|| Ok(GlobalDesktopSettings::default()));
+        mock_persistence.expect_save_global_settings().times(0).returning(|_| Ok(()));
+
+        let service = DefaultGlobalSettingsService::new(Arc::new(mock_persistence), 5);
+        service.load_settings().await.unwrap();
+
+        let path = SettingPath::Appearance(AppearanceSettingPath::ColorScheme);
+        let new_value = JsonValue::Number(123.into());
+
+        let update_result = service.update_setting(path.clone(), new_value.clone()).await;
+        assert!(update_result.is_err());
+        assert!(matches!(update_result.unwrap_err(), GlobalSettingsError::InvalidValueType { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_update_setting_validation_failure() {
+        let mut mock_persistence = MockSettingsPersistenceProvider::new();
+        mock_persistence.expect_load_global_settings().returning(|| Ok(GlobalDesktopSettings::default()));
+        mock_persistence.expect_save_global_settings().times(0).returning(|_| Ok(()));
+
+        let service = DefaultGlobalSettingsService::new(Arc::new(mock_persistence), 5);
+        service.load_settings().await.unwrap();
+
+        let path = SettingPath::Appearance(AppearanceSettingPath::FontSettings(FontSettingPath::DefaultFontSize));
+        let new_value = JsonValue::Number(serde_json::Number::from(3)); // Invalid: too small
+
+        let update_result = service.update_setting(path.clone(), new_value.clone()).await;
+        assert!(update_result.is_err());
+        // validate_recursive error path should be AppearanceRoot if FontSettings validation fails
+        assert!(matches!(update_result.unwrap_err(), GlobalSettingsError::ValidationError { path: SettingPath::AppearanceRoot, .. }));
+    }
+
+    #[tokio::test]
+    async fn test_get_setting_successful() {
+        let mock_persistence = MockSettingsPersistenceProvider::new(); 
+        let service = DefaultGlobalSettingsService::new(Arc::new(mock_persistence), 5);
+        // No load_settings called, so it uses default settings
+
+        let path = SettingPath::Appearance(AppearanceSettingPath::ColorScheme);
+        let value = service.get_setting(&path).unwrap();
+        assert_eq!(value, JsonValue::String("system-preference".to_string())); // Default value
+
+        let path_font_size = SettingPath::Appearance(AppearanceSettingPath::FontSettings(FontSettingPath::DefaultFontSize));
+        let value_font_size = service.get_setting(&path_font_size).unwrap();
+        assert_eq!(value_font_size, JsonValue::Number(11.into())); // Default font size
+    }
+
+    #[tokio::test]
+    async fn test_reset_to_defaults_successful() {
+        let mut mock_persistence = MockSettingsPersistenceProvider::new();
+        // Initial load
+        mock_persistence.expect_load_global_settings().times(1).returning(|| Ok(GlobalDesktopSettings::default()));
+        // Save after update
+        mock_persistence.expect_save_global_settings().times(1).returning(|_| Ok(())); 
+        // Save after reset
+        mock_persistence.expect_save_global_settings().times(1).returning(|settings| {
+            assert_eq!(*settings, GlobalDesktopSettings::default()); 
+            Ok(())
+        });
+
+        let service = DefaultGlobalSettingsService::new(Arc::new(mock_persistence), 5);
+        service.load_settings().await.unwrap();
+
+        // Change a setting first
+        let path_to_change = SettingPath::Appearance(AppearanceSettingPath::FontSettings(FontSettingPath::Antialiasing));
+        let changed_value = JsonValue::String("rgba".to_string()); // FontAntialiasing::Rgba
+        service.update_setting(path_to_change.clone(), changed_value.clone()).await.unwrap();
+        
+        assert_ne!(service.get_current_settings().appearance.font_settings.antialiasing, FontAntialiasing::default());
+
+        let mut event_rx = service.subscribe_to_setting_changes();
+        
+        let reset_result = service.reset_to_defaults().await;
+        assert!(reset_result.is_ok());
+
+        let current_settings = service.get_current_settings();
+        assert_eq!(current_settings, GlobalDesktopSettings::default());
+
+        let mut events_received = 0;
+        for _ in 0..5 { 
+            match tokio::time::timeout(std::time::Duration::from_millis(10), event_rx.recv()).await {
+                Ok(Ok(event)) => {
+                    events_received += 1;
+                    // Check if the event corresponds to one of the reset root paths
+                    assert!(matches!(event.path, SettingPath::AppearanceRoot | SettingPath::WorkspacesRoot | SettingPath::InputBehaviorRoot | SettingPath::PowerManagementPolicyRoot | SettingPath::DefaultApplicationsRoot));
+                }
+                Ok(Err(RecvError::Lagged(_))) => { /* ignore lagged */ continue; }
+                Ok(Err(RecvError::Closed)) => break, 
+                Err(_) => break, // Timeout
+            }
+        }
+        assert_eq!(events_received, 5, "Expected 5 events for reset categories");
+    }
+    
+    #[tokio::test]
+    async fn test_loaded_saved_events() {
+        let mut mock_persistence = MockSettingsPersistenceProvider::new();
+        let default_settings = GlobalDesktopSettings::default();
+
+        mock_persistence.expect_load_global_settings().returning(move || Ok(default_settings.clone()));
+        mock_persistence.expect_save_global_settings().returning(|_| Ok(()));
+
+        let service = DefaultGlobalSettingsService::new(Arc::new(mock_persistence), 5);
+        
+        let mut loaded_rx = service.subscribe_to_settings_loaded();
+        let mut saved_rx = service.subscribe_to_settings_saved();
+
+        service.load_settings().await.unwrap();
+        match tokio::time::timeout(std::time::Duration::from_millis(10), loaded_rx.recv()).await {
+            Ok(Ok(event)) => assert_eq!(event.settings, GlobalDesktopSettings::default()),
+            res => panic!("SettingsLoadedEvent not received or incorrect: {:?}", res),
+        }
 
         service.save_settings().await.unwrap();
-
-        let event = timeout(Duration::from_millis(10), saved_rx.recv()).await.unwrap().unwrap();
-        assert_eq!(event.saved_settings, initial_settings);
-
-        // Update a setting, then save, and check event again
-        let path = SettingPath::Appearance(AppearanceSettingPath::EnableAnimations);
-        let new_value = json!(false);
-        service.update_setting(path.clone(), new_value.clone()).await.unwrap(); // This calls save_settings internally
-
-        // First save event from update_setting
-        let _ = timeout(Duration::from_millis(10), saved_rx.recv()).await.unwrap().unwrap(); 
-        
-        let updated_settings = service.get_current_settings();
-        service.save_settings().await.unwrap(); // Explicitly call save again
-        let event2 = timeout(Duration::from_millis(10), saved_rx.recv()).await.unwrap().unwrap();
-        assert_eq!(event2.saved_settings, updated_settings);
+        match tokio::time::timeout(std::time::Duration::from_millis(10), saved_rx.recv()).await {
+            Ok(Ok(_)) => { /* SettingsSavedEvent received */ },
+            res => panic!("SettingsSavedEvent not received or incorrect: {:?}", res),
+        }
     }
 }

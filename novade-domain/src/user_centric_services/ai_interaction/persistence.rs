@@ -1,280 +1,414 @@
-use std::sync::Arc;
 use async_trait::async_trait;
-use log::{debug, info, warn, error};
-use crate::ports::config_service::ConfigServiceAsync; // Corrected path
-use novade_core::CoreError; // Corrected path
-use crate::user_centric_services::ai_interaction::types::{AIConsent, AIModelProfile}; // Corrected path
-use crate::user_centric_services::ai_interaction::errors::AIInteractionError; // Corrected path
-use crate::user_centric_services::ai_interaction::persistence_iface::{AIConsentProvider, AIModelProfileProvider}; // Corrected path
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::{debug, error, warn};
+use uuid::Uuid;
+
+use novade_core::config::ConfigServiceAsync;
+use novade_core::errors::CoreError;
+
+use super::types::{AIConsent, AIModelProfile};
+use super::errors::AIInteractionError;
+use super::persistence_iface::{AIConsentProvider, AIModelProfileProvider};
 
 // --- FilesystemAIConsentProvider ---
+
+#[derive(Debug)]
 pub struct FilesystemAIConsentProvider {
-    pub config_service: Arc<dyn ConfigServiceAsync>,
-    pub user_consents_path_prefix: String, // e.g., "ai/consents/"
+    config_service: Arc<dyn ConfigServiceAsync>,
+    consents_config_key: String,
+    user_id: String,
 }
 
 impl FilesystemAIConsentProvider {
-    pub fn new(config_service: Arc<dyn ConfigServiceAsync>, user_consents_path_prefix: String) -> Self {
-        Self { config_service, user_consents_path_prefix }
-    }
-
-    fn get_consent_file_key(&self, user_id: &str) -> String {
-        format!("{}{}.consents.toml", self.user_consents_path_prefix, user_id)
+    pub fn new(config_service: Arc<dyn ConfigServiceAsync>, base_config_path: &str, user_id: String) -> Self {
+        let consents_config_key = format!("{}/ai_consents/{}.json", base_config_path.trim_end_matches('/'), user_id);
+        Self {
+            config_service,
+            consents_config_key,
+            user_id,
+        }
     }
 }
 
 #[async_trait]
 impl AIConsentProvider for FilesystemAIConsentProvider {
     async fn load_consents_for_user(&self, user_id: &str) -> Result<Vec<AIConsent>, AIInteractionError> {
-        let file_key = self.get_consent_file_key(user_id);
-        debug!("Loading consents for user '{}' from key '{}'", user_id, file_key);
+        if self.user_id != user_id {
+            return Err(AIInteractionError::InternalError(
+                format!("Provider instance is for user '{}', but operation requested for user '{}'.", self.user_id, user_id)
+            ));
+        }
+        debug!("Loading consents for user '{}' from key '{}'", self.user_id, self.consents_config_key);
 
-        match self.config_service.read_config_file_string(&file_key).await {
-            Ok(toml_string) => {
-                toml::from_str(&toml_string).map_err(|e| {
-                    error!("Failed to deserialize TOML consents for user '{}' from key '{}': {}", user_id, file_key, e);
-                    AIInteractionError::InternalError(format!("Consent deserialization failed: {}", e))
+        match self.config_service.read_config_file_string(&self.consents_config_key).await {
+            Ok(content) => {
+                serde_json::from_str(&content).map_err(|e| {
+                    error!("Failed to deserialize consents for user '{}' from key '{}': {}", self.user_id, self.consents_config_key, e);
+                    AIInteractionError::ConsentStorageError {
+                        operation: "deserialize".to_string(),
+                        source_message: format!("Failed to parse consent data for user '{}': {}", self.user_id, e),
+                        source: None, 
+                    }
                 })
             }
-            Err(core_error) => {
-                if core_error.is_not_found_error() {
-                    info!("Consent file for user '{}' (key '{}') not found. Returning empty list.", user_id, file_key);
+            Err(e) => {
+                if e.is_not_found() {
+                    debug!("Consent file not found for user '{}' at key '{}'. Returning empty list.", self.user_id, self.consents_config_key);
                     Ok(Vec::new())
                 } else {
-                    error!("CoreError loading consents for user '{}' (key '{}'): {}", user_id, file_key, core_error);
-                    Err(AIInteractionError::persistence_error_from_core("load_consents".to_string(), format!("Failed to read consent file for user {}", user_id), core_error))
+                    error!("Failed to read consent file for user '{}' from key '{}': {}", self.user_id, self.consents_config_key, e);
+                    Err(AIInteractionError::ConsentStorageError {
+                        operation: "load".to_string(),
+                        source_message: format!("Failed to read consent file for user '{}': {}", self.user_id, e),
+                        source: Some(e),
+                    })
                 }
             }
         }
     }
 
     async fn save_consent(&self, consent: &AIConsent) -> Result<(), AIInteractionError> {
-        let user_id = &consent.user_id;
-        let file_key = self.get_consent_file_key(user_id);
-        debug!("Saving consent for user '{}' to key '{}'", user_id, file_key);
+        if self.user_id != consent.user_id {
+            return Err(AIInteractionError::InternalError(
+                format!("Attempting to save consent for user '{}' using provider instance for user '{}'.", consent.user_id, self.user_id)
+            ));
+        }
+        debug!("Saving consent ID '{}' for user '{}' to key '{}'", consent.id, self.user_id, self.consents_config_key);
 
-        // Load existing, then add/update, then save all. This is not atomic.
-        // For higher concurrency, a different strategy might be needed (e.g., per-consent files or a DB).
-        let mut consents = self.load_consents_for_user(user_id).await.unwrap_or_else(|err| {
-            warn!("Error loading consents for user '{}' during save operation (key '{}'): {:?}. Starting with empty list for this save.", user_id, file_key, err);
+        let mut consents = self.load_consents_for_user(&self.user_id).await.unwrap_or_else(|e| {
+            warn!("Failed to load existing consents before save for user '{}': {}. Starting with an empty list.", self.user_id, e);
             Vec::new()
         });
+        
+        consents.retain(|c| c.id != consent.id);
+        consents.push(consent.clone());
 
-        if let Some(existing_consent) = consents.iter_mut().find(|c| c.id == consent.id) {
-            *existing_consent = consent.clone();
-            debug!("Updated existing consent ID '{}' for user '{}'", consent.id, user_id);
-        } else {
-            consents.push(consent.clone());
-            debug!("Added new consent ID '{}' for user '{}'", consent.id, user_id);
+        let serialized_content = serde_json::to_string_pretty(&consents).map_err(|e| {
+            error!("Failed to serialize consents for user '{}': {}", self.user_id, e);
+            AIInteractionError::ConsentStorageError {
+                operation: "serialize".to_string(),
+                source_message: format!("Failed to serialize consent data for user '{}': {}", self.user_id, e),
+                source: None,
+            }
+        })?;
+
+        self.config_service.write_config_file_string(&self.consents_config_key, &serialized_content).await
+            .map_err(|e| {
+                error!("Failed to write consent file for user '{}' to key '{}': {}", self.user_id, self.consents_config_key, e);
+                AIInteractionError::ConsentStorageError {
+                    operation: "save".to_string(),
+                    source_message: format!("Failed to write consent file for user '{}': {}", self.user_id, e),
+                    source: Some(e),
+                }
+            })
+    }
+
+    async fn revoke_consent(&self, consent_id: Uuid, user_id: &str) -> Result<(), AIInteractionError> {
+        if self.user_id != user_id {
+             return Err(AIInteractionError::InternalError(
+                format!("Attempting to revoke consent for user '{}' using provider instance for user '{}'.", user_id, self.user_id)
+            ));
+        }
+        debug!("Revoking consent ID '{}' for user '{}' from key '{}'", consent_id, self.user_id, self.consents_config_key);
+
+        let mut consents = self.load_consents_for_user(&self.user_id).await?;
+        
+        let consent_to_revoke = consents.iter_mut().find(|c| c.id == consent_id);
+
+        match consent_to_revoke {
+            Some(consent) => {
+                consent.is_revoked = true;
+                // Optionally, set a revoked_timestamp if the struct supports it
+                // consent.revoked_timestamp = Some(Utc::now());
+            }
+            None => {
+                warn!("Consent ID '{}' not found for user '{}' during revoke.", consent_id, self.user_id);
+                // Using ContextNotFound as ConsentNotFound isn't defined. This could be improved.
+                return Err(AIInteractionError::ContextNotFound(consent_id)); 
+            }
         }
 
-        let toml_string = toml::to_string_pretty(&consents).map_err(|e| {
-            error!("Failed to serialize consents to TOML for user '{}' (key '{}'): {}", user_id, file_key, e);
-            AIInteractionError::InternalError(format!("Consent serialization failed: {}", e))
+        let serialized_content = serde_json::to_string_pretty(&consents).map_err(|e| {
+             error!("Failed to serialize consents after revoke for user '{}': {}", self.user_id, e);
+            AIInteractionError::ConsentStorageError {
+                operation: "serialize_after_revoke".to_string(),
+                source_message: format!("Failed to serialize consent data for user '{}' after revoke: {}", self.user_id, e),
+                source: None,
+            }
         })?;
-
-        self.config_service.write_config_file_string(&file_key, toml_string).await.map_err(|core_error| {
-            AIInteractionError::persistence_error_from_core("save_consent".to_string(), format!("Failed to write consent file for user {}", user_id), core_error)
-        })?;
-        info!("Successfully saved consents for user '{}' to key '{}'", user_id, file_key);
-        Ok(())
+        
+        self.config_service.write_config_file_string(&self.consents_config_key, &serialized_content).await
+            .map_err(|e| {
+                error!("Failed to write revoked consent file for user '{}': {}", self.user_id, e);
+                AIInteractionError::ConsentStorageError {
+                    operation: "save_after_revoke".to_string(),
+                    source_message: format!("Failed to write revoked consent data for user '{}': {}", self.user_id, e),
+                    source: Some(e),
+                }
+            })
     }
 }
 
+
 // --- FilesystemAIModelProfileProvider ---
+
+#[derive(Debug)]
 pub struct FilesystemAIModelProfileProvider {
-    pub config_service: Arc<dyn ConfigServiceAsync>,
-    pub profiles_config_key: String, // e.g., "ai/model_profiles.toml"
+    config_service: Arc<dyn ConfigServiceAsync>,
+    profiles_config_key: String,
 }
 
 impl FilesystemAIModelProfileProvider {
-    pub fn new(config_service: Arc<dyn ConfigServiceAsync>, profiles_config_key: String) -> Self {
-        Self { config_service, profiles_config_key }
+    pub fn new(config_service: Arc<dyn ConfigServiceAsync>, config_key: String) -> Self {
+        Self {
+            config_service,
+            profiles_config_key,
+        }
     }
 }
 
 #[async_trait]
 impl AIModelProfileProvider for FilesystemAIModelProfileProvider {
     async fn load_model_profiles(&self) -> Result<Vec<AIModelProfile>, AIInteractionError> {
-        debug!("Loading AI model profiles from key '{}'", self.profiles_config_key);
+        debug!("Loading model profiles from key '{}'", self.profiles_config_key);
         match self.config_service.read_config_file_string(&self.profiles_config_key).await {
-            Ok(toml_string) => {
-                toml::from_str(&toml_string).map_err(|e| {
-                    error!("Failed to deserialize TOML AI model profiles from key '{}': {}", self.profiles_config_key, e);
-                    AIInteractionError::InternalError(format!("Model profile deserialization failed: {}",e))
-                })
+            Ok(content) => {
+                let profiles: Vec<AIModelProfile> = serde_json::from_str(&content).map_err(|e| {
+                     error!("Failed to deserialize model profiles from key '{}': {}", self.profiles_config_key, e);
+                    AIInteractionError::ModelProfileLoadError {
+                        source_message: format!("Failed to parse model profiles data: {}", e),
+                        source: CoreError::ConfigError(format!("Deserialization error: {}", e)),
+                    }
+                })?;
+
+                let mut model_ids = std::collections::HashSet::new();
+                let mut default_count = 0;
+                for profile in &profiles {
+                    if !model_ids.insert(&profile.model_id) {
+                        let err_msg = format!("Duplicate model_id '{}' found in profiles.", profile.model_id);
+                        return Err(AIInteractionError::ModelProfileLoadError {
+                            source_message: err_msg, source: CoreError::ConfigError("Validation failed".to_string()),
+                        });
+                    }
+                    if profile.is_default_model { default_count += 1; }
+                }
+                if default_count > 1 {
+                    return Err(AIInteractionError::ModelProfileLoadError {
+                        source_message: "Multiple default AI models configured.".to_string(),
+                        source: CoreError::ConfigError("Validation failed".to_string()),
+                    });
+                }
+                Ok(profiles)
             }
-            Err(core_error) => {
-                 if core_error.is_not_found_error() {
-                    info!("AI model profiles file (key '{}') not found. Returning empty list.", self.profiles_config_key);
+            Err(e) => {
+                if e.is_not_found() {
+                    debug!("Model profiles file not found at key '{}'. Returning empty list.", self.profiles_config_key);
                     Ok(Vec::new())
                 } else {
-                    error!("CoreError loading AI model profiles (key '{}'): {}", self.profiles_config_key, core_error);
-                    Err(AIInteractionError::persistence_error_from_core("load_model_profiles".to_string(), "Failed to read model profiles file".to_string(), core_error))
+                    error!("Failed to read model profiles file from key '{}': {}", self.profiles_config_key, e);
+                    Err(AIInteractionError::ModelProfileLoadError {
+                        source_message: format!("Failed to read model profiles file: {}", e), source: e,
+                    })
                 }
             }
         }
     }
-}
 
+    async fn save_model_profiles(&self, profiles: &[AIModelProfile]) -> Result<(), AIInteractionError> {
+        debug!("Saving {} model profiles to key '{}'", profiles.len(), self.profiles_config_key);
+        let mut model_ids = std::collections::HashSet::new();
+        let mut default_count = 0;
+        for profile in profiles {
+            if !model_ids.insert(&profile.model_id) {
+                return Err(AIInteractionError::ModelProfileSaveError {
+                    source_message: format!("Duplicate model_id '{}' found during save validation.", profile.model_id),
+                    source: CoreError::ConfigError("Validation failed".to_string()),
+                });
+            }
+            if profile.is_default_model { default_count += 1; }
+        }
+        if default_count > 1 {
+            return Err(AIInteractionError::ModelProfileSaveError {
+                source_message: "Attempted to save multiple default AI models.".to_string(),
+                source: CoreError::ConfigError("Validation failed".to_string()),
+            });
+        }
 
-// Mock for CoreError's is_not_found_error for compilation.
-// This should be part of the actual CoreError definition.
-#[cfg(test)]
-mod core_error_mock_for_ai_persistence {
-    use std::fmt;
-    use thiserror::Error;
+        let serialized_content = serde_json::to_string_pretty(profiles).map_err(|e| {
+            error!("Failed to serialize model profiles: {}", e);
+            AIInteractionError::ModelProfileSaveError {
+                source_message: format!("Failed to serialize model profiles: {}", e),
+                source: CoreError::ConfigError(format!("Serialization error: {}",e)),
+            }
+        })?;
 
-    #[derive(Error, Debug, Clone)]
-    pub enum CoreErrorType { NotFound, IoError, Other(String) }
-
-    #[derive(Error, Debug, Clone)]
-    pub struct CoreError { pub error_type: CoreErrorType, message: String }
-
-    impl fmt::Display for CoreError { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "CoreError ({:?}): {}", self.error_type, self.message) } }
-    impl CoreError {
-        pub fn new(error_type: CoreErrorType, message: String) -> Self { Self { error_type, message } }
-        pub fn is_not_found_error(&self) -> bool { matches!(self.error_type, CoreErrorType::NotFound) }
+        self.config_service.write_config_file_string(&self.profiles_config_key, &serialized_content).await
+            .map_err(|e| {
+                error!("Failed to write model profiles file to key '{}': {}", self.profiles_config_key, e);
+                AIInteractionError::ModelProfileSaveError {
+                    source_message: format!("Failed to write model profiles file: {}", e), source: e,
+                }
+            })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::user_centric_services::ai_interaction::types::{AIDataCategory, AIConsentStatus, AIConsentScope, AIModelCapability};
-    use crate::user_centric_services::ai_interaction::persistence::core_error_mock_for_ai_persistence::{CoreError as MockCoreError, CoreErrorType as MockCoreErrorType};
-    use crate::ports::config_service::ConfigServiceAsync; // Corrected path
-    use std::collections::HashMap;
-    use uuid::Uuid;
+    use novade_core::config::MockConfigServiceAsync;
+    use crate::user_centric_services::ai_interaction::types::{AIDataCategory, AIConsentScope, AIConsentStatus};
+    use chrono::Utc;
+    use std::io;
 
-    #[derive(Default)]
-    struct MockConfigService {
-        files: Arc<RwLock<HashMap<String, String>>>, // Use RwLock for interior mutability
-        force_read_error_type: Option<MockCoreErrorType>,
-        force_write_error_type: Option<MockCoreErrorType>,
-    }
-    impl MockConfigService {
-        fn new() -> Self { Default::default() }
-        async fn set_file_content(&self, key: &str, content: String) { self.files.write().await.insert(key.to_string(), content); }
-        #[allow(dead_code)] fn set_read_error_type(&mut self, error_type: Option<MockCoreErrorType>) { self.force_read_error_type = error_type; }
-        #[allow(dead_code)] fn set_write_error_type(&mut self, error_type: Option<MockCoreErrorType>) { self.force_write_error_type = error_type; }
-    }
-    
-    use tokio::sync::RwLock; // Ensure RwLock is in scope
-
-    #[async_trait]
-    impl crate::ports::config_service::ConfigServiceAsync for MockConfigService { // Corrected trait path
-        async fn read_config_file_string(&self, key: &str) -> Result<String, novade_core::CoreError> { // Corrected error type
-            if let Some(ref err_type) = self.force_read_error_type {
-                let core_err = match err_type {
-                    MockCoreErrorType::NotFound => novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]}),
-                    MockCoreErrorType::IoError => novade_core::CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("mock io error for {}", key))),
-                    MockCoreErrorType::Other(s) => novade_core::CoreError::Internal(s.clone()),
-                };
-                return Err(core_err);
-            }
-            match self.files.read().await.get(key) {
-                Some(content) => Ok(content.clone()),
-                None => Err(novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]})),
+    // Default impl for AIModelProfile for easier test setup
+    impl Default for AIModelProfile {
+        fn default() -> Self {
+            Self {
+                model_id: Uuid::new_v4().to_string(), display_name: "Default Model".to_string(),
+                description: "Default description".to_string(), provider: "DefaultProvider".to_string(),
+                required_consent_categories: vec![], capabilities: vec![], supports_streaming: false,
+                endpoint_url: None, api_key_secret_name: None, is_default_model: false, sort_order: 0,
             }
         }
-        async fn write_config_file_string(&self, key: &str, content: String) -> Result<(), novade_core::CoreError> { // Corrected error type
-            if let Some(ref err_type) = self.force_write_error_type {
-                let core_err = match err_type {
-                    MockCoreErrorType::NotFound => novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]}),
-                    MockCoreErrorType::IoError => novade_core::CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("mock io error for {}", key))),
-                    MockCoreErrorType::Other(s) => novade_core::CoreError::Internal(s.clone()),
-                };
-                return Err(core_err);
+    }
+    // Default impl for AIConsent for easier test setup
+    impl Default for AIConsent {
+        fn default() -> Self {
+            Self {
+                id: Uuid::new_v4(), user_id: "default_user".to_string(), model_id: "default_model".to_string(),
+                data_category: AIDataCategory::GenericText, granted_timestamp: Utc::now(),
+                expiry_timestamp: None, is_revoked: false, last_used_timestamp: None,
+                consent_scope: AIConsentScope::default(),
             }
-            self.files.write().await.insert(key.to_string(), content);
-            Ok(())
         }
-        async fn read_file_to_string(&self, _path: &std::path::Path) -> Result<String, novade_core::CoreError> { unimplemented!() } // Corrected error type
-        async fn list_files_in_dir(&self, _dir_path: &std::path::Path, _extension: Option<&str>) -> Result<Vec<std::path::PathBuf>, novade_core::CoreError> { unimplemented!() } // Corrected error type
-        // Corrected return type to match trait definition in ports/config_service.rs
-        async fn get_config_dir(&self) -> Result<std::path::PathBuf, novade_core::CoreError> { unimplemented!() }
-        async fn get_data_dir(&self) -> Result<std::path::PathBuf, novade_core::CoreError> { unimplemented!() }
     }
 
-    // --- AIConsentProvider Tests ---
-    #[tokio::test]
-    async fn test_consent_provider_load_no_file() {
-        let mock_config_service = Arc::new(MockConfigService::new());
-        let provider = FilesystemAIConsentProvider::new(mock_config_service, "ai_test/consents/".to_string());
-        let consents = provider.load_consents_for_user("user_no_file").await.unwrap();
-        assert!(consents.is_empty());
+    fn new_mock_arc_config_service() -> Arc<MockConfigServiceAsync> {
+        Arc::new(MockConfigServiceAsync::new())
     }
 
     #[tokio::test]
-    async fn test_consent_provider_save_and_load_consent() {
-        let mock_config_service = Arc::new(MockConfigService::new());
-        let provider = FilesystemAIConsentProvider::new(mock_config_service, "ai_test/consents/".to_string());
-        let user_id = "user_save_load";
-        
-        let consent1 = AIConsent::new(user_id.to_string(), "model1".to_string(), AIDataCategory::GenericText, AIConsentStatus::Granted, AIConsentScope::PersistentUntilRevoked);
-        provider.save_consent(&consent1).await.unwrap();
+    async fn consent_load_success() {
+        let mut mock_service = MockConfigServiceAsync::new();
+        let user_id = "user123".to_string();
+        let key = format!("test_path/ai_consents/{}.json", user_id);
+        let consent1 = AIConsent { id: Uuid::new_v4(), user_id: user_id.clone(), ..Default::default() };
+        let consents_vec = vec![consent1.clone()];
+        let consents_json = serde_json::to_string(&consents_vec).unwrap();
 
-        let loaded_consents = provider.load_consents_for_user(user_id).await.unwrap();
+        mock_service.expect_read_config_file_string().withf(move |k| k == key).returning(move |_| Ok(consents_json.clone()));
+        let provider = FilesystemAIConsentProvider::new(Arc::new(mock_service), "test_path", user_id.clone());
+        let loaded_consents = provider.load_consents_for_user(&user_id).await.unwrap();
         assert_eq!(loaded_consents.len(), 1);
-        assert_eq!(loaded_consents[0], consent1);
+        assert_eq!(loaded_consents[0].id, consent1.id);
+    }
 
-        // Save another, ensure it appends/updates correctly
-        let consent2 = AIConsent::new(user_id.to_string(), "model1".to_string(), AIDataCategory::UserProfile, AIConsentStatus::Denied, AIConsentScope::SessionOnly);
-        provider.save_consent(&consent2).await.unwrap();
-        
-        let loaded_consents_updated = provider.load_consents_for_user(user_id).await.unwrap();
-        assert_eq!(loaded_consents_updated.len(), 2);
-        assert!(loaded_consents_updated.contains(&consent1));
-        assert!(loaded_consents_updated.contains(&consent2));
-        
-        // Update consent1
-        let mut updated_consent1 = consent1.clone();
-        updated_consent1.status = AIConsentStatus::Denied;
-        provider.save_consent(&updated_consent1).await.unwrap();
-        
-        let loaded_final = provider.load_consents_for_user(user_id).await.unwrap();
-        assert_eq!(loaded_final.len(), 2);
-        let final_c1 = loaded_final.iter().find(|c| c.id == consent1.id).unwrap();
-        assert_eq!(final_c1.status, AIConsentStatus::Denied);
+    #[tokio::test]
+    async fn consent_load_not_found() {
+        let mut mock_service = MockConfigServiceAsync::new();
+        let user_id = "user404".to_string();
+        let not_found_err = CoreError::IoError("not found".into(), Some(Arc::new(io::Error::new(io::ErrorKind::NotFound, "file not found"))));
+        mock_service.expect_read_config_file_string().returning(move |_| Err(not_found_err.clone()));
+        let provider = FilesystemAIConsentProvider::new(Arc::new(mock_service), "test_path", user_id.clone());
+        let loaded_consents = provider.load_consents_for_user(&user_id).await.unwrap();
+        assert!(loaded_consents.is_empty());
     }
     
     #[tokio::test]
-    async fn test_consent_provider_load_deserialization_error() {
-        let mock_config_service = Arc::new(MockConfigService::new());
-        mock_config_service.set_file_content("ai_test/consents/user_bad_toml.consents.toml", "this is not valid toml {}{".to_string()).await;
-        let provider = FilesystemAIConsentProvider::new(mock_config_service, "ai_test/consents/".to_string());
-        
-        let result = provider.load_consents_for_user("user_bad_toml").await;
-        assert!(result.is_err());
-        match result.err().unwrap() {
-            AIInteractionError::InternalError(msg) => assert!(msg.contains("Consent deserialization failed")),
-            _ => panic!("Unexpected error type"),
-        }
+    async fn consent_load_corrupted() {
+        let mut mock_service = MockConfigServiceAsync::new();
+        let user_id = "user_corrupt".to_string();
+        mock_service.expect_read_config_file_string().returning(|_| Ok("corrupted json".to_string()));
+        let provider = FilesystemAIConsentProvider::new(Arc::new(mock_service), "test_path", user_id.clone());
+        let result = provider.load_consents_for_user(&user_id).await;
+        assert!(matches!(result, Err(AIInteractionError::ConsentStorageError { operation, .. }) if operation == "deserialize"));
     }
-
-    // --- AIModelProfileProvider Tests ---
+    
     #[tokio::test]
-    async fn test_profile_provider_load_no_file() {
-        let mock_config_service = Arc::new(MockConfigService::new());
-        let provider = FilesystemAIModelProfileProvider::new(mock_config_service, "ai_test/model_profiles.toml".to_string());
-        let profiles = provider.load_model_profiles().await.unwrap();
-        assert!(profiles.is_empty());
+    async fn consent_load_wrong_user_instance() {
+        let provider = FilesystemAIConsentProvider::new(new_mock_arc_config_service(), "test_path", "user_A".to_string());
+        assert!(matches!(provider.load_consents_for_user("user_B").await, Err(AIInteractionError::InternalError(_))));
     }
 
     #[tokio::test]
-    async fn test_profile_provider_load_success() {
-        let mock_config_service = Arc::new(MockConfigService::new());
-        let profiles_data = vec![
-            AIModelProfile { model_id: "m1".to_string(), display_name: "Model 1".to_string(), provider: "P1".to_string(), capabilities: vec![AIModelCapability::TextGeneration], required_consent_categories: vec![AIDataCategory::GenericText], is_default_model: true },
-            AIModelProfile { model_id: "m2".to_string(), display_name: "Model 2".to_string(), provider: "P2".to_string(), capabilities: vec![AIModelCapability::CodeGeneration], required_consent_categories: vec![], is_default_model: false },
-        ];
-        let toml_content = toml::to_string_pretty(&profiles_data).unwrap();
-        mock_config_service.set_file_content("ai_test/model_profiles.toml", toml_content).await;
+    async fn consent_save_new_and_update() {
+        let mut mock_service = MockConfigServiceAsync::new();
+        let user_id = "user_save".to_string();
+        let consent1_id = Uuid::new_v4();
+
+        // 1. Initial load for first save (not found -> empty vec)
+        mock_service.expect_read_config_file_string().times(1).returning(|_| {
+            let not_found_err = CoreError::IoError("not found".into(), Some(Arc::new(io::Error::new(io::ErrorKind::NotFound, "file not found"))));
+            Err(not_found_err)
+        });
+        // 2. First write
+        mock_service.expect_write_config_file_string().times(1).returning(|_, content_written| {
+            let written_consents: Vec<AIConsent> = serde_json::from_str(content_written).unwrap();
+            assert_eq!(written_consents.len(), 1);
+            assert_eq!(written_consents[0].id, consent1_id);
+            assert_eq!(written_consents[0].model_id, "m1_initial");
+            Ok(())
+        });
+        // 3. Load for second save (should contain consent1)
+        mock_service.expect_read_config_file_string().times(1).returning(move |_| {
+            let existing_consent = AIConsent { id: consent1_id, user_id: user_id.clone(), model_id: "m1_initial".into(), ..Default::default() };
+            Ok(serde_json::to_string(&vec![existing_consent]).unwrap())
+        });
+        // 4. Second write (update)
+        mock_service.expect_write_config_file_string().times(1).returning(move |_, content_written| {
+            let written_consents: Vec<AIConsent> = serde_json::from_str(content_written).unwrap();
+            assert_eq!(written_consents.len(), 1);
+            assert_eq!(written_consents[0].id, consent1_id);
+            assert_eq!(written_consents[0].model_id, "m1_updated"); // Check if updated
+            Ok(())
+        });
+
+        let provider = FilesystemAIConsentProvider::new(Arc::new(mock_service), "test_path", user_id.clone());
         
-        let provider = FilesystemAIModelProfileProvider::new(mock_config_service, "ai_test/model_profiles.toml".to_string());
+        let consent1 = AIConsent { id: consent1_id, user_id: user_id.clone(), model_id: "m1_initial".into(), ..Default::default() };
+        provider.save_consent(&consent1).await.unwrap();
+        
+        let consent2_updated = AIConsent { id: consent1_id, user_id: user_id.clone(), model_id: "m1_updated".into(), data_category: AIDataCategory::UserProfile, ..Default::default() };
+        provider.save_consent(&consent2_updated).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn profile_load_success() {
+        let mut mock_service = MockConfigServiceAsync::new();
+        let key = "ai/model_profiles.json".to_string();
+        let profile1 = AIModelProfile { model_id: "p1".into(), is_default_model: true, ..Default::default() };
+        let profiles_json = serde_json::to_string(&vec![profile1.clone()]).unwrap();
+        mock_service.expect_read_config_file_string().withf(move |k| k == key).returning(move |_| Ok(profiles_json.clone()));
+        
+        let provider = FilesystemAIModelProfileProvider::new(Arc::new(mock_service), "ai/model_profiles.json".to_string());
         let loaded_profiles = provider.load_model_profiles().await.unwrap();
-        assert_eq!(loaded_profiles.len(), 2);
-        assert_eq!(loaded_profiles, profiles_data);
+        assert_eq!(loaded_profiles.len(), 1);
+        assert_eq!(loaded_profiles[0].model_id, "p1");
+    }
+
+    #[tokio::test]
+    async fn profile_load_duplicate_ids() {
+        let mut mock_service = MockConfigServiceAsync::new();
+        let profile1 = AIModelProfile { model_id: "p_dup".into(), ..Default::default() };
+        let profile2 = AIModelProfile { model_id: "p_dup".into(), ..Default::default() };
+        let profiles_json = serde_json::to_string(&vec![profile1, profile2]).unwrap();
+        mock_service.expect_read_config_file_string().returning(move |_| Ok(profiles_json.clone()));
+        let provider = FilesystemAIModelProfileProvider::new(Arc::new(mock_service), "ai/model_profiles.json".to_string());
+        assert!(matches!(provider.load_model_profiles().await, Err(AIInteractionError::ModelProfileLoadError{ source_message, .. }) if source_message.contains("Duplicate model_id")));
+    }
+
+    #[tokio::test]
+    async fn profile_save_success() {
+        let mut mock_service = MockConfigServiceAsync::new();
+        let profile1 = AIModelProfile { model_id: "p_save".into(), ..Default::default() };
+        let profiles_to_save = vec![profile1];
+        
+        mock_service.expect_write_config_file_string().times(1).returning(|_, content| {
+            let written: Vec<AIModelProfile> = serde_json::from_str(content).unwrap();
+            assert_eq!(written.len(), 1); assert_eq!(written[0].model_id, "p_save"); Ok(())
+        });
+        let provider = FilesystemAIModelProfileProvider::new(Arc::new(mock_service), "ai/model_profiles.json".to_string());
+        provider.save_model_profiles(&profiles_to_save).await.unwrap();
     }
 }

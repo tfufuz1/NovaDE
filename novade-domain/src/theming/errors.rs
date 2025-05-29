@@ -1,89 +1,99 @@
 use thiserror::Error;
-use crate::theming::types::{ThemeIdentifier, TokenIdentifier};
-// Assuming CoreError is the standard error type from novade_core
-// For ThemingError to be Clone, CoreError also needs to be Clone or wrapped as String.
-// Let's assume CoreError can be stringified for now if it's not Clone.
-// use novade_core::errors::CoreError; 
+use novade_core::types::Color as CoreColor;
+use crate::theming::types::{ThemeIdentifier, TokenIdentifier}; // Ensure this path is correct
 
-/// Represents errors that can occur within the theming engine.
-#[derive(Error, Debug, Clone)] // Added Clone
+#[derive(Error, Debug)]
 pub enum ThemingError {
-    #[error("Fehler beim Parsen der Token-Datei '{file_path}': {source_message}")]
+    #[error("Failed to parse token file '{filename}': {source_error}")]
     TokenFileParseError {
-        file_path: String,
-        source_message: String, // Changed from serde_json::Error to String
+        filename: String,
+        #[source]
+        source_error: Box<dyn std::error::Error + Send + Sync + 'static>,
     },
 
-    #[error("Fehler beim Parsen der Theme-Definitionsdatei '{file_path}': {source_message}")]
-    ThemeFileParseError {
-        file_path: String,
-        source_message: String, // Changed from serde_json::Error to String
-    },
-
-    #[error("Zyklische Referenz beim Auflösen des Tokens '{token_id}' entdeckt. Auflösungspfad: {path:?}")]
-    CyclicTokenReference {
-        token_id: TokenIdentifier,
-        path: Vec<TokenIdentifier>,
-    },
-
-    #[error("Maximale Auflösungstiefe ({depth}) für Token '{token_id}' überschritten.")]
-    MaxResolutionDepthExceeded {
-        token_id: TokenIdentifier,
-        depth: u8,
-    },
-
-    #[error("Theme mit der ID '{theme_id}' wurde nicht gefunden.")]
-    ThemeNotFound { theme_id: ThemeIdentifier },
-
-    #[error("Token mit der ID '{token_id}' wurde im aktuellen Kontext nicht gefunden.")]
-    TokenNotFound { token_id: TokenIdentifier },
-
-    #[error("Ungültiger Wert für Token '{token_id}': {message}")]
+    #[error("Invalid token value for token '{token_id}': {message}")]
     InvalidTokenValue {
         token_id: TokenIdentifier,
         message: String,
     },
 
-    #[error("Fehler beim Anwenden der Akzentfarbe auf Token '{token_id}': {message}")]
+    #[error("Cyclic token reference detected involving token '{token_id}'. Path: {path:?}")]
+    CyclicTokenReference {
+        token_id: TokenIdentifier,
+        path: Vec<TokenIdentifier>,
+    },
+
+    #[error("Theme with ID '{theme_id}' not found")]
+    ThemeNotFound {
+        theme_id: ThemeIdentifier,
+    },
+
+    #[error("Failed to apply accent color {accent_color_name_disp} (value: {accent_color_value:?}) to token '{token_id}': {reason}")]
     AccentColorApplicationError {
         token_id: TokenIdentifier,
-        message: String,
+        accent_color_name_disp: String, // Display representation of accent color name
+        accent_color_value: CoreColor, 
+        reason: String,
+    },
+
+    #[error("Failed to resolve token '{token_id}': {reason}")]
+    TokenResolutionError {
+        token_id: TokenIdentifier,
+        reason: String,
     },
     
-    #[error("Ungültiger Bezeichner: '{identifier}'. {message}")]
-    InvalidIdentifierFormat {
-        identifier: String,
+    #[error("Configuration error in theming: {message}")]
+    ConfigurationError {
         message: String,
     },
 
-    // If novade_core::errors::CoreError is not Clone, we must store its string representation.
-    // For std::io::Error, its string representation can be stored.
-    #[error("E/A-Fehler im Dateisystem: {0}")]
-    FilesystemIoError(String), // Changed from #[from] std::io::Error
+    #[error("I/O error related to theming: {message}")]
+    IoError {
+        message: String,
+        #[source]
+        source_error: Option<Box<dyn std::error::Error + Send + Sync + 'static>>, // Make source optional
+    },
 
-    // Assuming CoreError can be converted to a String.
-    #[error("Core-Fehler: {0}")]
-    CoreError(String), // Changed from #[from] CoreError
-
-    #[error("Allgemeiner Konfigurationsfehler: {0}")]
-    ConfigurationError(String),
-
-    #[error("Interner Fehler der Theming-Engine: {0}")]
-    InternalError(String),
-
-    #[error("Serialisierungs- oder Deserialisierungsfehler: {0}")]
-    SerdeError(String), // Generic serde error if not from a specific file
+    #[error("Filesystem operation failed for theming: {source_error}")]
+    FilesystemError {
+        #[from]
+        source_error: novade_core::errors::CoreError,
+    },
+    
+    #[error("An unknown theming error occurred: {context}")]
+    UnknownError {
+        context: String,
+    },
 }
 
-// Removed: impl From<serde_json::Error> for ThemingError 
-// It's better to handle the conversion at the call site to provide file_path context.
-
-// Helper for creating InvalidTokenValue errors easily
-impl ThemingError {
-    pub fn invalid_value(token_id: TokenIdentifier, message: impl Into<String>) -> Self {
-        ThemingError::InvalidTokenValue {
-            token_id,
-            message: message.into(),
-        }
+// Helper for AccentColorApplicationError to display name nicely
+impl AccentColorApplicationErrorDisplay {
+    pub fn new(name: Option<&str>) -> String {
+        name.map_or_else(|| "<unnamed>".to_string(), |n| format!("'{}'", n))
     }
 }
+
+// This is a marker struct to namespace the helper, not strictly necessary
+// but can be good practice if more helpers are added.
+pub struct AccentColorApplicationErrorDisplay;
+
+
+// Example of how to use ThemingError::AccentColorApplicationError:
+// ThemingError::AccentColorApplicationError {
+//     token_id: TokenIdentifier::new("some-token"),
+//     accent_color_name_disp: AccentColorApplicationErrorDisplay::new(Some("Bright Red")),
+//     accent_color_value: CoreColor::from_hex("#FF0000").unwrap(),
+//     reason: "Color conversion failed".to_string(),
+// }
+
+// Example of how you might construct a TokenFileParseError:
+// ThemingError::TokenFileParseError {
+//     filename: "my_tokens.json".to_string(),
+//     source_error: Box::new(serde_json::Error::custom("some json error")), // Example source
+// }
+
+// Example of how you might construct an IoError:
+// ThemingError::IoError {
+//     message: "Could not read theme directory".to_string(),
+//     source_error: Some(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "File not found"))),
+// }

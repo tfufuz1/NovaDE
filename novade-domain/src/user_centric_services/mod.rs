@@ -1,41 +1,11 @@
-// Declare submodules
+// Main module for user-centric services.
+
 pub mod ai_interaction;
-pub mod events; 
-pub mod notifications_core; 
+pub mod notifications_core; // Placeholder for now
+pub mod events;
 
-// Re-export main public types, traits, and errors from the ai_interaction module
-pub use self::ai_interaction::{
-    AIDataCategory,
-    AIConsentStatus,
-    AIModelCapability,
-    AIModelProfile,
-    AIConsentScope,
-    AIConsent,
-    AIInteractionError,
-    AIConsentProvider,
-    AIModelProfileProvider,
-    AIInteractionLogicService,
-    DefaultAIInteractionLogicService,
-    AttachmentData,
-    InteractionParticipant,
-    InteractionHistoryEntry,
-    AIInteractionContext,
-    FilesystemAIConsentProvider,
-    FilesystemAIModelProfileProvider,
-};
-
-// Re-export events (which now include both AIInteractionEvent and NotificationEvent)
-pub use self::events::{AIInteractionEvent, NotificationEvent, NotificationDismissReason};
-
-// Re-export main public types, traits, and errors from the notifications_core module
-pub use self::notifications_core::{
-    NotificationUrgency,
-    NotificationActionType,
-    NotificationAction,
-    NotificationInput,
-    Notification,
-    NotificationError,
-    NotificationService,
-    DefaultNotificationService,
-    NotificationHistoryProvider, // Added in Iteration 2
-};
+// Re-exports for key public types/traits.
+pub use ai_interaction::{AIInteractionLogicService, AIInteractionError, DefaultAIInteractionLogicService, AIConsentProvider, AIModelProfileProvider, FilesystemAIConsentProvider, FilesystemAIModelProfileProvider}; // Added Default impl and providers
+pub use events::{UserCentricEvent, AIInteractionEventEnum, NotificationEventEnum}; // UserCentricEvent was missing, AI/Notification enums re-exported from lib.rs via events.rs
+pub use notifications_core::NotificationError;
+// pub use notifications_core::NotificationService; // Re-export when service trait is defined

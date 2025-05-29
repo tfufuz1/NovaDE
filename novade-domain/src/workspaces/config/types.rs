@@ -1,122 +1,114 @@
 use serde::{Deserialize, Serialize};
-use crate::workspaces::core::types::WorkspaceLayoutType; // Corrected path
+use crate::workspaces::core::WorkspaceLayoutType; // Ensure this path is correct
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceSnapshot {
+    pub persistent_id: String,
     pub name: String,
     pub layout_type: WorkspaceLayoutType,
-    pub persistent_id: String, // Changed from Option<String> to String, must be present
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accent_color_hex: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct WorkspaceSetSnapshot {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspaces: Vec<WorkspaceSnapshot>,
-    pub active_workspace_persistent_id: Option<String>, // Changed from active_workspace_index
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_workspace_persistent_id: Option<String>,
 }
 
-impl WorkspaceSetSnapshot {
-    /// Validates the snapshot.
-    pub fn validate(&self) -> Result<(), String> {
-        if let Some(active_pid) = &self.active_workspace_persistent_id {
-            if !self.workspaces.iter().any(|ws| ws.persistent_id == *active_pid) {
-                return Err(format!(
-                    "active_workspace_persistent_id '{}' does not match any workspace persistent_id in the set.",
-                    active_pid
-                ));
-            }
-        }
-        for ws_snapshot in &self.workspaces {
-            if ws_snapshot.persistent_id.is_empty() {
-                return Err(format!("Workspace snapshot for '{}' has an empty persistent_id.", ws_snapshot.name));
-            }
-            // Basic validation for name (could reuse MAX_WORKSPACE_NAME_LENGTH from core::errors if needed here)
-            if ws_snapshot.name.is_empty() {
-                 return Err("Workspace snapshot name cannot be empty.".to_string());
-            }
-            // Accent color validation could be added here if desired, but core::Workspace handles it on set.
-        }
-        // Check for duplicate persistent_ids
-        let mut pids = std::collections::HashSet::new();
-        for ws_snapshot in &self.workspaces {
-            if !pids.insert(&ws_snapshot.persistent_id) {
-                return Err(format!("Duplicate persistent_id '{}' found in workspace set snapshot.", ws_snapshot.persistent_id));
-            }
-        }
-        Ok(())
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
+    fn workspace_snapshot_serde() {
+        let snapshot = WorkspaceSnapshot {
+            persistent_id: "pid1".to_string(),
+            name: "Test Workspace 1".to_string(),
+            layout_type: WorkspaceLayoutType::TilingVertical,
+            icon_name: Some("icon-arch".to_string()),
+            accent_color_hex: Some("#FF00FF".to_string()),
+        };
+        let serialized = serde_json::to_string_pretty(&snapshot).unwrap();
+        let deserialized: WorkspaceSnapshot = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(snapshot, deserialized);
+    }
+
+    #[test]
+    fn workspace_snapshot_serde_optional_fields_none() {
+        let snapshot = WorkspaceSnapshot {
+            persistent_id: "pid2".to_string(),
+            name: "Test Workspace 2".to_string(),
+            layout_type: WorkspaceLayoutType::Floating,
+            icon_name: None,
+            accent_color_hex: None,
+        };
+        let serialized = serde_json::to_string_pretty(&snapshot).unwrap();
+        assert!(!serialized.contains("icon_name"));
+        assert!(!serialized.contains("accent_color_hex"));
+
+        let deserialized: WorkspaceSnapshot = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(snapshot, deserialized);
+        assert_eq!(deserialized.icon_name, None);
+        assert_eq!(deserialized.accent_color_hex, None);
+    }
+
+    #[test]
     fn workspace_set_snapshot_default() {
-        let snapshot = WorkspaceSetSnapshot::default();
-        assert!(snapshot.workspaces.is_empty());
-        assert!(snapshot.active_workspace_persistent_id.is_none());
+        let default_snapshot = WorkspaceSetSnapshot::default();
+        assert!(default_snapshot.workspaces.is_empty());
+        assert_eq!(default_snapshot.active_workspace_persistent_id, None);
     }
 
     #[test]
-    fn workspace_set_snapshot_validate_valid_active_pid() {
-        let snapshot = WorkspaceSetSnapshot {
+    fn workspace_set_snapshot_serde() {
+        let set_snapshot = WorkspaceSetSnapshot {
             workspaces: vec![
-                WorkspaceSnapshot { name: "WS1".to_string(), layout_type: WorkspaceLayoutType::Floating, persistent_id: "pid1".to_string(), icon_name: None, accent_color_hex: None },
-                WorkspaceSnapshot { name: "WS2".to_string(), layout_type: WorkspaceLayoutType::TilingVertical, persistent_id: "pid2".to_string(), icon_name: None, accent_color_hex: None },
+                WorkspaceSnapshot {
+                    persistent_id: "main".to_string(),
+                    name: "Main".to_string(),
+                    layout_type: WorkspaceLayoutType::Maximized,
+                    icon_name: None,
+                    accent_color_hex: None,
+                },
+                WorkspaceSnapshot {
+                    persistent_id: "dev".to_string(),
+                    name: "Development".to_string(),
+                    layout_type: WorkspaceLayoutType::TilingHorizontal,
+                    icon_name: Some("code-icon".to_string()),
+                    accent_color_hex: None,
+                },
             ],
-            active_workspace_persistent_id: Some("pid2".to_string()),
+            active_workspace_persistent_id: Some("main".to_string()),
         };
-        assert!(snapshot.validate().is_ok());
-    }
-
-    #[test]
-    fn workspace_set_snapshot_validate_invalid_active_pid() {
-        let snapshot = WorkspaceSetSnapshot {
-            workspaces: vec![
-                WorkspaceSnapshot { name: "WS1".to_string(), layout_type: WorkspaceLayoutType::Floating, persistent_id: "pid1".to_string(), icon_name: None, accent_color_hex: None },
-            ],
-            active_workspace_persistent_id: Some("non_existent_pid".to_string()),
-        };
-        assert!(snapshot.validate().is_err());
-        assert!(snapshot.validate().unwrap_err().contains("does not match any workspace persistent_id"));
+        let serialized = serde_json::to_string_pretty(&set_snapshot).unwrap();
+        let deserialized: WorkspaceSetSnapshot = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(set_snapshot, deserialized);
     }
     
     #[test]
-    fn workspace_set_snapshot_validate_empty_persistent_id_in_snapshot() {
-        let snapshot = WorkspaceSetSnapshot {
-            workspaces: vec![
-                WorkspaceSnapshot { name: "WS1".to_string(), layout_type: WorkspaceLayoutType::Floating, persistent_id: "".to_string(), icon_name: None, accent_color_hex: None },
-            ],
-            active_workspace_persistent_id: None,
-        };
-        assert!(snapshot.validate().is_err());
-        assert!(snapshot.validate().unwrap_err().contains("empty persistent_id"));
-    }
+    fn workspace_set_snapshot_serde_empty_and_none() {
+        let set_snapshot = WorkspaceSetSnapshot::default(); 
+        let serialized = serde_json::to_string_pretty(&set_snapshot).unwrap();
+        
+        let deserialized: WorkspaceSetSnapshot = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(set_snapshot, deserialized);
+        assert!(deserialized.workspaces.is_empty());
+        assert!(deserialized.active_workspace_persistent_id.is_none());
 
-    #[test]
-    fn workspace_set_snapshot_validate_duplicate_persistent_ids() {
-        let snapshot = WorkspaceSetSnapshot {
-            workspaces: vec![
-                WorkspaceSnapshot { name: "WS1".to_string(), layout_type: WorkspaceLayoutType::Floating, persistent_id: "pid1".to_string(), icon_name: None, accent_color_hex: None },
-                WorkspaceSnapshot { name: "WS2".to_string(), layout_type: WorkspaceLayoutType::TilingVertical, persistent_id: "pid1".to_string(), icon_name: None, accent_color_hex: None }, // Duplicate PID
-            ],
-            active_workspace_persistent_id: Some("pid1".to_string()),
-        };
-        assert!(snapshot.validate().is_err());
-        assert!(snapshot.validate().unwrap_err().contains("Duplicate persistent_id"));
-    }
-
-
-    #[test]
-    fn workspace_set_snapshot_validate_none_active_pid() {
-        let snapshot = WorkspaceSetSnapshot {
-            workspaces: vec![
-                WorkspaceSnapshot { name: "WS1".to_string(), layout_type: WorkspaceLayoutType::Floating, persistent_id: "pid1".to_string(), icon_name: None, accent_color_hex: None },
-            ],
-            active_workspace_persistent_id: None,
-        };
-        assert!(snapshot.validate().is_ok());
+        // Check that optional fields are indeed omitted or handled as default by serde
+        // For a struct that is `Default` and has `skip_serializing_if` on all fields,
+        // it might serialize to an empty object `{}`.
+        // If `workspaces: Vec` uses `#[serde(default, skip_serializing_if = "Vec::is_empty")]`,
+        // it will be omitted if empty.
+        // If `active_workspace_persistent_id: Option<String>` uses `#[serde(default, skip_serializing_if = "Option::is_none")]`,
+        // it will be omitted if None.
+        // Thus, a default WorkspaceSetSnapshot should serialize to "{}"
+        assert_eq!(serialized, "{}");
     }
 }

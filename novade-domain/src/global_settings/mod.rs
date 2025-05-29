@@ -1,45 +1,19 @@
-// Declare submodules
-pub mod types;
-pub mod errors;
-pub mod paths;
-pub mod persistence_iface;
-pub mod providers;
-pub mod events;
-pub mod service;
+// Main module for global desktop settings and state management.
 
-// Re-export main public types for easier access
-pub use self::types::{
-    GlobalDesktopSettings,
-    AppearanceSettings,
-    InputBehaviorSettings,
-    ColorScheme,
-    FontSettings,
-    FontHinting,
-    FontAntialiasing,
-    WorkspaceSettings,
-    WorkspaceSwitchingBehavior,
-    PowerManagementPolicySettings,
-    LidCloseAction,
-    DefaultApplicationsSettings,
-};
-pub use self::paths::{
-    SettingPath,
-    AppearanceSettingPath,
-    InputBehaviorSettingPath,
-    FontSettingPath,
-    WorkspaceSettingPath,
-    PowerManagementSettingPath,
-    DefaultApplicationSettingPath,
-};
-pub use self::errors::GlobalSettingsError;
-pub use self::persistence_iface::SettingsPersistenceProvider;
-pub use self::providers::filesystem_provider::FilesystemSettingsProvider; // Example provider
-pub use self::events::{
-    SettingChangedEvent,
-    SettingsLoadedEvent,
-    SettingsSavedEvent,
-};
-pub use self::service::{
-    GlobalSettingsService,
-    DefaultGlobalSettingsService,
-};
+pub mod types;
+pub mod paths;
+pub mod errors;
+pub mod events;
+pub mod persistence_iface; // For the trait defining how settings are saved/loaded
+pub mod service;           // For the GlobalSettingsService implementation
+
+// Re-exports for easier access by consumers of the crate.
+// These will be populated as the types are defined.
+
+// Example re-exports (will be uncommented/adjusted as types are implemented)
+pub use self::types::GlobalDesktopSettings; // Uncommented
+pub use self::paths::SettingPath; // Uncommented
+pub use self::errors::GlobalSettingsError; // Uncommented
+pub use self::events::{SettingChangedEvent, SettingsLoadedEvent, SettingsSavedEvent}; // Uncommented
+pub use self::service::{GlobalSettingsService, DefaultGlobalSettingsService}; // Updated
+pub use self::persistence_iface::{SettingsPersistenceProvider, FilesystemSettingsProvider}; // Added
