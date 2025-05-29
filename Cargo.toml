@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2" # Enable new feature resolver
+members = [
+    "novade-core",
+    "novade-domain",
+    "novade-system",
+    "novade-ui",
+    "clock_mcp_server",
+    "cpu_mcp_server",
+    "power_mcp_server",
+    # nova_compositor will be merged into novade-system
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["NovaDE Team <nova-de@example.com>"] # Placeholder email
+license = "MIT OR Apache-2.0" # Example license
+
+[workspace.dependencies]
+# Common dependencies can be listed here if desired,
+# but for now, we'll keep them in individual crate manifests
+# to maintain clarity during this refactoring.
+# Example:
+# anyhow = "1.0"
+# serde = { version = "1.0", features = ["derive"] }
+# tokio = { version = "1", features = ["full"] }
+# tracing = "0.1"

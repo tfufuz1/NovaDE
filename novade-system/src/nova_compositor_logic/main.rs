@@ -3,12 +3,9 @@
 //! This module initializes the compositor, sets up Wayland globals,
 //! and runs the main event loop to handle client requests and compositor events.
 
-mod error;
-mod protocols;
-mod state;
-mod utils;
+// Modules are now declared in nova_compositor_logic/mod.rs
 
-use crate::state::CompositorState;
+use super::state::CompositorState; // Adjusted path
 use smithay::reexports::calloop::{EventLoop, LoopHandle, Interest, Mode, PostAction};
 use smithay::wayland::seat::Seat; // Smithay's Seat struct, used for type context
 use wayland_server::{
@@ -17,13 +14,13 @@ use wayland_server::{
 };
 use std::path::Path; // Used for socket path management (though add_socket_auto handles this mostly)
 use std::process::Command; // Potentially for launching helper processes or cleanup, not directly used yet.
-use crate::protocols::wl_seat::SeatStateGlobalData; // UserData for the wl_seat global itself
-use crate::protocols::wl_output::OutputGlobalData; // UserData for the wl_output global itself
+use super::protocols::wl_seat::SeatStateGlobalData; // Adjusted path: UserData for the wl_seat global itself
+use super::protocols::wl_output::OutputGlobalData; // Adjusted path: UserData for the wl_output global itself
 
-/// The main function that starts the Nova Compositor.
-fn main() {
+/// Starts the Nova Compositor logic.
+pub fn start_nova_compositor_server() {
     // TODO: Initialize a proper logger (e.g., tracing-subscriber or slog)
-    println!("Nova Compositor starting...");
+    println!("Nova Compositor Logic starting (as part of novade-system)...");
 
     // Create the event loop that will drive the compositor.
     let mut event_loop = EventLoop::<CompositorState>::try_new()
@@ -79,50 +76,57 @@ fn main() {
     // Display Setup
     // The `Display` object is within `compositor_state`.
     // We need to borrow it mutably to call `add_socket_auto`.
-    let display = &mut compositor_state.display;
+    let display_handle = compositor_state.display.handle(); // Get display handle early if needed for seat
     
-    let socket_name = match display.add_socket_auto() {
+    // Create the Wayland socket
+    // Note: add_socket_auto() adds the socket to the event loop sources internally.
+    let listening_socket = match compositor_state.display.add_socket_auto() {
         Ok(name) => name,
         Err(e) => {
             eprintln!("Fatal: Failed to create Wayland socket: {}", e);
-            panic!("Could not start compositor: socket creation failed.");
+            // Consider returning a Result instead of panicking if this is a library function
+            panic!("Could not start compositor logic: socket creation failed."); 
         }
     };
-    println!("Listening on Wayland socket: {}", socket_name.to_string_lossy());
-    std::env::set_var("WAYLAND_DISPLAY", socket_name.as_os_str());
+    println!("Nova Compositor Logic listening on Wayland socket: {}", listening_socket.to_string_lossy());
+    // Setting WAYLAND_DISPLAY is typically for client applications, 
+    // but can be useful for testing or if other parts of novade-system expect it.
+    std::env::set_var("WAYLAND_DISPLAY", listening_socket.as_os_str());
 
+    // It's important that the LoopHandle is available for dispatching.
+    // The EventLoop itself is consumed by run, so we use the handle.
+    let loop_handle = event_loop.handle();
 
-    println!("Starting event loop...");
-    // Event Loop Execution
+    println!("Nova Compositor Logic starting event loop...");
+    // Event Loop Execution - this will block the current thread.
+    // Consider if this needs to be spawned on a new thread if novade-system has other tasks.
+    // For now, direct call as per typical compositor main.
+    // The EventLoop `run` method is often preferred for dedicated compositor binaries.
+    // However, since this is now a library function, we'll stick to the manual loop
+    // for now, as it was structured before, but this is a key area for review.
+    // If this function is expected to return, the loop needs a condition to break.
+    // For a server, it might run indefinitely until an external signal or specific event.
+
     loop {
-        // Process events from the event loop. This includes client requests.
-        match event_loop.dispatch(std::time::Duration::from_millis(16), &mut compositor_state) {
-            Ok(_) => {
-                // Successfully dispatched events
-            }
-            Err(e) => {
-                eprintln!("Error during event loop dispatch: {}", e);
-                // Depending on the error, you might want to break the loop or handle it
-                break; // For now, break on error
-            }
+        // Process events from the event loop.
+        if let Err(e) = event_loop.dispatch(std::time::Duration::from_millis(16), &mut compositor_state) {
+            eprintln!("Error during event loop dispatch: {}", e);
+            // Consider returning an error or specific shutdown based on error type
+            break; 
         }
         
         // Flush events to clients.
-        // This ensures that any events queued by the handlers are sent to the clients.
-        match compositor_state.display.flush_clients() {
-            Ok(_) => {
-                // Successfully flushed clients
-            }
-            Err(e) => {
-                eprintln!("Error flushing clients: {}", e);
-                // Depending on the error, you might want to break or handle
-            }
+        if let Err(e) = compositor_state.display.flush_clients() {
+            eprintln!("Error flushing clients: {}", e);
+            // Handle error, possibly break or log
         }
+        // A mechanism to break this loop might be needed if `start_nova_compositor_server`
+        // is not intended to run forever. For now, it mirrors the original loop.
     }
     
-    // Cleanup of the socket file is typically handled by the OS when the process exits
-    // for sockets created with add_socket_auto(), as they are often in XDG_RUNTIME_DIR.
-    // If a fixed path was used, manual cleanup like before would be needed.
-    println!("Shutting down Nova Compositor...");
-    // No explicit socket_path.exists() and remove_file here as add_socket_auto() is used.
+    println!("Nova Compositor Logic shutting down...");
+    // Cleanup of the socket might be handled by Display dropping if using add_socket_auto,
+    // but an explicit removal might be desired if a fixed path was used or for tests.
+    // The original code correctly noted that add_socket_auto() sockets in XDG_RUNTIME_DIR
+    // are often cleaned up by the OS.
 }

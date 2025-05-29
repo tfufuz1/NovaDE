@@ -2,6 +2,9 @@
 name = "novade-system"
 version = "0.1.0"
 edition = "2021"
+authors = ["NovaDE Team <nova-de@example.com>"]
+license = "MIT OR Apache-2.0"
+publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -9,7 +12,7 @@ edition = "2021"
 smithay = { version = "0.10.0", features = ["backend_drm", "backend_egl", "renderer_gl", "wayland_frontend", "desktop"] }
 calloop = "0.12.0"
 wayland-server = "0.30.0"
-wayland-protocols = { version = "0.30.0", features = ["server", "unstable"] } # Assuming 'unstable' is the correct feature for 0.30.0
+wayland-protocols = { version = "0.30.0", features = ["server", "client", "unstable_protocols"] } # Consolidated and corrected feature name
 thiserror = "1.0"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 tracing = "0.1"
@@ -22,12 +25,12 @@ khronos-egl = "6.0.0" # For EGL context management
 # but can be added explicitly if specific version is needed or direct use is planned.
 
 async-trait = "0.1"
-thiserror = "1.0"
-gtk4-gio = { version = "0.8", package = "gtk4-gio" } 
+# thiserror = "1.0" # Removed duplicate
+gtk4-gio = { version = "0.8", package = "gio" } # Corrected package name
 
 # Wayland dependencies
 wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client", "unstable_protocols"] }
+# wayland-protocols = { version = "0.32", features = ["client", "unstable_protocols"] } # Removed duplicate
 # For wlr-foreign-toplevel-management specifically
 # Check if version aligns with wayland-protocols
 # Smithay's versioning might be different, e.g. wayland-protocols-wlr = "0.1.0"
@@ -37,11 +40,12 @@ wayland-protocols = { version = "0.32", features = ["client", "unstable_protocol
 # Let's try finding a direct wlr-foreign-toplevel protocol crate or use a broader one if it exists.
 # For now, assuming "unstable_protocols" might cover it or that we'll handle it if it doesn't.
 
-tracing = "0.1" # For logging
+# tracing = "0.1" # For logging (Removed duplicate)
 # crossbeam-channel might be needed if std::sync::mpsc is not sufficient for specific threading patterns
 # std::sync::mpsc is part of the standard library, so no direct Cargo entry.
 # For more complex scenarios, crossbeam-channel = "0.5"
+# This tracing entry is also a duplicate, removing it.
+# tracing = "0.1" 
 
-
-# novade-core = { path = "../novade-core" } # Assuming these are local sibling crates
-# novade-domain = { path = "../novade-domain" } # Adjust paths as necessary
+novade-core = { path = "../novade-core" } # Assuming these are local sibling crates
+novade-domain = { path = "../novade-domain" } # Adjust paths as necessary

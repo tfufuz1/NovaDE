@@ -5,3 +5,4 @@ pub mod renderers; // Ensure this line is present and public
 pub mod shm;
 pub mod surface_management;
 pub mod xdg_shell;
+pub mod nova_compositor_logic;

@@ -2,12 +2,9 @@
 name = "clock_mcp_server"
 version = "0.1.0"
 edition = "2021"
-
-# This empty workspace definition is added to make this package buildable
-# independently of the problematic parent workspace.
-[workspace] 
-members = ["power_mcp_server"]
-# members = [] # Not strictly necessary for a standalone package like this
+authors = ["NovaDE Team <nova-de@example.com>"]
+license = "MIT OR Apache-2.0"
+publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

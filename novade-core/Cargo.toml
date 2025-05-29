@@ -2,8 +2,9 @@
 name = "novade-core"
 version = "0.1.0"
 edition = "2021"
+publish = false
 description = "Core layer for the NovaDE desktop environment"
-authors = ["NovaDE Team"]
+authors = ["NovaDE Team <nova-de@example.com>"]
 license = "MIT OR Apache-2.0"
 rust-version = "1.70.0"
 
