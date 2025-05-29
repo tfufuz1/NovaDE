@@ -30,6 +30,7 @@ gtk4-gio = { version = "0.8", package = "gio" } # Corrected package name
 
 # Wayland dependencies
 wayland-client = "0.31"
+wayland-egl = "0.31.0" # For EGL surface integration with Wayland
 # wayland-protocols = { version = "0.32", features = ["client", "unstable_protocols"] } # Removed duplicate
 # For wlr-foreign-toplevel-management specifically
 # Check if version aligns with wayland-protocols
@@ -46,6 +47,9 @@ wayland-client = "0.31"
 # For more complex scenarios, crossbeam-channel = "0.5"
 # This tracing entry is also a duplicate, removing it.
 # tracing = "0.1" 
+
+bytemuck = { version = "1.14", features = ["derive"] } # For safe casting of vertex data
+image = { version = "0.24", default-features = false, features = ["png"] } # For texture loading, only enable PNG for now
 
 novade-core = { path = "../novade-core" } # Assuming these are local sibling crates
 novade-domain = { path = "../novade-domain" } # Adjust paths as necessary
