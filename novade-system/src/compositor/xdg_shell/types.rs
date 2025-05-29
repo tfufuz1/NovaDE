@@ -7,14 +7,14 @@ use smithay::{
     utils::{Logical, Point, Rectangle, Size, Serial, Transform}, // Added Transform
     wayland::{
         compositor::SurfaceData as SmithaySurfaceData, // To check surface aliveness
-        shell::xdg::{PopupSurface, ToplevelSurface, WindowSurface, XdgToplevelSurfaceData, ToplevelState as XdgToplevelState},
+        shell::xdg::{PopupSurface, ToplevelSurface, WindowSurface, XdgToplevelSurfaceData, ToplevelState as XdgToplevelState, ResizeEdge},
         seat::WaylandFocus, // For wl_surface() return type Option<&WlSurface>
     },
     wayland::presentation::presentation_time, // Correct path for Smithay 0.10
 };
 use std::{
     hash::{Hash, Hasher},
-    sync::{Arc, Mutex, Weak}, // Added Weak for parent reference
+    sync::{Arc, RwLock, Weak}, // Added RwLock, Mutex removed as RwLock is generally preferred
 };
 use uuid::Uuid;
 
@@ -29,6 +29,87 @@ impl DomainWindowIdentifier {
     }
 }
 
+/// Window state
+#[derive(Debug, Clone)]
+pub struct WindowState {
+    /// Is the window maximized
+    pub maximized: bool,
+    
+    /// Is the window fullscreen
+    pub fullscreen: bool,
+    
+    /// Is the window minimized
+    pub minimized: bool,
+    
+    /// Is the window activated (has focus)
+    pub activated: bool,
+    
+    /// Window geometry (requested by client or set by compositor)
+    pub geometry: Option<Rectangle<i32, Logical>>,
+    
+    /// Window position (current position on screen)
+    pub position: Point<i32, Logical>,
+    
+    /// Window size (current size on screen)
+    pub size: Size<i32, Logical>,
+    
+    /// Window minimum size
+    pub min_size: Size<i32, Logical>,
+    
+    /// Window maximum size
+    pub max_size: Size<i32, Logical>,
+
+    /// Saved geometry before a maximize or fullscreen action
+    pub saved_pre_action_geometry: Option<Rectangle<i32, Logical>>,
+}
+
+/// Window manager data, specific to compositor's internal state management
+#[derive(Debug, Clone)]
+pub struct WindowManagerData {
+    /// Is the window being moved
+    pub moving: bool,
+    
+    /// Is the window being resized
+    pub resizing: bool,
+    
+    /// Resize edges
+    pub resize_edges: Option<ResizeEdge>,
+    
+    /// Window workspace
+    pub workspace: u32, // Or Option<u32> if a window might not be on any workspace
+    
+    /// Window layer
+    pub layer: WindowLayer,
+    
+    /// Window opacity
+    pub opacity: f64,
+    
+    /// Window z-index (relative to other windows in the same layer/space)
+    pub z_index: i32,
+    
+    /// Window decorations state (e.g. server-side or client-side)
+    pub decorations: bool, // true for server-side, false for client-side
+}
+
+/// Window layer for stacking order
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)] // Added PartialOrd, Ord for easy sorting/comparison
+pub enum WindowLayer {
+    /// Background layer (e.g., wallpapers)
+    Background,
+    
+    /// Bottom layer (e.g., docks, panels that should be below normal windows)
+    Bottom,
+    
+    /// Normal window layer
+    Normal,
+    
+    /// Top layer (e.g., panels, notifications that should be above normal windows)
+    Top,
+    
+    /// Overlay layer (e.g., screen lockers, critical alerts, input method popups)
+    Overlay,
+}
+
 #[derive(Debug)]
 pub struct ManagedWindow {
     pub id: Uuid, // Internal compositor ID
@@ -36,20 +117,19 @@ pub struct ManagedWindow {
     pub xdg_surface: WindowSurface, // Toplevel or Popup
     pub current_geometry: Rectangle<i32, Logical>,
     pub is_mapped: bool,
-    // For popups, a link to the parent ManagedWindow might be useful
-    pub parent: Option<Weak<ManagedWindow>>, // Weak reference to avoid cycles if popups store parent
-    // Fields for title and app_id
+    pub parent: Option<Weak<ManagedWindow>>,
+    // Fields for title and app_id (direct, as per existing ManagedWindow in types.rs)
     pub title: Option<String>,
     pub app_id: Option<String>,
-    // Storing pending configure serial for ack_configure validation
     pub last_configure_serial: Option<Serial>,
+    // Added fields from xdg_shell/mod.rs's ManagedWindow
+    pub state: Arc<RwLock<WindowState>>,
+    pub manager_data: Arc<RwLock<WindowManagerData>>,
 }
 
 impl ManagedWindow {
     pub fn new_toplevel(toplevel_surface: ToplevelSurface, domain_id: DomainWindowIdentifier) -> Self {
-        let initial_geometry = Rectangle::from_loc_and_size((0, 0), (0, 0)); // Initialized later
-
-        // Update title and app_id from the toplevel surface's initial state if available
+        let initial_geometry = Rectangle::from_loc_and_size((0, 0), (0, 0));
         let title = toplevel_surface.title();
         let app_id = toplevel_surface.app_id();
 
@@ -63,32 +143,76 @@ impl ManagedWindow {
             title,
             app_id,
             last_configure_serial: None,
+            state: Arc::new(RwLock::new(WindowState {
+                maximized: false,
+                fullscreen: false,
+                minimized: false,
+                activated: false, // Should be set true when focused
+                geometry: None, // Client's requested geometry
+                position: Point::from((100, 100)), // Default initial position
+                size: Size::from((300, 200)),    // Default initial size
+                min_size: Size::from((1, 1)),
+                max_size: Size::from((0, 0)), // 0 means unlimited
+                saved_pre_action_geometry: None,
+            })),
+            manager_data: Arc::new(RwLock::new(WindowManagerData {
+                moving: false,
+                resizing: false,
+                resize_edges: None,
+                workspace: 0, // Default workspace
+                layer: WindowLayer::Normal,
+                opacity: 1.0,
+                z_index: 0,
+                decorations: true, // Default to SSD
+            })),
         }
     }
 
-    pub fn new_popup(popup_surface: PopupSurface, parent_domain_id: DomainWindowIdentifier, parent_window: Option<Arc<ManagedWindow>>) -> Self {
-        // Popups get geometry relative to their parent.
-        // For this basic implementation, we'll set a zero geometry.
-        // Full popup logic (positioning, grab, etc.) is complex.
+    pub fn new_popup(popup_surface: PopupSurface, _parent_domain_id: DomainWindowIdentifier, parent_window: Option<Arc<ManagedWindow>>) -> Self {
         let title = popup_surface.wl_surface().data_map().get::<XdgToplevelSurfaceData>().and_then(|d| d.title.clone());
         let app_id = popup_surface.wl_surface().data_map().get::<XdgToplevelSurfaceData>().and_then(|d| d.app_id.clone());
 
         Self {
             id: Uuid::new_v4(),
-            domain_id: DomainWindowIdentifier::new_v4(), // Popups might have their own domain ID or be linked differently.
+            // Popups might share parent's domain_id or have a new one. For now, new.
+            domain_id: DomainWindowIdentifier::new_v4(), 
             xdg_surface: WindowSurface::Popup(popup_surface),
             current_geometry: Rectangle::from_loc_and_size((0, 0), (0, 0)),
-            is_mapped: false, // Popups are mapped based on parent state or explicit grab
+            is_mapped: false,
             parent: parent_window.map(|p| Arc::downgrade(&p)),
             title,
             app_id,
             last_configure_serial: None,
+            // Popups usually don't have complex state/manager_data like toplevels,
+            // but initializing them for consistency.
+            state: Arc::new(RwLock::new(WindowState {
+                maximized: false, fullscreen: false, minimized: false, activated: false,
+                geometry: None, position: Point::from((0,0)), size: Size::from((0,0)),
+                min_size: Size::from((0,0)), max_size: Size::from((0,0)),
+                saved_pre_action_geometry: None,
+            })),
+            manager_data: Arc::new(RwLock::new(WindowManagerData {
+                moving: false, resizing: false, resize_edges: None, workspace: 0,
+                layer: WindowLayer::Overlay, // Popups are often overlays
+                opacity: 1.0, z_index: 0, decorations: false, // Popups don't have decorations
+            })),
         }
     }
 
     pub fn wl_surface_ref(&self) -> Option<&WlSurface> {
         self.xdg_surface.wl_surface().as_ref()
     }
+
+    // Helper methods to access interior mutability, if needed for handlers
+    // Example:
+    // pub fn with_state<F, R>(&self, func: F) -> R where F: FnOnce(&mut WindowState) -> R {
+    //     let mut guard = self.state.write().unwrap();
+    //     func(&mut *guard)
+    // }
+    // pub fn with_manager_data<F, R>(&self, func: F) -> R where F: FnOnce(&mut WindowManagerData) -> R {
+    //     let mut guard = self.manager_data.write().unwrap();
+    //     func(&mut *guard)
+    // }
 }
 
 impl PartialEq for ManagedWindow {
@@ -186,8 +310,11 @@ impl Window for ManagedWindow {
         // Popups don't typically have titles/app_ids in the same way.
     }
 
+    fn on_commit(&mut self) {
+        self.self_update();
+    }
+
     // Optional methods from Window trait, can be default or implemented:
-    // fn on_commit(&mut self) { /* ... */ }
     // fn damage_applied(&mut self) { /* ... */ }
     // fn is_solid(&self) -> bool { false } 
     // fn z_index(&self) -> u8 { 0 } 
