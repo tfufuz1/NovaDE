@@ -1,104 +1,283 @@
 // Main public interface for novade_domain
 // This file re-exports key entities, services, and errors from the submodules.
 
-// Submodule declarations
-pub mod ai_interaction_service;
+// Main Module Declarations
 pub mod common_events;
-pub mod entities;
-pub mod error;
 pub mod global_settings;
-pub mod global_settings_management;
-pub mod notification;
-pub mod notifications;
 pub mod notifications_rules;
-pub mod power_management;
-pub mod repositories;
-pub mod settings;
 pub mod shared_types;
 pub mod theming;
 pub mod user_centric_services;
-pub mod window_management;
 pub mod window_management_policy;
 pub mod workspaces;
-pub mod ports; // Added for traits like ConfigServiceAsync
+// pub mod entities; // Example, if you have a top-level entities module
+// pub mod error; // Example, for a general DomainError if used
 
-// Re-exports for easier access by consumers of the crate
+// Public API Re-exports
+pub use common_events::{
+    UserActivityType, UserActivityDetectedEvent,
+    ShutdownReason, SystemShutdownInitiatedEvent,
+};
 
-// From error module
-pub use error::DomainError;
+pub use global_settings::{
+    DefaultGlobalSettingsService,
+    GlobalSettingsError,
+    GlobalSettingsService,
+    SettingsPersistenceProvider,
+    FilesystemSettingsProvider,
+    types::{
+        GlobalDesktopSettings, AppearanceSettings, 
+        ColorScheme as GlobalColorScheme, // Aliased to avoid conflict with theming's ColorSchemeType
+        FontSettings, 
+        WorkspaceSettings as GlobalWorkspaceSettings, // Aliased for clarity
+        InputBehaviorSettings, 
+        PowerManagementPolicySettings, DefaultApplicationsSettings
+    },
+    paths::SettingPath,
+    events::{SettingChangedEvent, SettingsLoadedEvent, SettingsSavedEvent},
+};
 
-// From entities module (example re-exports, adjust based on actual entities)
-pub use entities::configuration::AppConfiguration;
-pub use entities::project::Project;
-pub use entities::task::Task;
-pub mod task_management { // Example of grouping re-exports
-    pub use crate::entities::task::{Task, TaskPriority, TaskStatus};
+pub use notifications_rules::{
+    DefaultNotificationRulesEngine,
+    NotificationRulesEngine,
+    NotificationRulesError,
+    persistence_iface::NotificationRulesProvider,
+    persistence::FilesystemNotificationRulesProvider,
+    types::{
+        NotificationRule, RuleCondition, RuleAction, RuleProcessingResult, 
+        RuleConditionValue, RuleConditionOperator, RuleConditionField, 
+        SimpleRuleCondition, NotificationRuleSet
+    },
+    engine::RuleProcessingResult as EngineRuleProcessingResult, // If RuleProcessingResult is also in engine
+};
+
+pub use shared_types::{ApplicationId, UserSessionState, ResourceIdentifier};
+
+pub use theming::{
+    ThemingEngine,
+    ThemingError,
+    types::{
+        ThemeDefinition, AppliedThemeState, ThemingConfiguration, TokenIdentifier, 
+        TokenValue, RawToken, TokenSet, ThemeIdentifier, 
+        ColorSchemeType as ThemingColorSchemeType, // Aliased
+        AccentColor, ThemeVariantDefinition, AccentModificationType
+    },
+    events::ThemeChangedEvent,
+};
+
+pub use user_centric_services::{
+    ai_interaction::{
+        AIInteractionLogicService, DefaultAIInteractionLogicService,
+        AIInteractionError,
+        AIConsentProvider, AIModelProfileProvider,
+        FilesystemAIConsentProvider, FilesystemAIModelProfileProvider,
+        types::{
+            AIInteractionContext, AIConsent, AIModelProfile, AIDataCategory, 
+            AttachmentData, InteractionHistoryEntry, AIConsentStatus, 
+            AIConsentScope, AIModelCapability, InteractionParticipant
+        },
+    },
+    notifications_core::{
+        NotificationService, DefaultNotificationService,
+        NotificationError,
+        // persistence_iface::NotificationPersistenceProvider, // If defined & public
+        // persistence::FilesystemNotificationPersistenceProvider, // If defined & public
+        types::{
+            Notification, NotificationInput, NotificationAction, NotificationUrgency, 
+            NotificationActionType, NotificationStats, DismissReason, 
+            NotificationFilterCriteria, NotificationSortOrder
+        },
+    },
+    events::{UserCentricEvent, AIInteractionEventEnum, NotificationEventEnum},
+};
+
+pub use window_management_policy::{
+    DefaultWindowManagementPolicyService,
+    WindowManagementPolicyService,
+    WindowPolicyError,
+    types::{
+        TilingMode, GapSettings, WindowSnappingPolicy, WindowGroupingPolicy, 
+        NewWindowPlacementStrategy, FocusStealingPreventionLevel, FocusPolicy, 
+        WindowPolicyOverrides, WorkspaceWindowLayout, WindowLayoutInfo
+    },
+};
+
+pub use workspaces::{
+    DefaultWorkspaceManager,
+    WorkspaceManagerService,
+    config::{
+        WorkspaceConfigProvider, 
+        FilesystemConfigProvider as FilesystemWorkspaceConfigProvider, // Aliased for clarity
+        WorkspaceSnapshot, WorkspaceSetSnapshot
+    },
+    core::types::{WorkspaceId, WindowIdentifier, WorkspaceLayoutType as CoreWorkspaceLayoutType},
+    core::Workspace,
+    core::errors::WorkspaceCoreError, 
+    assignment::errors::WindowAssignmentError, 
+    manager::errors::WorkspaceManagerError, 
+    config::errors::WorkspaceConfigError,
+    manager::events::WorkspaceEvent,
+};
+
+// --- DomainServices Struct and Initialization ---
+use std::path::PathBuf;
+use std::sync::Arc;
+use novade_core::config::ConfigServiceAsync;
+use novade_core::errors::CoreError;
+use tracing; // For logging
+
+#[derive(Clone)]
+pub struct DomainServices {
+    pub settings_service: Arc<dyn GlobalSettingsService>,
+    pub theming_engine: Arc<ThemingEngine>,
+    pub workspace_manager: Arc<dyn WorkspaceManagerService>,
+    pub window_management_policy_service: Arc<dyn WindowManagementPolicyService>,
+    pub ai_interaction_service: Arc<dyn AIInteractionLogicService>,
+    pub notification_rules_engine: Arc<dyn NotificationRulesEngine>,
+    pub notification_service: Arc<dyn NotificationService>,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum DomainInitializationError {
+    #[error("Failed to initialize global settings service: {0}")]
+    SettingsInitError(#[from] GlobalSettingsError),
+    #[error("Failed to initialize theming engine: {0}")]
+    ThemingInitError(#[from] ThemingError),
+    #[error("Failed to initialize workspace manager: {0}")]
+    WorkspaceInitError(#[from] WorkspaceManagerError),
+    #[error("Failed to initialize AI interaction service: {0}")]
+    AiInteractionInitError(#[from] AIInteractionError),
+    #[error("Failed to initialize notification rules engine: {0}")]
+    NotificationRulesInitError(#[from] NotificationRulesError),
+    #[error("Failed to initialize notification service: {0}")]
+    NotificationServiceInitError(#[from] NotificationError),
+    #[error("Core configuration error during domain initialization: {0}")]
+    CoreConfigError(#[from] CoreError),
+    #[error("User directory not found for default paths: {0}")]
+    UserDirectoryNotFound(String),
+}
 
-// From power_management module
-pub use power_management::{
-    PowerManagementService, DefaultPowerManagementService, 
-    BatteryInfo, PowerState, PowerCapabilities, PowerError, PowerEvent,
-    SystemPowerState // Assuming this is also part of the public API
-};
+const DOMAIN_CONFIG_BASE_PATH: &str = "novade"; 
+const DEFAULT_EVENT_BROADCAST_CAPACITY: usize = 128;
 
-// From workspaces module
-pub use workspaces::{
-    WorkspaceManagerService, DefaultWorkspaceManager, // Assuming DefaultWorkspaceManager is also for public use
-    Workspace, WorkspaceId, WindowIdentifier, WorkspaceError, WorkspaceEvent, WorkspaceLayoutType,
-    WorkspaceConfigProvider, FilesystemConfigProvider // Re-exporting provider and its concrete impl
-};
-pub use workspaces::common_types::*; // Re-export common_types used by workspaces
+pub async fn initialize_domain_layer(
+    core_config_service: Arc<dyn ConfigServiceAsync>,
+    current_user_id: String,
+    event_broadcast_capacity_override: Option<usize>,
+    theme_load_paths_override: Option<Vec<PathBuf>>,
+    token_load_paths_override: Option<Vec<PathBuf>>,
+) -> Result<DomainServices, DomainInitializationError> {
+    tracing::info!("Initializing NovaDE Domain Layer...");
+    let capacity = event_broadcast_capacity_override.unwrap_or(DEFAULT_EVENT_BROADCAST_CAPACITY);
 
-// From theming module
-// Old legacy types (ThemeManager, Theme, ThemeMeta, ColorToken, FontToken, ThemeMode) are removed.
-// ThemeError is still relevant if it's the same error type used by ThemingEngine.
-// ThemeChangeEvent is relevant. ThemeDefinition is the core new type.
-pub use theming::{
-    ThemingEngine, // The new primary service
-    ThemeDefinition, // The new theme structure
-    ThemeIdentifier,
-    ColorSchemeType,
-    AccentColor,
-    AppliedThemeState,
-    ThemingConfiguration,
-    TokenIdentifier,
-    TokenValue,
-    RawToken,
-    TokenSet,
-    AccentModificationType,
-    ThemeChangedEvent, // Event from the new engine
-    ThemingError, // Errors from the new engine
-    DefaultFileSystemConfigService, // The default config service
-};
+    let user_config_dir = dirs::config_dir().ok_or_else(|| DomainInitializationError::UserDirectoryNotFound("User config directory not found.".to_string()))?;
+    let user_data_dir = dirs::data_dir().ok_or_else(|| DomainInitializationError::UserDirectoryNotFound("User data directory not found.".to_string()))?;
+    
+    let domain_config_path = user_config_dir.join(DOMAIN_CONFIG_BASE_PATH);
+    let domain_data_path = user_data_dir.join(DOMAIN_CONFIG_BASE_PATH); // For things like consents if they are in data dir
 
-// From ports (newly added)
-pub use ports::config_service::ConfigServiceAsync;
+    // Ensure domain config/data directories exist
+    core_config_service.ensure_directory_exists(&domain_config_path).await.map_err(DomainInitializationError::CoreConfigError)?;
+    core_config_service.ensure_directory_exists(&domain_data_path).await.map_err(DomainInitializationError::CoreConfigError)?;
 
-// Other important re-exports would follow a similar pattern, for example:
-// pub use global_settings::{GlobalSettingsService, GlobalSettingsError, GlobalSettingKey, GlobalSettingValue};
-// pub use notifications::{NotificationService, Notification, NotificationLevel, NotificationError};
-// pub use ai_interaction_service::{AIInteractionService, UserQuery, AIResponse, AIInteractionError, AIInteractionEvent};
 
-// It's good practice to only re-export the parts of the domain that are meant to be public.
-// If some modules are internal to novade-domain, they shouldn't be re-exported here.
+    // --- Persistence Providers Initialization ---
+    let fs_settings_provider = Arc::new(
+        global_settings::FilesystemSettingsProvider::new(core_config_service.clone(), domain_config_path.join("global_settings.toml").to_string_lossy().into_owned())
+    );
+    let fs_workspace_config_provider = Arc::new(
+        workspaces::config::FilesystemConfigProvider::new(core_config_service.clone(), domain_config_path.join("workspaces.toml").to_string_lossy().into_owned())
+    );
+    // Use data_path for consents as it might be more user-specific and less "config"
+    let fs_consent_provider = Arc::new(
+        user_centric_services::ai_interaction::FilesystemAIConsentProvider::new(core_config_service.clone(), &domain_data_path.to_string_lossy(), current_user_id.clone())
+    );
+    let fs_profile_provider = Arc::new(
+        user_centric_services::ai_interaction::FilesystemAIModelProfileProvider::new(core_config_service.clone(), domain_config_path.join("ai_model_profiles.json").to_string_lossy().into_owned())
+    );
+    let fs_rules_provider = Arc::new(
+        notifications_rules::FilesystemNotificationRulesProvider::new(core_config_service.clone(), domain_config_path.join("notification_rules.json").to_string_lossy().into_owned())
+    );
 
-// Example for a specific service if its trait and default impl are commonly used:
-// pub use crate::some_service_module::{SomeServiceTrait, DefaultSomeServiceImpl};
+    // --- Services Initialization ---
+    let settings_service = Arc::new(
+        global_settings::DefaultGlobalSettingsService::new(fs_settings_provider, capacity)
+    );
+    settings_service.load_settings().await?;
+    tracing::info!("GlobalSettingsService initialized and settings loaded.");
 
-// Ensure all re-exported types that use other re-exported types are consistent.
-// E.g. if Workspace uses WindowIdentifier, both should be accessible.
-// The `pub use module_name::*` pattern can be broad; specific re-exports are often better for a controlled API.
-// For this pass, I'm re-exporting key service traits, their default implementations if common,
-// primary data DTOs, and errors.
-// The structure above is a more complete example of what a lib.rs might look like.
-// The previous content `pub mod workspaces;` was far too minimal.
-// Based on the errors in `novade-domain/src/workspaces/config/provider.rs`, it needs access to `novade_core::CoreError`.
-// This file (`novade-domain/src/lib.rs`) doesn't directly help with that, that's a dependency in `novade-domain/Cargo.toml`
-// and correct `use` statements in the `provider.rs` file itself.
-// The purpose of *this* file is to define the public API of the `novade-domain` crate.
-// The critical part for the current error is making `ConfigServiceAsync` available.
-// And ensuring other modules like `power_management` are declared if `power_mcp_server` needs them.
-// `power_mcp_server` will need `DefaultPowerManagementService`, etc.
-// So, declaring `pub mod power_management;` and re-exporting its contents is vital.
+    let initial_theming_config = settings_service.get_setting(&SettingPath::AppearanceRoot)
+        .ok()
+        .and_then(|json_val| serde_json::from_value::<global_settings::types::AppearanceSettings>(json_val).ok())
+        .map_or_else(|| {
+                tracing::warn!("Could not derive initial ThemingConfiguration from global settings (AppearanceRoot not found or parse error), using default ThemingConfiguration.");
+                ThemingConfiguration::default()
+            }, 
+            |appearance_settings| {
+                tracing::info!("Deriving initial ThemingConfiguration from AppearanceSettings. Active theme: '{}'", appearance_settings.active_theme_name);
+                ThemingConfiguration {
+                    selected_theme_id: ThemeIdentifier::new(appearance_settings.active_theme_name),
+                    // TODO: Map color_scheme and accent_color if they exist in AppearanceSettings and are compatible
+                    preferred_color_scheme: Default::default(), // Placeholder
+                    selected_accent_color: None, // Placeholder
+                    custom_user_token_overrides: None,
+                }
+            }
+        );
+         
+    let default_theme_paths = || vec![
+        PathBuf::from("/usr/share/novade/themes"), 
+        user_config_dir.join(DOMAIN_CONFIG_BASE_PATH).join("themes")
+    ];
+    let default_token_paths = || vec![
+        PathBuf::from("/usr/share/novade/tokens"), 
+        user_config_dir.join(DOMAIN_CONFIG_BASE_PATH).join("tokens")
+    ];
+
+    let theming_engine = Arc::new(
+        theming::ThemingEngine::new(
+            initial_theming_config,
+            theme_load_paths_override.unwrap_or_else(default_theme_paths),
+            token_load_paths_override.unwrap_or_else(default_token_paths),
+            core_config_service.clone(),
+            capacity
+        ).await?
+    );
+    tracing::info!("ThemingEngine initialized.");
+
+    let workspace_manager = Arc::new(
+        workspaces::DefaultWorkspaceManager::new(fs_workspace_config_provider, capacity, true)
+    );
+    workspace_manager.load_or_initialize_workspaces().await?;
+    tracing::info!("WorkspaceManager initialized.");
+
+    let window_management_policy_service = Arc::new(
+        window_management_policy::DefaultWindowManagementPolicyService::new(settings_service.clone())
+    );
+    tracing::info!("WindowManagementPolicyService initialized.");
+
+    let ai_interaction_service = Arc::new(
+        user_centric_services::ai_interaction::DefaultAIInteractionLogicService::new(
+            fs_consent_provider, fs_profile_provider, current_user_id.clone(), capacity
+        ).await?
+    );
+    tracing::info!("AIInteractionLogicService initialized.");
+
+    let notification_rules_engine = Arc::new(
+        notifications_rules::DefaultNotificationRulesEngine::new(fs_rules_provider, settings_service.clone()).await?
+    );
+    tracing::info!("NotificationRulesEngine initialized.");
+
+    let notification_service = Arc::new(
+        user_centric_services::notifications_core::DefaultNotificationService::new(
+            notification_rules_engine.clone(), settings_service.clone(), capacity
+        ).await?
+    );
+    tracing::info!("NotificationService initialized.");
+
+    tracing::info!("NovaDE Domain Layer Initialized Successfully.");
+    Ok(DomainServices {
+        settings_service, theming_engine, workspace_manager, window_management_policy_service,
+        ai_interaction_service, notification_rules_engine, notification_service,
+    })
+}

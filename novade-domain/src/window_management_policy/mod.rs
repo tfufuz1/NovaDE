@@ -1,23 +1,12 @@
-// Declare submodules
+// Main module for window management policy definitions.
+
 pub mod types;
 pub mod errors;
-pub mod service;
+pub mod service; // For the WindowManagementPolicyService trait and its impl
 
-// Re-export main public types for easier access
-pub use self::types::{
-    TilingMode,
-    NewWindowPlacementStrategy,
-    GapSettings,
-    WindowSnappingPolicy,
-    WindowLayoutInfo,
-    WorkspaceWindowLayout,
-    WindowPolicyOverrides, // New
-    FocusPolicy, // New
-    FocusStealingPreventionLevel, // New
-    WindowGroupingPolicy, // New
-};
-pub use self::errors::WindowPolicyError;
-pub use self::service::{
-    WindowManagementPolicyService,
-    DefaultWindowManagementPolicyService,
-};
+// Re-exports for easier access by consumers of the crate.
+// These will be populated as the types and service trait are defined.
+// Example:
+pub use types::{TilingMode, GapSettings, WorkspaceWindowLayout, WindowPolicyOverrides, FocusPolicy, NewWindowPlacementStrategy, WindowSnappingPolicy, WindowGroupingPolicy, FocusStealingPreventionLevel, WindowLayoutInfo};
+pub use errors::WindowPolicyError;
+pub use service::{WindowManagementPolicyService, DefaultWindowManagementPolicyService}; // Updated

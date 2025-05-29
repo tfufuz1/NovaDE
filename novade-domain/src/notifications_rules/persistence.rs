@@ -1,23 +1,28 @@
-use std::sync::Arc;
 use async_trait::async_trait;
-use log::{debug, info, warn, error};
-use crate::ports::config_service::ConfigServiceAsync; // Corrected path
-use novade_core::CoreError; // Corrected path
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tracing::{debug, error, warn};
+
+use novade_core::config::ConfigServiceAsync;
+use novade_core::errors::CoreError;
 
 use super::types::NotificationRuleSet;
 use super::errors::NotificationRulesError;
 use super::persistence_iface::NotificationRulesProvider;
 
+// --- FilesystemNotificationRulesProvider ---
+
+#[derive(Debug)]
 pub struct FilesystemNotificationRulesProvider {
-    pub config_service: Arc<dyn ConfigServiceAsync>,
-    pub rules_config_key: String, // e.g., "notifications/rules.toml"
+    config_service: Arc<dyn ConfigServiceAsync>,
+    config_key: String,
 }
 
 impl FilesystemNotificationRulesProvider {
-    pub fn new(config_service: Arc<dyn ConfigServiceAsync>, rules_config_key: String) -> Self {
+    pub fn new(config_service: Arc<dyn ConfigServiceAsync>, config_key: String) -> Self {
         Self {
             config_service,
-            rules_config_key,
+            config_key,
         }
     }
 }
@@ -25,57 +30,55 @@ impl FilesystemNotificationRulesProvider {
 #[async_trait]
 impl NotificationRulesProvider for FilesystemNotificationRulesProvider {
     async fn load_rules(&self) -> Result<NotificationRuleSet, NotificationRulesError> {
-        debug!("Loading notification rules from key '{}'", self.rules_config_key);
-        match self.config_service.read_config_file_string(&self.rules_config_key).await {
-            Ok(toml_string) => {
-                toml::from_str(&toml_string).map_err(|e| {
-                    error!("Failed to deserialize TOML notification rules from key '{}': {}", self.rules_config_key, e);
-                    NotificationRulesError::InternalError(format!("Rule deserialization failed: {}", e))
-                })
+        debug!("Loading notification rules from key: {}", self.config_key);
+        match self.config_service.read_config_file_string(&self.config_key).await {
+            Ok(content) => {
+                debug!("Successfully read rules file content for key: {}", self.config_key);
+                let rules: NotificationRuleSet = serde_json::from_str(&content).map_err(|e| {
+                    warn!("Failed to deserialize notification rules from key '{}': {}", self.config_key, e);
+                    NotificationRulesError::RuleParsingError {
+                        details: format!("Failed to parse JSON content for rules from key '{}': {}", self.config_key, e),
+                        source: Some(e),
+                    }
+                })?;
+                
+                // Further validation of individual rules (e.g., regex compilation) could be added here
+                // or be the responsibility of the rules engine after loading.
+                // For now, successfully parsing the structure is the main goal of this provider.
+                debug!("Notification rules deserialized. Rule count: {}", rules.len());
+                Ok(rules)
             }
-            Err(core_error) => {
-                if core_error.is_not_found_error() { // Assuming CoreError has this method
-                    info!("Notification rules file (key '{}') not found. Returning empty rule set.", self.rules_config_key);
-                    Ok(Vec::new())
+            Err(e) => {
+                if e.is_not_found() {
+                    debug!("Notification rules file not found for key '{}'. Returning empty rule set.", self.config_key);
+                    Ok(Vec::new()) // Empty rule set if no file
                 } else {
-                    error!("CoreError loading notification rules (key '{}'): {}", self.rules_config_key, core_error);
-                    Err(NotificationRulesError::RulePersistenceError(core_error))
+                    error!("Failed to read notification rules file for key '{}': {}", self.config_key, e);
+                    Err(NotificationRulesError::RulePersistenceError(e))
                 }
             }
         }
     }
 
     async fn save_rules(&self, rules: &NotificationRuleSet) -> Result<(), NotificationRulesError> {
-        debug!("Saving {} notification rules to key '{}'", rules.len(), self.rules_config_key);
-        let toml_string = toml::to_string_pretty(rules).map_err(|e| {
-            error!("Failed to serialize notification rules to TOML for key '{}': {}", self.rules_config_key, e);
-            NotificationRulesError::InternalError(format!("Rule serialization failed: {}", e))
+        debug!("Saving {} notification rules to key: {}", rules.len(), self.config_key);
+        let serialized_content = serde_json::to_string_pretty(rules).map_err(|e| {
+            error!("Failed to serialize notification rules for key '{}': {}", self.config_key, e);
+            // Using RuleParsingError for serialization errors as per prompt's error structure.
+            // A dedicated SerializationError variant in NotificationRulesError might be cleaner.
+            NotificationRulesError::RuleParsingError { 
+                details: format!("Failed to serialize rules to JSON for key '{}': {}", self.config_key, e),
+                source: Some(e),
+            }
         })?;
 
-        self.config_service.write_config_file_string(&self.rules_config_key, toml_string).await
-            .map_err(NotificationRulesError::RulePersistenceError)?;
-        info!("Notification rules saved successfully to key '{}'", self.rules_config_key);
+        self.config_service.write_config_file_string(&self.config_key, &serialized_content).await
+            .map_err(|e| {
+                error!("Failed to write notification rules file to key '{}': {}", self.config_key, e);
+                NotificationRulesError::RulePersistenceError(e)
+            })?;
+        debug!("Notification rules saved successfully to key: {}", self.config_key);
         Ok(())
-    }
-}
-
-
-// Mock for CoreError's is_not_found_error for compilation.
-#[cfg(test)]
-mod core_error_mock_for_rules_persistence {
-    use std::fmt;
-    use thiserror::Error;
-
-    #[derive(Error, Debug, Clone)]
-    pub enum CoreErrorType { NotFound, IoError, Other(String) }
-
-    #[derive(Error, Debug, Clone)]
-    pub struct CoreError { pub error_type: CoreErrorType, message: String }
-
-    impl fmt::Display for CoreError { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "CoreError ({:?}): {}", self.error_type, self.message) } }
-    impl CoreError {
-        pub fn new(error_type: CoreErrorType, message: String) -> Self { Self { error_type, message } }
-        pub fn is_not_found_error(&self) -> bool { matches!(self.error_type, CoreErrorType::NotFound) }
     }
 }
 
@@ -83,115 +86,124 @@ mod core_error_mock_for_rules_persistence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::notifications_rules::types::{NotificationRule, RuleCondition, RuleAction}; // Corrected path
-    use crate::notifications_rules::persistence::core_error_mock_for_rules_persistence::{CoreError as MockCoreError, CoreErrorType as MockCoreErrorType}; // Corrected path
-    // ConfigServiceAsync should now be imported via crate::ports or crate::
-    use crate::ports::config_service::ConfigServiceAsync; // Corrected path
-    use std::collections::HashMap;
-    use tokio::sync::RwLock; // Ensure RwLock is in scope
+    use novade_core::config::MockConfigServiceAsync;
+    use crate::notifications_rules::types::{NotificationRule, RuleCondition, RuleAction, SimpleRuleCondition, RuleConditionField, RuleConditionOperator, RuleConditionValue};
+    use uuid::Uuid;
+    use std::io;
 
-    #[derive(Default)]
-    struct MockConfigService {
-        files: Arc<RwLock<HashMap<String, String>>>,
-        force_read_error_type: Option<MockCoreErrorType>,
-        force_write_error_type: Option<MockCoreErrorType>,
-    }
-    impl MockConfigService {
-        fn new() -> Self { Default::default() }
-        async fn set_file_content(&self, key: &str, content: String) { self.files.write().await.insert(key.to_string(), content); }
-        #[allow(dead_code)] fn set_read_error_type(&mut self, error_type: Option<MockCoreErrorType>) { self.force_read_error_type = error_type; }
-        #[allow(dead_code)] fn set_write_error_type(&mut self, error_type: Option<MockCoreErrorType>) { self.force_write_error_type = error_type; }
+    fn new_mock_arc_config_service() -> Arc<MockConfigServiceAsync> {
+        Arc::new(MockConfigServiceAsync::new())
     }
 
-    #[async_trait]
-    impl crate::ports::config_service::ConfigServiceAsync for MockConfigService { // Corrected trait path
-        async fn read_config_file_string(&self, key: &str) -> Result<String, novade_core::CoreError> { // Corrected error type
-            if let Some(ref err_type) = self.force_read_error_type {
-                 let core_err = match err_type {
-                    MockCoreErrorType::NotFound => novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]}),
-                    MockCoreErrorType::IoError => novade_core::CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("mock io error for {}", key))),
-                    MockCoreErrorType::Other(s) => novade_core::CoreError::Internal(s.clone()),
-                };
-                return Err(core_err);
-            }
-            match self.files.read().await.get(key) {
-                Some(content) => Ok(content.clone()),
-                None => Err(novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]})),
-            }
+    fn create_test_rule(name: &str) -> NotificationRule {
+        NotificationRule {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            condition: RuleCondition::Simple(SimpleRuleCondition {
+                field: RuleConditionField::ApplicationName,
+                operator: RuleConditionOperator::Is,
+                value: RuleConditionValue::String("TestApp".to_string()),
+            }),
+            actions: vec![RuleAction::SuppressNotification],
+            is_enabled: true,
+            priority: 0,
         }
-        async fn write_config_file_string(&self, key: &str, content: String) -> Result<(), novade_core::CoreError> { // Corrected error type
-            if let Some(ref err_type) = self.force_write_error_type {
-                let core_err = match err_type {
-                    MockCoreErrorType::NotFound => novade_core::CoreError::Config(novade_core::ConfigError::NotFound{locations: vec![key.into()]}),
-                    MockCoreErrorType::IoError => novade_core::CoreError::Io(std::io::Error::new(std::io::ErrorKind::Other, format!("mock io error for {}", key))),
-                    MockCoreErrorType::Other(s) => novade_core::CoreError::Internal(s.clone()),
-                };
-                return Err(core_err);
-            }
-            self.files.write().await.insert(key.to_string(), content);
-            Ok(())
-        }
-        async fn read_file_to_string(&self, _path: &std::path::Path) -> Result<String, novade_core::CoreError> { unimplemented!() } // Corrected error type
-        async fn list_files_in_dir(&self, _dir_path: &std::path::Path, _extension: Option<&str>) -> Result<Vec<std::path::PathBuf>, novade_core::CoreError> { unimplemented!() } // Corrected error type
-        // Corrected return type to match trait definition in ports/config_service.rs
-        async fn get_config_dir(&self) -> Result<std::path::PathBuf, novade_core::CoreError> { unimplemented!() } 
-        async fn get_data_dir(&self) -> Result<std::path::PathBuf, novade_core::CoreError> { unimplemented!() }
     }
 
     #[tokio::test]
-    async fn test_load_rules_file_not_found() {
-        let mock_config_service = Arc::new(MockConfigService::new());
-        let provider = FilesystemNotificationRulesProvider::new(mock_config_service, "test_rules.toml".to_string());
-        let rules = provider.load_rules().await.unwrap();
-        assert!(rules.is_empty());
-    }
+    async fn test_load_rules_success() {
+        let mut mock_config_service = MockConfigServiceAsync::new();
+        let rules = vec![create_test_rule("Rule1")];
+        let rules_json = serde_json::to_string_pretty(&rules).unwrap();
 
-    #[tokio::test]
-    async fn test_save_and_load_rules() {
-        let mock_config_service = Arc::new(MockConfigService::new());
-        let provider = FilesystemNotificationRulesProvider::new(mock_config_service.clone(), "test_rules.toml".to_string());
-        
-        let rules_to_save = vec![
-            NotificationRule { name: "Rule1".to_string(), ..Default::default() },
-            NotificationRule { name: "Rule2".to_string(), actions: vec![RuleAction::SuppressNotification], ..Default::default() },
-        ];
+        mock_config_service.expect_read_config_file_string()
+            .withf(|key| key == "test_rules.json")
+            .times(1)
+            .returning(move |_| Ok(rules_json.clone()));
 
-        provider.save_rules(&rules_to_save).await.unwrap();
-
+        let provider = FilesystemNotificationRulesProvider::new(Arc::new(mock_config_service), "test_rules.json".to_string());
         let loaded_rules = provider.load_rules().await.unwrap();
-        assert_eq!(loaded_rules.len(), 2);
+        assert_eq!(loaded_rules.len(), 1);
         assert_eq!(loaded_rules[0].name, "Rule1");
-        assert_eq!(loaded_rules[1].name, "Rule2");
     }
-    
-    #[tokio::test]
-    async fn test_load_rules_deserialization_error() {
-        let mock_config_service = Arc::new(MockConfigService::new());
-        mock_config_service.set_file_content("bad_rules.toml", "this is not valid toml {}{".to_string()).await;
-        let provider = FilesystemNotificationRulesProvider::new(mock_config_service, "bad_rules.toml".to_string());
-        
-        let result = provider.load_rules().await;
-        assert!(result.is_err());
-        match result.err().unwrap() {
-            NotificationRulesError::InternalError(msg) => assert!(msg.contains("Rule deserialization failed")),
-            _ => panic!("Unexpected error type"),
-        }
-    }
-    
-    #[tokio::test]
-    async fn test_load_rules_config_service_read_error() {
-        let mut mock_service_inner = MockConfigService::new();
-        mock_service_inner.set_read_error_type(Some(MockCoreErrorType::IoError));
-        let mock_config_service = Arc::new(mock_service_inner);
-        let provider = FilesystemNotificationRulesProvider::new(mock_config_service, "error_rules.toml".to_string());
 
+    #[tokio::test]
+    async fn test_load_rules_not_found_returns_empty() {
+        let mut mock_config_service = MockConfigServiceAsync::new();
+        let not_found_error = CoreError::IoError(
+            "Simulated file not found".to_string(), 
+            Some(Arc::new(io::Error::new(io::ErrorKind::NotFound, "not found")))
+        );
+
+        mock_config_service.expect_read_config_file_string()
+            .times(1)
+            .returning(move |_| Err(not_found_error.clone()));
+
+        let provider = FilesystemNotificationRulesProvider::new(Arc::new(mock_config_service), "non_existent_rules.json".to_string());
+        let loaded_rules = provider.load_rules().await.unwrap();
+        assert!(loaded_rules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_rules_corrupted_content() {
+        let mut mock_config_service = MockConfigServiceAsync::new();
+        let corrupted_json = "this is not valid json {{{{";
+
+        mock_config_service.expect_read_config_file_string()
+            .times(1)
+            .returning(move |_| Ok(corrupted_json.to_string()));
+
+        let provider = FilesystemNotificationRulesProvider::new(Arc::new(mock_config_service), "corrupted_rules.json".to_string());
         let result = provider.load_rules().await;
-        assert!(result.is_err());
-        match result.err().unwrap() {
-            NotificationRulesError::RulePersistenceError(core_err) => {
-                assert!(core_err.to_string().contains("Forced read error"));
-            }
-            _ => panic!("Unexpected error type"),
-        }
+        assert!(matches!(result, Err(NotificationRulesError::RuleParsingError { .. })));
+    }
+    
+    #[tokio::test]
+    async fn test_load_rules_other_read_error() {
+        let mut mock_config_service = MockConfigServiceAsync::new();
+        let generic_io_error = CoreError::IoError(
+            "Simulated generic IO error".to_string(), 
+            Some(Arc::new(io::Error::new(io::ErrorKind::Other, "other error")))
+        );
+        mock_config_service.expect_read_config_file_string()
+            .times(1)
+            .returning(move |_| Err(generic_io_error.clone()));
+
+        let provider = FilesystemNotificationRulesProvider::new(Arc::new(mock_config_service), "error_rules.json".to_string());
+        let result = provider.load_rules().await;
+        assert!(matches!(result, Err(NotificationRulesError::RulePersistenceError(_))));
+    }
+
+    #[tokio::test]
+    async fn test_save_rules_success() {
+        let mut mock_config_service = MockConfigServiceAsync::new();
+        let rules = vec![create_test_rule("RuleToSave")];
+        let expected_rules_json = serde_json::to_string_pretty(&rules).unwrap();
+        
+        mock_config_service.expect_write_config_file_string()
+            .withf(move |key, content| {
+                key == "test_save_rules.json" && content == expected_rules_json
+            })
+            .times(1)
+            .returning(|_, _| Ok(()));
+
+        let provider = FilesystemNotificationRulesProvider::new(Arc::new(mock_config_service), "test_save_rules.json".to_string());
+        let result = provider.save_rules(&rules).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_save_rules_write_error() {
+        let mut mock_config_service = MockConfigServiceAsync::new();
+        let rules = vec![create_test_rule("RuleSaveFail")];
+        let write_error = CoreError::IoError("Simulated write error".to_string(), None);
+
+        mock_config_service.expect_write_config_file_string()
+            .times(1)
+            .returning(move |_, _| Err(write_error.clone()));
+            
+        let provider = FilesystemNotificationRulesProvider::new(Arc::new(mock_config_service), "write_fail_rules.json".to_string());
+        let result = provider.save_rules(&rules).await;
+        assert!(matches!(result, Err(NotificationRulesError::RulePersistenceError(_))));
     }
 }

@@ -1,51 +1,17 @@
 use std::collections::HashMap;
-use crate::workspaces::core::{Workspace, WorkspaceId, WindowIdentifier};
-pub use self::errors::WindowAssignmentError;
+use crate::workspaces::core::{WorkspaceId, WindowIdentifier, Workspace};
+use super::errors::WindowAssignmentError; // From crate::workspaces::assignment::errors
 
-pub mod errors;
-
-/// Assigns a window to a target workspace.
-///
-/// # Arguments
-/// * `workspaces` - A mutable hashmap of all available workspaces.
-/// * `target_workspace_id` - The ID of the workspace to assign the window to.
-/// * `window_id` - The identifier of the window to assign.
-/// * `ensure_unique_assignment` - If true, removes the window from any other workspace it might be in.
-///
-/// # Returns
-/// * `Ok(Option<WorkspaceId>)` - `Some(old_workspace_id)` if the window was moved from another workspace, `None` otherwise.
-///
-/// # Errors
-/// * `WindowAssignmentError::WorkspaceNotFound` - If the `target_workspace_id` does not exist.
 pub fn assign_window_to_workspace(
     workspaces: &mut HashMap<WorkspaceId, Workspace>,
     target_workspace_id: WorkspaceId,
     window_id: &WindowIdentifier,
     ensure_unique_assignment: bool,
-) -> Result<Option<WorkspaceId>, WindowAssignmentError> {
-    let mut old_workspace_id: Option<WorkspaceId> = None;
-
+) -> Result<(), WindowAssignmentError> {
     if ensure_unique_assignment {
-        // Find and remove the window from any other workspace
-        let mut current_owner_id: Option<WorkspaceId> = None;
-        for (id, ws) in workspaces.iter() {
-            if ws.window_ids().contains(window_id) {
-                current_owner_id = Some(*id);
-                break;
-            }
-        }
-
-        if let Some(owner_id) = current_owner_id {
-            if owner_id != target_workspace_id {
-                if let Some(owner_ws) = workspaces.get_mut(&owner_id) {
-                    owner_ws.remove_window_id(window_id);
-                    old_workspace_id = Some(owner_id);
-                }
-            } else {
-                // Already in the target workspace, no actual move needed, but not an error.
-                // It's effectively already uniquely assigned to the target.
-                // We can return Ok(None) as no "move" from another workspace occurred.
-                return Ok(None);
+        for (ws_id, ws) in workspaces.iter_mut() {
+            if *ws_id != target_workspace_id {
+                ws.remove_window_id(window_id);
             }
         }
     }
@@ -54,31 +20,15 @@ pub fn assign_window_to_workspace(
         .get_mut(&target_workspace_id)
         .ok_or(WindowAssignmentError::WorkspaceNotFound(target_workspace_id))?;
 
-    if target_workspace.add_window_id(window_id.clone()) {
-        // Window was newly added (not already present in target)
-        Ok(old_workspace_id) // Return Some(old_id) if moved, None if it was only added
-    } else {
-        // Window was already in the target workspace.
-        // If ensure_unique_assignment was true and it was moved from another workspace, old_workspace_id would be Some.
-        // If it was already in target and ensure_unique was true, we returned early.
-        // If ensure_unique was false and it was already in target, old_workspace_id is None.
-        Ok(old_workspace_id)
-    }
+    target_workspace.add_window_id(window_id.clone());
+    // Ignoring boolean return of add_window_id as per function signature.
+    // If we needed to signal if it was newly added vs already present, error variant or Ok(bool) would be needed.
+    // WindowAlreadyAssigned error could be returned here if add_window_id returned false AND that's an error condition.
+    // For now, adding an already present window is idempotent and not an error.
+
+    Ok(())
 }
 
-/// Removes a window from a source workspace.
-///
-/// # Arguments
-/// * `workspaces` - A mutable hashmap of all available workspaces.
-/// * `source_workspace_id` - The ID of the workspace to remove the window from.
-/// * `window_id` - The identifier of the window to remove.
-///
-/// # Returns
-/// * `Ok(true)` if the window was successfully removed.
-/// * `Ok(false)` if the window was not found in the specified workspace.
-///
-/// # Errors
-/// * `WindowAssignmentError::WorkspaceNotFound` - If the `source_workspace_id` does not exist.
 pub fn remove_window_from_workspace(
     workspaces: &mut HashMap<WorkspaceId, Workspace>,
     source_workspace_id: WorkspaceId,
@@ -87,115 +37,296 @@ pub fn remove_window_from_workspace(
     let source_workspace = workspaces
         .get_mut(&source_workspace_id)
         .ok_or(WindowAssignmentError::WorkspaceNotFound(source_workspace_id))?;
-
+    
     Ok(source_workspace.remove_window_id(window_id))
 }
 
-/// Finds the workspace that currently contains the given window.
-///
-/// # Arguments
-/// * `workspaces` - A hashmap of all available workspaces.
-/// * `window_id` - The identifier of the window to find.
-///
-/// # Returns
-/// * `Some(WorkspaceId)` if the window is found in one ofthe workspaces.
-/// * `None` if the window is not found in any workspace.
+pub fn move_window_to_workspace(
+    workspaces: &mut HashMap<WorkspaceId, Workspace>,
+    source_workspace_id: WorkspaceId,
+    target_workspace_id: WorkspaceId,
+    window_id: &WindowIdentifier,
+) -> Result<(), WindowAssignmentError> {
+    if source_workspace_id == target_workspace_id {
+        return Err(WindowAssignmentError::CannotMoveToSameWorkspace {
+            workspace_id: source_workspace_id,
+            window_id: window_id.clone(),
+        });
+    }
+
+    // Ensure target workspace exists before attempting any move logic
+    if !workspaces.contains_key(&target_workspace_id) {
+        return Err(WindowAssignmentError::TargetWorkspaceNotFound(target_workspace_id));
+    }
+    
+    // Get source workspace and remove window
+    let source_workspace = workspaces
+        .get_mut(&source_workspace_id)
+        .ok_or(WindowAssignmentError::SourceWorkspaceNotFound(source_workspace_id))?;
+
+    if !source_workspace.remove_window_id(window_id) {
+        return Err(WindowAssignmentError::WindowNotOnSourceWorkspace {
+            workspace_id: source_workspace_id,
+            window_id: window_id.clone(),
+        });
+    }
+
+    // This unwrap is safe because we checked contains_key earlier.
+    let target_workspace = workspaces.get_mut(&target_workspace_id).unwrap();
+    target_workspace.add_window_id(window_id.clone());
+
+    Ok(())
+}
+
 pub fn find_workspace_for_window(
     workspaces: &HashMap<WorkspaceId, Workspace>,
     window_id: &WindowIdentifier,
 ) -> Option<WorkspaceId> {
-    for (id, workspace) in workspaces {
+    for workspace in workspaces.values() {
         if workspace.window_ids().contains(window_id) {
-            return Some(*id);
+            return Some(workspace.id());
         }
     }
     None
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workspaces::core::{Workspace, WindowIdentifier};
-    use std::collections::HashMap;
+    use crate::workspaces::core::Workspace;
+    use uuid::Uuid;
 
     fn create_test_workspace(name: &str) -> Workspace {
         Workspace::new(name.to_string(), None, None, None).unwrap()
     }
 
     #[test]
-    fn assign_window_success_no_unique_ensure() {
-        let mut ws1 = create_test_workspace("WS1");
+    fn test_assign_window_to_workspace_basic() {
+        let mut workspaces = HashMap::new();
+        let ws1 = create_test_workspace("WS1");
         let ws1_id = ws1.id();
-        let mut workspaces = HashMap::from([(ws1_id, ws1)]);
-        let win_id = WindowIdentifier::new("win1".to_string()).unwrap();
+        workspaces.insert(ws1_id, ws1);
 
+        let win_id = WindowIdentifier::from("win1");
+        
         let result = assign_window_to_workspace(&mut workspaces, ws1_id, &win_id, false);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None); // Not moved from another
         assert!(workspaces.get(&ws1_id).unwrap().window_ids().contains(&win_id));
     }
 
     #[test]
-    fn assign_window_success_with_unique_ensure_no_prior_assignment() {
-        let mut ws1 = create_test_workspace("WS1");
-        let ws1_id = ws1.id();
-        let mut workspaces = HashMap::from([(ws1_id, ws1)]);
-        let win_id = WindowIdentifier::new("win1".to_string()).unwrap();
+    fn test_assign_window_to_non_existent_workspace() {
+        let mut workspaces = HashMap::new();
+        let non_existent_ws_id = Uuid::new_v4();
+        let win_id = WindowIdentifier::from("win1");
 
-        let result = assign_window_to_workspace(&mut workspaces, ws1_id, &win_id, true);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None); // Not moved
-        assert!(workspaces.get(&ws1_id).unwrap().window_ids().contains(&win_id));
+        let result = assign_window_to_workspace(&mut workspaces, non_existent_ws_id, &win_id, false);
+        assert!(matches!(result, Err(WindowAssignmentError::WorkspaceNotFound(id)) if id == non_existent_ws_id));
     }
 
     #[test]
-    fn assign_window_success_with_unique_ensure_moves_window() {
+    fn test_assign_window_ensure_unique_assignment() {
+        let mut workspaces = HashMap::new();
         let mut ws1 = create_test_workspace("WS1");
         let ws1_id = ws1.id();
         let mut ws2 = create_test_workspace("WS2");
         let ws2_id = ws2.id();
-        let win_id = WindowIdentifier::new("win1".to_string()).unwrap();
 
-        // Pre-assign to ws1
-        ws1.add_window_id(win_id.clone());
-        let mut workspaces = HashMap::from([(ws1_id, ws1), (ws2_id, ws2)]);
+        let win_id = WindowIdentifier::from("win1");
+        ws1.add_window_id(win_id.clone()); 
 
-        // Assign to ws2 with ensure_unique_assignment
+        workspaces.insert(ws1_id, ws1);
+        workspaces.insert(ws2_id, ws2);
+        
         let result = assign_window_to_workspace(&mut workspaces, ws2_id, &win_id, true);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), Some(ws1_id)); // Moved from ws1
-
+        
         assert!(!workspaces.get(&ws1_id).unwrap().window_ids().contains(&win_id), "Window should be removed from ws1");
         assert!(workspaces.get(&ws2_id).unwrap().window_ids().contains(&win_id), "Window should be added to ws2");
     }
     
     #[test]
-    fn assign_window_to_same_workspace_with_unique_ensure() {
+    fn test_assign_window_no_unique_assignment() {
+        let mut workspaces = HashMap::new();
         let mut ws1 = create_test_workspace("WS1");
         let ws1_id = ws1.id();
-        let win_id = WindowIdentifier::new("win1".to_string()).unwrap();
-        ws1.add_window_id(win_id.clone());
-        let mut workspaces = HashMap::from([(ws1_id, ws1)]);
+        let ws2 = create_test_workspace("WS2");
+        let ws2_id = ws2.id();
 
-        // Try to assign to the same workspace ws1 with ensure_unique
-        let result = assign_window_to_workspace(&mut workspaces, ws1_id, &win_id, true);
+        let win_id = WindowIdentifier::from("win1");
+        ws1.add_window_id(win_id.clone()); 
+
+        workspaces.insert(ws1_id, ws1);
+        workspaces.insert(ws2_id, ws2);
+        
+        let result = assign_window_to_workspace(&mut workspaces, ws2_id, &win_id, false);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), None); // No actual move occurred
-        assert!(workspaces.get(&ws1_id).unwrap().window_ids().contains(&win_id));
+        
+        assert!(workspaces.get(&ws1_id).unwrap().window_ids().contains(&win_id), "Window should still be in ws1");
+        assert!(workspaces.get(&ws2_id).unwrap().window_ids().contains(&win_id), "Window should be added to ws2");
+    }
+
+    #[test]
+    fn test_assign_window_already_present_in_target() {
+        let mut workspaces = HashMap::new();
+        let mut ws1 = create_test_workspace("WS1");
+        let ws1_id = ws1.id();
+        let win_id = WindowIdentifier::from("win1");
+        ws1.add_window_id(win_id.clone());
+        workspaces.insert(ws1_id, ws1);
+
+        let result = assign_window_to_workspace(&mut workspaces, ws1_id, &win_id, false);
+        assert!(result.is_ok());
         assert_eq!(workspaces.get(&ws1_id).unwrap().window_ids().len(), 1);
     }
 
+    #[test]
+    fn test_remove_window_from_workspace_existing() {
+        let mut workspaces = HashMap::new();
+        let mut ws1 = create_test_workspace("WS1");
+        let ws1_id = ws1.id();
+        let win_id = WindowIdentifier::from("win1");
+        ws1.add_window_id(win_id.clone());
+        workspaces.insert(ws1_id, ws1);
+
+        let result = remove_window_from_workspace(&mut workspaces, ws1_id, &win_id);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), true); 
+        assert!(!workspaces.get(&ws1_id).unwrap().window_ids().contains(&win_id));
+    }
 
     #[test]
-    fn assign_window_to_non_existent_workspace() {
+    fn test_remove_window_from_workspace_non_existing_window() {
         let mut workspaces = HashMap::new();
-        let win_id = WindowIdentifier::new("win1".to_string()).unwrap();
-        let non_existent_ws_id = WorkspaceId::new_v4();
-
-        let result = assign_window_to_workspace(&mut workspaces, non_existent_ws_id, &win_id, false);
-        assert!(matches!(result, Err(WindowAssignmentError::WorkspaceNotFound(id)) if id == non_existent_ws_id));
+        let ws1 = create_test_workspace("WS1");
+        let ws1_id = ws1.id();
+        workspaces.insert(ws1_id, ws1);
         
-        let result_unique = assign_window_to_workspace(&mut workspaces, non_existent_ws_id, &win_id, true);
-        assert!(matches!(result_unique, Err(WindowAssignmentError::WorkspaceNotFound(id)) if id == non_existent_ws_id));
+        let win_id = WindowIdentifier::from("win1");
+        let result = remove_window_from_workspace(&mut workspaces, ws1_id, &win_id);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), false); 
+    }
+
+    #[test]
+    fn test_remove_window_from_non_existent_workspace() {
+        let mut workspaces = HashMap::new();
+        let non_existent_ws_id = Uuid::new_v4();
+        let win_id = WindowIdentifier::from("win1");
+
+        let result = remove_window_from_workspace(&mut workspaces, non_existent_ws_id, &win_id);
+        assert!(matches!(result, Err(WindowAssignmentError::WorkspaceNotFound(id)) if id == non_existent_ws_id));
+    }
+
+    #[test]
+    fn test_move_window_to_workspace_successful() {
+        let mut workspaces = HashMap::new();
+        let mut ws1 = create_test_workspace("WS1");
+        let ws1_id = ws1.id();
+        let ws2 = create_test_workspace("WS2");
+        let ws2_id = ws2.id();
+        let win_id = WindowIdentifier::from("win1");
+        ws1.add_window_id(win_id.clone());
+        workspaces.insert(ws1_id, ws1);
+        workspaces.insert(ws2_id, ws2);
+
+        let result = move_window_to_workspace(&mut workspaces, ws1_id, ws2_id, &win_id);
+        assert!(result.is_ok());
+        assert!(!workspaces.get(&ws1_id).unwrap().window_ids().contains(&win_id));
+        assert!(workspaces.get(&ws2_id).unwrap().window_ids().contains(&win_id));
+    }
+
+    #[test]
+    fn test_move_window_to_same_workspace() {
+        let mut workspaces = HashMap::new();
+        let mut ws1 = create_test_workspace("WS1"); // Mutable because add_window_id takes &mut self
+        let ws1_id = ws1.id();
+        let win_id = WindowIdentifier::from("win1");
+        ws1.add_window_id(win_id.clone()); // Add window so it exists
+        workspaces.insert(ws1_id, ws1);
+
+
+        let result = move_window_to_workspace(&mut workspaces, ws1_id, ws1_id, &win_id);
+        assert!(matches!(result, Err(WindowAssignmentError::CannotMoveToSameWorkspace { workspace_id, .. }) if workspace_id == ws1_id));
+    }
+    
+    #[test]
+    fn test_move_window_source_workspace_not_found() {
+        let mut workspaces = HashMap::new();
+        let ws1_id = Uuid::new_v4();
+        let ws2 = create_test_workspace("WS2");
+        let ws2_id = ws2.id();
+        workspaces.insert(ws2_id, ws2);
+        let win_id = WindowIdentifier::from("win1");
+
+        let result = move_window_to_workspace(&mut workspaces, ws1_id, ws2_id, &win_id);
+        assert!(matches!(result, Err(WindowAssignmentError::SourceWorkspaceNotFound(id)) if id == ws1_id));
+    }
+
+    #[test]
+    fn test_move_window_target_workspace_not_found() {
+        let mut workspaces = HashMap::new();
+        let mut ws1 = create_test_workspace("WS1");
+        let ws1_id = ws1.id();
+        let win_id = WindowIdentifier::from("win1");
+        ws1.add_window_id(win_id.clone());
+        workspaces.insert(ws1_id, ws1);
+        let ws2_id = Uuid::new_v4();
+
+        let result = move_window_to_workspace(&mut workspaces, ws1_id, ws2_id, &win_id);
+        assert!(matches!(result, Err(WindowAssignmentError::TargetWorkspaceNotFound(id)) if id == ws2_id));
+        assert!(workspaces.get(&ws1_id).unwrap().window_ids().contains(&win_id)); // Should not be removed
+    }
+
+    #[test]
+    fn test_move_window_not_on_source_workspace() {
+        let mut workspaces = HashMap::new();
+        let ws1 = create_test_workspace("WS1");
+        let ws1_id = ws1.id();
+        let ws2 = create_test_workspace("WS2");
+        let ws2_id = ws2.id();
+        let win_id = WindowIdentifier::from("win1");
+        workspaces.insert(ws1_id, ws1);
+        workspaces.insert(ws2_id, ws2);
+
+        let result = move_window_to_workspace(&mut workspaces, ws1_id, ws2_id, &win_id);
+        assert!(matches!(result, Err(WindowAssignmentError::WindowNotOnSourceWorkspace { workspace_id, .. }) if workspace_id == ws1_id));
+    }
+
+    #[test]
+    fn test_find_workspace_for_window_found() {
+        let mut workspaces = HashMap::new();
+        let mut ws1 = create_test_workspace("WS1");
+        let ws1_id = ws1.id();
+        let ws2 = create_test_workspace("WS2");
+        let ws2_id = ws2.id();
+        let win_id1 = WindowIdentifier::from("win1");
+        let win_id2 = WindowIdentifier::from("win2");
+        ws1.add_window_id(win_id1.clone());
+        ws2.add_window_id(win_id2.clone());
+        workspaces.insert(ws1_id, ws1);
+        workspaces.insert(ws2_id, ws2);
+
+        assert_eq!(find_workspace_for_window(&workspaces, &win_id1), Some(ws1_id));
+        assert_eq!(find_workspace_for_window(&workspaces, &win_id2), Some(ws2_id));
+    }
+
+    #[test]
+    fn test_find_workspace_for_window_not_found() {
+        let mut workspaces = HashMap::new();
+        let ws1 = create_test_workspace("WS1");
+        let ws1_id = ws1.id();
+        workspaces.insert(ws1_id, ws1);
+        let win_id_unassigned = WindowIdentifier::from("win_unassigned");
+
+        assert_eq!(find_workspace_for_window(&workspaces, &win_id_unassigned), None);
+    }
+
+    #[test]
+    fn test_find_workspace_for_window_empty_map() {
+        let workspaces = HashMap::new();
+        let win_id = WindowIdentifier::from("win1");
+        assert_eq!(find_workspace_for_window(&workspaces, &win_id), None);
     }
 }
