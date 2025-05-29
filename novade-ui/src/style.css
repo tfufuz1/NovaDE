@@ -1,0 +1,23 @@
+window {
+    background-color: #2c3e50; /* A dark slate blue */
+}
+
+label {
+    color: #ecf0f1; /* A light silver */
+    font-size: 16px;
+}
+
+/* Style for the flap content for better visibility */
+.flap-content-box {
+    background-color: #34495e; /* Slightly lighter slate blue */
+    border-radius: 5px;
+    margin: 10px;
+    padding: 10px;
+}
+
+.sidebar-box {
+    background-color: #283747; /* Even darker blue for sidebar */
+    border-radius: 5px;
+    margin: 10px;
+    padding: 10px;
+}
