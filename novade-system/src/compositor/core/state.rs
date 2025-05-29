@@ -1,5 +1,5 @@
 use smithay::{
-    delegate_compositor, delegate_damage_tracker, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_decoration, // Added delegate_dmabuf and delegate_xdg_decoration
+    delegate_compositor, delegate_damage_tracker, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_decoration, delegate_screencopy, // Added screencopy
     reexports::{
         calloop::{EventLoop, LoopHandle},
         wayland_server::{
@@ -20,8 +20,9 @@ use smithay::{
         output::OutputManagerState,
         shm::{BufferHandler, ShmHandler, ShmState},
         shell::xdg::XdgShellState,
-        shell::xdg::decoration::XdgDecorationState, // Added XdgDecorationState
-        dmabuf::DmabufState, // Added DmabufState
+        shell::xdg::decoration::XdgDecorationState, 
+        screencopy::ScreencopyState, // Added ScreencopyState
+        dmabuf::DmabufState, 
     },
     backend::renderer::utils::buffer_dimensions,
     desktop::{Space, DamageTrackerState},
@@ -38,6 +39,8 @@ use crate::compositor::core::ClientCompositorData;
 use crate::compositor::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
 
 mod input_handlers; // Added module declaration
+mod output_handlers; // Added module declaration for output handlers
+mod screencopy_handlers; // Added module declaration for screencopy handlers
 
 // Vulkan specific imports
 use crate::compositor::renderer::vulkan::{
@@ -86,7 +89,8 @@ pub struct NovadeCompositorState {
     pub pointer_location: Point<f64, Logical>,
     pub current_cursor_status: Arc<StdMutex<CursorImageStatus>>,
     pub dmabuf_state: DmabufState,
-    pub xdg_decoration_state: XdgDecorationState, // Added xdg_decoration_state
+    pub xdg_decoration_state: XdgDecorationState,
+    pub screencopy_state: ScreencopyState, // Added screencopy_state
 
     // Vulkan Renderer Components
     pub vulkan_instance: Option<Arc<VulkanInstance>>,
@@ -130,7 +134,8 @@ impl NovadeCompositorState {
         let seat_name = "seat0".to_string();
         let seat = seat_state.new_wl_seat(&display_handle, seat_name.clone(), Some(tracing::Span::current()));
         let dmabuf_state = DmabufState::new();
-        let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle); // Initialize XdgDecorationState
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
+        let screencopy_state = ScreencopyState::new::<Self>(&display_handle, None); // Initialize ScreencopyState
 
         Self {
             display_handle,
@@ -152,7 +157,8 @@ impl NovadeCompositorState {
             pointer_location: (0.0, 0.0).into(),
             current_cursor_status: Arc::new(StdMutex::new(CursorImageStatus::Default)),
             dmabuf_state,
-            xdg_decoration_state, // Add to struct instantiation
+            xdg_decoration_state,
+            screencopy_state, // Add to struct instantiation
             vulkan_instance,
             vulkan_physical_device_info,
             vulkan_logical_device,
@@ -504,5 +510,7 @@ delegate_seat!(NovadeCompositorState);
 delegate_xdg_shell!(NovadeCompositorState);
 // Delegate XdgDecorationHandler
 delegate_xdg_decoration!(NovadeCompositorState);
+// Delegate ScreencopyHandler
+delegate_screencopy!(NovadeCompositorState);
 // Delegate DamageTrackerHandler if NovadeCompositorState implements it
 delegate_damage_tracker!(NovadeCompositorState);

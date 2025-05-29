@@ -402,3 +402,157 @@ impl XdgDecorationHandler for NovadeCompositorState {
         toplevel.send_configure(); // Ensure a configure is sent.
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compositor::core::state::NovadeCompositorState;
+    use crate::compositor::xdg_shell::types::{ManagedWindow, WindowState, DomainWindowIdentifier, WindowManagerData, WindowLayer};
+    use smithay::reexports::wayland_server::{Display, DisplayHandle, Client, protocol::wl_surface::WlSurface, globals::GlobalData, UserData, backend::{ClientId, GlobalId}};
+    use smithay::reexports::calloop::EventLoop;
+    use smithay::utils::{Point, Size, Rectangle};
+    use smithay::wayland::shell::xdg::{ToplevelSurface, XdgShellHandler, XdgToplevelState, WindowSurface}; // Added WindowSurface
+    use std::sync::Arc;
+
+    // Minimal test client data
+    #[derive(Default, Clone)]
+    struct TestClientData { user_data: UserData }
+    impl smithay::reexports::wayland_server::backend::ClientData for TestClientData {
+        fn initialized(&self, _client_id: ClientId) {}
+        fn disconnected(&self, _client_id: ClientId, _reason: smithay::reexports::wayland_server::DisconnectReason) {}
+        fn data_map(&self) -> &UserData { &self.user_data }
+    }
+
+    // Helper to create a DisplayHandle and a Client for tests.
+    fn create_test_display_and_client() -> (DisplayHandle, Client) {
+        let mut display: Display<NovadeCompositorState> = Display::new().unwrap();
+        let dh = display.handle();
+        // Cast needed for Client::create_object as UserData trait bound is on NovadeCompositorState via ClientData on TestClientData.
+        // This is a bit of a workaround for testing.
+        let client = display.create_client(TestClientData::default());
+        (dh, client)
+    }
+    
+    // Helper to create a mock ToplevelSurface
+    fn mock_toplevel_surface_for_test(dh: &DisplayHandle, client: &Client) -> ToplevelSurface {
+        let surface = client.create_object::<WlSurface, _>(dh, 1, GlobalData).unwrap();
+        // Manually attach some data XdgShellState expects, like XdgVersion
+        surface.data_map().insert_if_missing_threadsafe(|| smithay::wayland::shell::xdg::XdgVersion::V6); // V6 or Stable
+        ToplevelSurface::from_wl_surface(surface, Default::default()).unwrap()
+    }
+
+    // Helper to create a minimal NovadeCompositorState for testing
+    fn create_minimal_test_state() -> (NovadeCompositorState, DisplayHandle) {
+        let mut event_loop: EventLoop<'static, NovadeCompositorState> = EventLoop::try_new().unwrap();
+        let display_handle = event_loop.handle().insert_source(
+            Display::<NovadeCompositorState>::new().unwrap(),
+            |_, _, _| {},
+        ).unwrap();
+        
+        // Initialize NovadeCompositorState with Nones or defaults for fields not directly used in these tests.
+        // The ::new method in state.rs is quite complex. We simplify for unit test focus.
+        let state = NovadeCompositorState {
+            display_handle: display_handle.clone(),
+            loop_handle: event_loop.handle(),
+            clock: smithay::utils::Clock::new(None).unwrap(),
+            compositor_state: smithay::wayland::compositor::CompositorState::new::<NovadeCompositorState>(&display_handle),
+            shm_state: smithay::wayland::shm::ShmState::new::<NovadeCompositorState>(&display_handle, vec![]),
+            output_manager_state: smithay::wayland::output::OutputManagerState::new_with_xdg_output::<NovadeCompositorState>(&display_handle),
+            gles_renderer: None, // Not used in these specific tests
+            xdg_shell_state: smithay::wayland::shell::xdg::XdgShellState::new::<NovadeCompositorState>(&display_handle),
+            space: smithay::desktop::Space::new(tracing::info_span!("test_space")),
+            windows: std::collections::HashMap::new(),
+            outputs: Vec::new(),
+            last_render_time: std::time::Instant::now(),
+            damage_tracker_state: smithay::desktop::DamageTrackerState::new(),
+            seat_state: smithay::input::SeatState::new(),
+            seat_name: "seat0".to_string(),
+            seat: smithay::input::Seat::new(event_loop.handle(), "seat0".into(), None), // Seat needs loop_handle
+            pointer_location: Point::from((0.0, 0.0)),
+            current_cursor_status: Arc::new(std::sync::Mutex::new(smithay::input::pointer::CursorImageStatus::Default)),
+            dmabuf_state: smithay::wayland::dmabuf::DmabufState::new(),
+            xdg_decoration_state: smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<NovadeCompositorState>(&display_handle),
+            screencopy_state: smithay::wayland::screencopy::ScreencopyState::new::<NovadeCompositorState>(&display_handle, None),
+            vulkan_instance: None,
+            vulkan_physical_device_info: None,
+            vulkan_logical_device: None,
+            vulkan_allocator: None,
+            vulkan_frame_renderer: None,
+            active_renderer_type: crate::compositor::core::state::ActiveRendererType::Gles, // Default
+            mcp_connection_service: None,
+            cpu_usage_service: None,
+        };
+        (state, display_handle)
+    }
+
+    #[test]
+    fn test_set_maximized_request_updates_state() {
+        let (mut state, dh) = create_minimal_test_state();
+        let client = state.display_handle.create_client(TestClientData::default());
+        let toplevel_surface = mock_toplevel_surface_for_test(&dh, &client);
+        
+        let domain_id = DomainWindowIdentifier::new_v4();
+        let initial_pos = Point::from((10, 20));
+        let initial_size = Size::from((300, 400));
+
+        // Create ManagedWindow and set its initial state
+        let managed_window_arc = Arc::new(ManagedWindow::new_toplevel(toplevel_surface.clone(), domain_id));
+        {
+            let mut win_state = managed_window_arc.state.write().unwrap();
+            win_state.position = initial_pos;
+            win_state.size = initial_size;
+            win_state.maximized = false;
+        }
+        state.windows.insert(domain_id, managed_window_arc.clone());
+
+        // Call the handler
+        state.set_maximized_request(&toplevel_surface);
+
+        // Assertions
+        let win_state_guard = managed_window_arc.state.read().unwrap();
+        assert_eq!(win_state_guard.maximized, true);
+        assert_eq!(win_state_guard.saved_pre_action_geometry, Some(Rectangle::from_loc_and_size(initial_pos, initial_size)));
+        
+        // Check pending state on ToplevelSurface (simplified check)
+        // This requires ToplevelSurface to allow reading its pending state, which might not be straightforward.
+        // For this test, we assume the call to `with_pending_state` inside the handler correctly sets it.
+        // A more robust test would involve a client acking the configure and checking the current state.
+        // Here, we can at least verify that `send_configure` was implicitly called if the API allows checking that,
+        // or trust that setting pending state + send_configure works as expected in Smithay.
+        // Smithay's ToplevelSurface testing often involves a full client/server interaction.
+    }
+
+    #[test]
+    fn test_unset_maximized_request_updates_state() {
+        let (mut state, dh) = create_minimal_test_state();
+        let client = state.display_handle.create_client(TestClientData::default());
+        let toplevel_surface = mock_toplevel_surface_for_test(&dh, &client);
+
+        let domain_id = DomainWindowIdentifier::new_v4();
+        let saved_pos = Point::from((50, 60));
+        let saved_size = Size::from((640, 480));
+        let saved_geometry = Rectangle::from_loc_and_size(saved_pos, saved_size);
+
+        let managed_window_arc = Arc::new(ManagedWindow::new_toplevel(toplevel_surface.clone(), domain_id));
+        {
+            let mut win_state = managed_window_arc.state.write().unwrap();
+            win_state.maximized = true;
+            win_state.saved_pre_action_geometry = Some(saved_geometry);
+            // Set current size to something different to ensure restoration happens
+            win_state.size = Size::from((1920, 1080)); 
+            win_state.position = Point::from((0,0));
+        }
+        state.windows.insert(domain_id, managed_window_arc.clone());
+
+        state.unset_maximized_request(&toplevel_surface);
+
+        let win_state_guard = managed_window_arc.state.read().unwrap();
+        assert_eq!(win_state_guard.maximized, false);
+        assert!(win_state_guard.saved_pre_action_geometry.is_none());
+        assert_eq!(win_state_guard.size, saved_size); // Check if size was restored
+        assert_eq!(win_state_guard.position, saved_pos); // Check if position was restored
+
+        // Similar to set_maximized, checking ToplevelSurface pending state is complex here.
+        // We trust that `with_pending_state` was called correctly.
+    }
+}

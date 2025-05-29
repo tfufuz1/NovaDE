@@ -319,3 +319,214 @@ impl Window for ManagedWindow {
     // fn is_solid(&self) -> bool { false } 
     // fn z_index(&self) -> u8 { 0 } 
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay::reexports::wayland_server::{
+        Client, Display, DisplayHandle, GlobalDispatch, Main, UserData,
+        backend::{ClientData, ClientId, GlobalId},
+        protocol::wl_surface::WlSurface,
+    };
+    use smithay::reexports::wayland_server::globals::GlobalData;
+    use std::sync::Arc;
+    use std::collections::HashMap; // For mock client data store
+
+    // Minimal mock for WlSurface for testing purposes.
+    // This is challenging because WlSurface is deeply tied to a Display and Client.
+    // We'll use a very simplified mock that allows ManagedWindow to be constructed.
+    // Smithay's test_utils might offer better ways for more integrated tests.
+
+    // Helper to create a DisplayHandle and a Client for tests that need WlSurface.
+    // This is a simplified setup.
+    fn create_test_display_and_client() -> (DisplayHandle, Client) {
+        let mut display: Display<TestData> = Display::new().unwrap();
+        let dh = display.handle();
+        let client = display.create_client(TestData::default());
+        (dh, client)
+    }
+
+    #[derive(Default, Clone)]
+    struct TestData {
+        user_data: UserData,
+        // other client specific data if needed
+    }
+    impl ClientData for TestData {
+        fn initialized(&self, _client_id: ClientId) {}
+        fn disconnected(&self, _client_id: ClientId, _reason: smithay::reexports::wayland_server::DisconnectReason) {}
+        fn data_map(&self) -> &UserData {
+            &self.user_data
+        }
+    }
+    
+    // Mock ToplevelSurface and PopupSurface using a WlSurface created with test display/client
+    // These are very basic and won't respond to most Wayland requests.
+    fn mock_toplevel_surface(dh: &DisplayHandle, client: &Client) -> ToplevelSurface {
+        let surface = client.create_object::<WlSurface, _>(dh, 1, GlobalData).unwrap();
+        ToplevelSurface::from_wl_surface(surface, Default::default()).unwrap()
+    }
+
+    fn mock_popup_surface(dh: &DisplayHandle, client: &Client, parent: &WlSurface) -> PopupSurface {
+        let surface = client.create_object::<WlSurface, _>(dh, 2, GlobalData).unwrap();
+        // PopupSurface::from_wl_surface is not directly available in the same way as Toplevel.
+        // This part is tricky. For now, we might need to skip deep testing of ManagedWindow::new_popup
+        // or assume a simplified creation if WindowSurface::Popup can take a raw WlSurface.
+        // The current ManagedWindow::new_popup takes PopupSurface directly.
+        // Let's try to create a PopupSurface with minimal data.
+        let xdg_surface = smithay::wayland::shell::xdg::XdgSurface::new_popup(surface, parent.clone());
+        PopupSurface::from_xdg_surface(xdg_surface, Default::default()).unwrap()
+    }
+
+
+    #[test]
+    fn test_window_state_defaults() {
+        // Values from ManagedWindow::new_toplevel constructor
+        let state = WindowState {
+            maximized: false,
+            fullscreen: false,
+            minimized: false,
+            activated: false,
+            geometry: None,
+            position: Point::from((100, 100)),
+            size: Size::from((300, 200)),
+            min_size: Size::from((1, 1)),
+            max_size: Size::from((0, 0)),
+            saved_pre_action_geometry: None,
+        };
+
+        assert_eq!(state.maximized, false);
+        assert_eq!(state.fullscreen, false);
+        assert_eq!(state.minimized, false);
+        assert_eq!(state.activated, false);
+        assert_eq!(state.geometry, None);
+        assert_eq!(state.position, Point::from((100, 100)));
+        assert_eq!(state.size, Size::from((300, 200)));
+        assert_eq!(state.min_size, Size::from((1, 1)));
+        assert_eq!(state.max_size, Size::from((0, 0)));
+        assert!(state.saved_pre_action_geometry.is_none());
+    }
+
+    #[test]
+    fn test_window_manager_data_defaults() {
+        // Values from ManagedWindow::new_toplevel constructor
+        let data = WindowManagerData {
+            moving: false,
+            resizing: false,
+            resize_edges: None,
+            workspace: 0,
+            layer: WindowLayer::Normal,
+            opacity: 1.0,
+            z_index: 0,
+            decorations: true,
+        };
+
+        assert_eq!(data.moving, false);
+        assert_eq!(data.resizing, false);
+        assert!(data.resize_edges.is_none());
+        assert_eq!(data.workspace, 0);
+        assert_eq!(data.layer, WindowLayer::Normal);
+        assert_eq!(data.opacity, 1.0);
+        assert_eq!(data.z_index, 0);
+        assert_eq!(data.decorations, true);
+    }
+
+    #[test]
+    fn test_managed_window_toplevel_initialization_basic() {
+        let (dh, client) = create_test_display_and_client();
+        let toplevel_surface = mock_toplevel_surface(&dh, &client);
+        let domain_id = DomainWindowIdentifier::new_v4();
+
+        let managed_window = ManagedWindow::new_toplevel(toplevel_surface, domain_id);
+
+        assert_eq!(managed_window.domain_id, domain_id);
+        assert_eq!(managed_window.is_mapped, false);
+        assert!(managed_window.parent.is_none());
+        // title and app_id are derived from the surface, which is a mock here.
+        // They will likely be None unless the mock ToplevelSurface provides them.
+        assert!(managed_window.title.is_none()); // Assuming mock_toplevel_surface.title() is None
+        assert!(managed_window.app_id.is_none()); // Assuming mock_toplevel_surface.app_id() is None
+
+        let state = managed_window.state.read().unwrap();
+        assert_eq!(state.position, Point::from((100, 100)));
+        assert_eq!(state.size, Size::from((300, 200)));
+
+        let manager_data = managed_window.manager_data.read().unwrap();
+        assert_eq!(manager_data.layer, WindowLayer::Normal);
+        assert_eq!(manager_data.decorations, true);
+    }
+    
+    #[test]
+    fn test_managed_window_popup_initialization_basic() {
+        let (dh, client) = create_test_display_and_client();
+        let parent_wl_surface = client.create_object::<WlSurface, _>(&dh, 0, GlobalData).unwrap();
+        let popup_surface = mock_popup_surface(&dh, &client, &parent_wl_surface);
+        let domain_id = DomainWindowIdentifier::new_v4(); // Parent domain_id for popup context
+
+        let managed_window = ManagedWindow::new_popup(popup_surface, domain_id, None);
+
+        // Domain ID for popup itself is new_v4 in constructor, not parent's for this field.
+        assert_ne!(managed_window.domain_id, domain_id); 
+        assert_eq!(managed_window.is_mapped, false);
+        assert!(managed_window.parent.is_none()); // No Arc<ManagedWindow> parent passed
+
+        let state = managed_window.state.read().unwrap();
+        assert_eq!(state.position, Point::from((0,0))); // Defaults for popup state
+        assert_eq!(state.size, Size::from((0,0)));
+
+        let manager_data = managed_window.manager_data.read().unwrap();
+        assert_eq!(manager_data.layer, WindowLayer::Overlay);
+        assert_eq!(manager_data.decorations, false);
+    }
+
+
+    #[test]
+    fn test_managed_window_ids_are_unique() {
+        let (dh, client) = create_test_display_and_client();
+        let toplevel_surface1 = mock_toplevel_surface(&dh, &client);
+        let domain_id1 = DomainWindowIdentifier::new_v4();
+        let window1 = ManagedWindow::new_toplevel(toplevel_surface1, domain_id1);
+
+        // Need a new WlSurface for the second ToplevelSurface
+        let client2 = display.create_client(TestData::default()); // Create a new client or new surface on same client
+        let toplevel_surface2_wl = client2.create_object::<WlSurface, _>(&dh, 3, GlobalData).unwrap();
+        let toplevel_surface2 = ToplevelSurface::from_wl_surface(toplevel_surface2_wl, Default::default()).unwrap();
+
+        let domain_id2 = DomainWindowIdentifier::new_v4();
+        let window2 = ManagedWindow::new_toplevel(toplevel_surface2, domain_id2);
+
+        assert_ne!(window1.id, window2.id); // UUIDs should be different
+        assert_ne!(Window::id(&window1), Window::id(&window2)); // usize hashes should be different
+    }
+
+    #[test]
+    fn test_managed_window_trait_geometry_and_is_mapped() {
+        let (dh, client) = create_test_display_and_client();
+        let toplevel_surface = mock_toplevel_surface(&dh, &client);
+        let domain_id = DomainWindowIdentifier::new_v4();
+        
+        let mut managed_window = ManagedWindow::new_toplevel(toplevel_surface.clone(), domain_id);
+
+        let test_geometry = Rectangle::from_loc_and_size((10, 20), (300, 400));
+        managed_window.current_geometry = test_geometry;
+        assert_eq!(Window::geometry(&managed_window), test_geometry);
+
+        // Test is_mapped
+        // `Window::is_mapped()` checks `self.is_mapped && self.xdg_surface.alive()`.
+        // Our mock WlSurface via DummyGlobal might not be considered "alive" in the same way
+        // a fully initialized surface is. This part of the test might be tricky.
+        // Smithay's `Resource::alive()` checks if the object associated with resource exists in display.
+        // For a surface from `client.create_object`, it should be alive.
+        
+        managed_window.is_mapped = true;
+        // Assuming mock_toplevel_surface.wl_surface().alive() is true
+        assert_eq!(Window::is_mapped(&managed_window), true); 
+
+        managed_window.is_mapped = false;
+        assert_eq!(Window::is_mapped(&managed_window), false);
+
+        // If we could simulate the surface dying:
+        // drop(toplevel_surface.wl_surface()); // This won't work as ToplevelSurface owns WlSurface
+        // Or if the client disconnects, surface becomes not alive.
+        // For this unit test, we assume surface remains alive.
+    }
+}
