@@ -3,3 +3,5 @@ pub use window_info_provider::{FocusedWindowDetails, SystemWindowInfoProvider, S
 
 pub mod dbus_menu_provider; // Assuming this was added from a previous task
 pub use dbus_menu_provider::{DBusMenuError, DBusMenuProvider, StubDBusMenuProvider}; // Assuming
+
+pub mod renderer;

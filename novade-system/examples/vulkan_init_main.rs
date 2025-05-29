@@ -1,18 +1,25 @@
-// main.rs
-use novade_vulkan_renderer::VulkanCoreContext; // Use the new central context
+// novade-system/examples/vulkan_init_main.rs
+
+// Updated use path for VulkanCoreContext
+use novade_system::renderer::vulkan::VulkanCoreContext;
+// If VulkanError variants were matched, this would be needed:
+// use novade_system::renderer::vulkan::error::VulkanError; 
 use std::error::Error; // For source()
 
 fn main() {
     // Initialize logger, e.g., env_logger. Set default log level to info if RUST_LOG is not set.
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Ensure RUST_LOG can be used, e.g., RUST_LOG=novade_system::renderer::vulkan=debug,info
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info,novade_system::renderer::vulkan=info")
+    ).init();
 
-    println!("Attempting to initialize NovaDE Vulkan Core Context...");
-    log::info!("Main: Attempting to initialize NovaDE Vulkan Core Context...");
+    println!("Attempting to initialize NovaDE Vulkan Core Context (from novade-system example)...");
+    log::info!("Main (vulkan_init_main): Attempting to initialize NovaDE Vulkan Core Context...");
 
     match VulkanCoreContext::new() {
         Ok(core_context) => {
             println!("\nNovaDE Vulkan Core Context initialized successfully!");
-            log::info!("Main: NovaDE Vulkan Core Context initialized successfully!");
+            log::info!("Main (vulkan_init_main): NovaDE Vulkan Core Context initialized successfully!");
 
             println!("  Instance API Version: {}", core_context.instance.api_version());
             log::debug!("  Instance API Version: {}", core_context.instance.api_version());
@@ -50,12 +57,14 @@ fn main() {
             
             // Further application logic would go here, using core_context
             println!("\nApplication would continue using the VulkanCoreContext.");
+            log::info!("Main (vulkan_init_main): Example finished successfully.");
 
         }
         Err(e) => {
+            // The error 'e' is of type novade_system::renderer::vulkan::error::VulkanError
             println!("\nError initializing Vulkan Core Context: {}", e);
-            log::error!("Main: Error initializing Vulkan Core Context: {}", e);
-            let mut current_err: Option<&dyn Error> = Some(&e);
+            log::error!("Main (vulkan_init_main): Error initializing Vulkan Core Context: {}", e);
+            let mut current_err: Option<&dyn Error> = Some(&e); // e is already a VulkanError
             let mut indent_level = 1;
             while let Some(source_err) = current_err.and_then(Error::source) {
                 let indent = "  ".repeat(indent_level);

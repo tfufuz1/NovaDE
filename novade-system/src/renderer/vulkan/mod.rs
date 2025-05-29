@@ -1,12 +1,19 @@
-// This is the library crate for the Vulkan renderer.
-pub mod error;
+// novade-system/src/renderer/vulkan/mod.rs
+// This is the main module for the Vulkan renderer logic.
 
-use crate::error::{Result, VulkanError};
+pub mod error; // Declares an error.rs file in the same directory (vulkan/error.rs)
+pub mod texture;
+pub mod frame_renderer;
+
+// Re-export key public types from this module
+pub use self::error::{Result, VulkanError}; // Use self::error for the submodule
+pub use self::texture::VulkanTexture;
+pub use self::frame_renderer::VulkanFrameRenderer;
 use log::{debug, error, info, warn};
 use std::collections::HashSet;
 use std::sync::Arc;
 use vulkano::instance::{Instance, InstanceCreateInfo, InstanceExtensions, ApplicationInfo};
-use vulkano::Version;
+use vulkano::Version; // Keep this for V1_3 etc.
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Features, Queue, QueueCreateInfo, QueueFlags};
 
@@ -25,6 +32,16 @@ impl QueueFamilyIndices {
         self.graphics_family.is_some() && self.present_family.is_some()
     }
 }
+
+// Helper functions are now part of this module.
+// They can be pub(crate) if only used by VulkanCoreContext::new within this crate,
+// or pub if intended for wider use (though VulkanCoreContext is the main public API).
+// For simplicity during refactoring, using `pub` and can be restricted later.
+
+// VulkanCoreContext and its constituents like QueueFamilyIndices are primary exports.
+// The individual init functions (create_instance, etc.) are kept pub for now,
+// allowing potential direct use or testing, but could be made pub(super) or pub(crate)
+// if VulkanCoreContext::new() becomes the sole entry point from outside this module.
 
 /// Creates a Vulkan instance.
 pub fn create_instance() -> Result<Arc<Instance>> {
@@ -233,7 +250,6 @@ pub fn create_logical_device(
     let mut unique_queue_families = HashSet::new();
     if let Some(idx) = queue_indices.graphics_family { unique_queue_families.insert(idx); }
     if let Some(idx) = queue_indices.present_family { unique_queue_families.insert(idx); }
-    // Add compute/transfer if they are Some and distinct, if needed for specific features
 
     let queue_create_infos: Vec<QueueCreateInfo> = unique_queue_families
         .iter()
@@ -251,8 +267,6 @@ pub fn create_logical_device(
         ..DeviceExtensions::empty()
     };
     if !physical_device.supported_extensions().contains(&required_extensions) {
-        // This check is a bit broad if required_extensions has many optional ones.
-        // For khr_swapchain, it's critical.
         if !physical_device.supported_extensions().khr_swapchain {
              error!("(Core) Required device extension VK_KHR_swapchain not supported.");
             return Err(VulkanError::MissingExtension("VK_KHR_swapchain not supported".to_string()));
@@ -289,9 +303,6 @@ pub struct VulkanCoreContext {
     pub queue_family_indices: QueueFamilyIndices,
     pub graphics_queue: Arc<Queue>,
     pub present_queue: Arc<Queue>,
-    // Optional queues can be added later:
-    // pub compute_queue: Option<Arc<Queue>>,
-    // pub transfer_queue: Option<Arc<Queue>>,
 }
 
 impl VulkanCoreContext {
@@ -299,11 +310,12 @@ impl VulkanCoreContext {
     pub fn new() -> Result<Self> {
         info!("Initializing NovaDE Vulkan Renderer Core Context...");
 
-        let instance = crate::create_instance()?;
-        let physical_device = crate::select_physical_device(Arc::clone(&instance))?; // Clone instance
-        let queue_family_indices = crate::find_queue_families(Arc::clone(&physical_device))?; // Clone physical_device
+        // Calls to helper functions are now direct as they are in the same module.
+        let instance = create_instance()?;
+        let physical_device = select_physical_device(Arc::clone(&instance))?;
+        let queue_family_indices = find_queue_families(Arc::clone(&physical_device))?;
         
-        let (device, queues_iter_raw) = crate::create_logical_device(Arc::clone(&physical_device), &queue_family_indices)?; // Clone physical_device
+        let (device, queues_iter_raw) = create_logical_device(Arc::clone(&physical_device), &queue_family_indices)?;
         let all_queues: Vec<Arc<Queue>> = queues_iter_raw.collect();
 
         let graphics_q_idx = queue_family_indices.graphics_family
@@ -327,11 +339,6 @@ impl VulkanCoreContext {
             if queue.queue_family_index() == present_q_idx && present_queue.is_none() {
                 present_queue = Some(queue.clone());
             }
-            // If both found, no need to iterate further, though collecting all is fine.
-            if graphics_queue.is_some() && present_queue.is_some() && graphics_q_idx == present_q_idx { 
-                // Special case: if graphics and present are same family, one loop might find both if we .clone() correctly
-                // However, the current loop structure is safer if they could be different queues from the same family index (not typical for Vulkano's current return)
-            }
         }
         
         let gq = graphics_queue.ok_or_else(|| {
@@ -352,7 +359,7 @@ impl VulkanCoreContext {
             instance,
             physical_device,
             device,
-            queue_family_indices: queue_family_indices.clone(), // Clone as we stored the original
+            queue_family_indices: queue_family_indices.clone(),
             graphics_queue: gq,
             present_queue: pq,
         })
@@ -362,10 +369,11 @@ impl VulkanCoreContext {
 #[cfg(test)]
 mod tests {
     use super::*; // Imports VulkanCoreContext, VulkanError, QueueFamilyIndices, etc.
-    use vulkano::instance::InstanceCreationError; // For specific error matching
-
-    // Helper to ensure logger is initialized once for all tests in this module
+                 // Also imports helper functions like create_instance if they are pub in super
+    use vulkano::instance::InstanceCreationError; 
+    use vulkano::Version; // Make sure Version is in scope for tests
     use std::sync::Once;
+
     static TEST_LOGGER_INIT: Once = Once::new();
 
     fn setup_test_logger() {
@@ -377,52 +385,41 @@ mod tests {
     #[test]
     fn test_vulkan_core_context_initialization() {
         setup_test_logger();
-        info!("Running test: test_vulkan_core_context_initialization");
+        info!("Running test: test_vulkan_core_context_initialization (within novade-system)");
 
         match VulkanCoreContext::new() {
             Ok(context) => {
                 info!("VulkanCoreContext::new() succeeded in test environment.");
-                // Basic assertions:
                 assert_eq!(context.instance.api_version(), Version::V1_3, "Instance API version mismatch.");
-                
-                // PhysicalDevice and Device are Arc'd, their existence implies a valid handle.
-                // We can also check their properties if needed, e.g., device name not being empty.
                 assert!(!context.physical_device.properties().device_name.is_empty(), "Physical device name should not be empty.");
-                
-                // Check if queue family indices were found
                 assert!(context.queue_family_indices.graphics_family.is_some(), "Graphics family index should be Some.");
                 assert!(context.queue_family_indices.present_family.is_some(), "Present family index should be Some.");
-
-                // Check that the retrieved queues match the identified family indices
                 assert_eq!(context.graphics_queue.queue_family_index(), context.queue_family_indices.graphics_family.unwrap(), "Graphics queue family index mismatch.");
                 assert_eq!(context.present_queue.queue_family_index(), context.queue_family_indices.present_family.unwrap(), "Present queue family index mismatch.");
-                
                 info!("test_vulkan_core_context_initialization: Assertions passed. Context seems valid.");
             }
             Err(VulkanError::NoSuitablePhysicalDevice) => {
-                warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - No suitable physical device found. Common in CI without a GPU.");
+                warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - No suitable physical device found.");
             }
             Err(VulkanError::VulkanoInstance(InstanceCreationError::InitializationFailed)) => {
-                warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - Vulkan instance initialization failed. Likely no Vulkan driver/ICD. Common in minimal environments.");
+                warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - Vulkan instance initialization failed (no driver/ICD).");
             }
             Err(VulkanError::VulkanoInstance(InstanceCreationError::LayerNotPresent(_))) => {
-                warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - A requested validation layer was not present. Check Vulkan SDK.");
+                warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - A requested validation layer was not present.");
             }
             Err(VulkanError::MissingExtension(ref ext_name)) 
                 if ext_name.contains("VK_KHR_wayland_surface instance extension not enabled") || 
                    ext_name.contains("VK_KHR_surface instance extension not enabled") => {
-                warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - Instance surface extension issue (Wayland/KHR_surface: {}). May indicate missing dev libraries or headless environment.", ext_name);
+                warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - Instance surface extension issue (Wayland/KHR_surface: {}).", ext_name);
             }
             Err(VulkanError::MissingExtension(ref ext_name)) if ext_name.contains("VK_KHR_swapchain not supported") => {
-                 warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - Device extension VK_KHR_swapchain not supported by the physical device. This device cannot be used for presentation.");
+                 warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - Device extension VK_KHR_swapchain not supported.");
             }
             Err(VulkanError::QueueFamilyIdentificationError(ref msg)) if msg.contains("Present family (Wayland compatible) missing") => {
-                 warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - Could not find a Wayland-compatible present queue. Necessary for Wayland display. Msg: {}", msg);
+                 warn!("test_vulkan_core_context_initialization: Skipped (passed with warning) - Could not find a Wayland-compatible present queue. Msg: {}", msg);
             }
             Err(e) => {
                 error!("test_vulkan_core_context_initialization: Failed with unexpected error: {:?}", e);
-                // To get a full backtrace if RUST_BACKTRACE=1 is set:
-                // panic!("VulkanCoreContext::new() failed with unexpected error: {:?}\nBacktrace: {:?}", e, std::backtrace::Backtrace::capture());
                 panic!("VulkanCoreContext::new() failed with unexpected error: {:?}", e);
             }
         }

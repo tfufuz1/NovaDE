@@ -47,5 +47,13 @@ wayland-client = "0.31"
 # This tracing entry is also a duplicate, removing it.
 # tracing = "0.1" 
 
+# Vulkan Renderer Dependencies
+vulkano = { version = "0.34.0", features = ["macros", "wayland"] }
+vulkano-shaders = "0.34.0"
+vk-mem = "0.3.2"
+bytemuck = "1.14.0" # For data alignment, used with Vulkan
+log = "0.4.20" # For Vulkano's internal logging, and potentially other crates
+env_logger = "0.10" # For examples and potentially some debug scenarios
+
 novade-core = { path = "../novade-core" } # Assuming these are local sibling crates
 novade-domain = { path = "../novade-domain" } # Adjust paths as necessary
