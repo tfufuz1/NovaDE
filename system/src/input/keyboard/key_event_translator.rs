@@ -4,7 +4,7 @@ use crate::input::keyboard::xkb_config::XkbKeyboardData; // For type reference
 use smithay::backend::input::{KeyState, KeyboardKeyEvent, LibinputInputBackend};
 use smithay::input::{keyboard::{FilterResult, KeyboardHandle}, Seat};
 use smithay::utils::{Serial, Clock}; // Clock for current time
-use xkbcommon::xkb; // For xkb::Keycode type
+use xkbcommon::xkb::{self, LedMask, LED_NAME_CAPS, LED_NAME_NUM, LED_NAME_SCROLL}; // For LED names and xkb::Keycode
 use std::time::Duration; // For timer
 use std::sync::{Arc, Mutex}; // For Arc<Mutex<XkbKeyboardData>>
 
@@ -59,6 +59,21 @@ pub fn handle_keyboard_key_event(
     // Notify Smithay's KeyboardHandle about the modifier update.
     // The KeyboardHandle will then send wl_keyboard.modifiers to the client if changed.
     keyboard_handle.modifiers(serial, current_smithay_mods.clone(), Some(tracing::Span::current()));
+
+    // --- LED State Update ---
+    let current_leds_mask = xkb_data_guard.state.leds();
+    if current_leds_mask != xkb_data_guard.active_leds {
+        xkb_data_guard.active_leds = current_leds_mask;
+        // Log which LEDs are active (optional, for debugging)
+        // let caps_on = current_leds_mask.contains(LED_NAME_CAPS);
+        // let num_on = current_leds_mask.contains(LED_NAME_NUM);
+        // let scroll_on = current_leds_mask.contains(LED_NAME_SCROLL);
+        // tracing::debug!("LED state changed: Caps={}, Num={}, Scroll={}", caps_on, num_on, scroll_on);
+        
+        keyboard_handle.update_led_state(current_leds_mask);
+        tracing::debug!("Keyboard LEDs updated for seat '{}'. Mask: {:?}", seat_name, current_leds_mask);
+    }
+    // --- End LED State Update ---
 
     // Let Smithay's KeyboardHandle process the key event.
     // It will use its own XKB state (derived from the keymap provided when keyboard capability was added)
