@@ -88,6 +88,41 @@ impl DmabufHandler for DesktopState {
         &mut self.dmabuf_state
     }
 
+    /// Handles the initial proposal of a DMABUF by a client for import.
+    ///
+    /// This function is called by Smithay as part of the `wl_drm` (or more generally,
+    /// `zwp_linux_dmabuf_v1`) protocol when a client requests to create a `wl_buffer`
+    /// from a DMABUF.
+    ///
+    /// # Role in DMABUF Protocol Flow
+    ///
+    /// 1.  Client calls `zwp_linux_dmabuf_v1.create_params` to get a `zwp_linux_buffer_params_v1` object.
+    /// 2.  Client adds DMABUF file descriptors, format, dimensions, modifiers, etc., to the params object.
+    /// 3.  Client calls `zwp_linux_buffer_params_v1.create_immed` (or `.create`) to request `wl_buffer` creation.
+    /// 4.  This `dmabuf_imported` callback is invoked on the compositor side.
+    ///
+    /// # Current Implementation
+    ///
+    /// This implementation immediately notifies the client of success by calling `notifier.successful()`.
+    /// This means the compositor acknowledges the parameters and is willing to *attempt* an import.
+    /// The *actual* import into the renderer (e.g., GLES2 creating an EGLImage) and validation
+    /// against renderer capabilities happens later, typically when the client attaches the
+    /// `wl_buffer` to a `wl_surface` and commits the surface (see `CompositorHandler::commit`).
+    ///
+    /// If the actual import fails during the commit phase, the buffer might be rejected at that point,
+    /// or rendering might fail for that surface.
+    ///
+    /// # Parameters
+    ///
+    /// - `_global`: Data associated with the `DmabufGlobal` itself (e.g., supported formats/modifiers
+    ///   advertised by the compositor). Currently unused in this specific logging logic but available.
+    /// - `notifier`: An [`ImportNotifier`] used to signal the client whether the DMABUF parameters
+    ///   are accepted (`.successful()`) or rejected (`.failed()`).
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: If the notification was sent successfully.
+    /// - `Err(std::io::Error)`: If sending the notification to the client failed.
     fn dmabuf_imported(
         &mut self,
         _global: &DmabufGlobalData, // Data associated with the DmabufGlobal itself
@@ -104,9 +139,11 @@ impl DmabufHandler for DesktopState {
         // - Store some metadata about the DMABUF if needed before it's committed.
         // - Defer the success notification until the renderer has actually tried to import it
         //   (though this makes the Wayland protocol handling more complex, often success is signaled here).
-        
-        tracing::info!(
-            "DMABUF import proposed by client (via ImportNotifier). Notifying success immediately. \
+        let client_id = notifier.client_id();
+        tracing::debug!(
+            client_info = ?client_id,
+            dmabuf_global_data = ?_global, // DmabufGlobalData has a Debug impl
+            "DMABUF import proposed by client. Notifying success immediately. \
             Actual import into renderer will occur on surface commit."
         );
 
