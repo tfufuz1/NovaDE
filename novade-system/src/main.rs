@@ -314,6 +314,12 @@ fn main() {
         if let Err(e) = desktop_state.display_handle.flush_clients() {
             tracing::warn!("Failed to flush clients post-render: {}", e);
         }
+
+        // Dispatch frame callbacks
+        let now_ns = desktop_state.clock.now();
+        let time_for_send_frames = std::time::Duration::from_nanos(now_ns);
+        desktop_state.space.send_frames(time_for_send_frames);
+        tracing::trace!("Dispatched frame callbacks via space.send_frames() at time (ns): {}", now_ns);
     }
     tracing::info!("NovaDE System shutting down.");
 }

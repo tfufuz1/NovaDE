@@ -1,5 +1,5 @@
 use smithay::{
-    delegate_compositor, delegate_damage_tracker, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell, // Added delegate_dmabuf
+    delegate_compositor, delegate_damage_tracker, delegate_dmabuf, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_decoration, // Added delegate_dmabuf and delegate_xdg_decoration
     reexports::{
         calloop::{EventLoop, LoopHandle},
         wayland_server::{
@@ -20,6 +20,7 @@ use smithay::{
         output::OutputManagerState,
         shm::{BufferHandler, ShmHandler, ShmState},
         shell::xdg::XdgShellState,
+        shell::xdg::decoration::XdgDecorationState, // Added XdgDecorationState
         dmabuf::DmabufState, // Added DmabufState
     },
     backend::renderer::utils::buffer_dimensions,
@@ -35,6 +36,8 @@ use std::{
 use crate::compositor::surface_management::{AttachedBufferInfo, SurfaceData}; 
 use crate::compositor::core::ClientCompositorData;
 use crate::compositor::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
+
+mod input_handlers; // Added module declaration
 
 // Vulkan specific imports
 use crate::compositor::renderer::vulkan::{
@@ -83,6 +86,7 @@ pub struct NovadeCompositorState {
     pub pointer_location: Point<f64, Logical>,
     pub current_cursor_status: Arc<StdMutex<CursorImageStatus>>,
     pub dmabuf_state: DmabufState,
+    pub xdg_decoration_state: XdgDecorationState, // Added xdg_decoration_state
 
     // Vulkan Renderer Components
     pub vulkan_instance: Option<Arc<VulkanInstance>>,
@@ -126,6 +130,7 @@ impl NovadeCompositorState {
         let seat_name = "seat0".to_string();
         let seat = seat_state.new_wl_seat(&display_handle, seat_name.clone(), Some(tracing::Span::current()));
         let dmabuf_state = DmabufState::new();
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle); // Initialize XdgDecorationState
 
         Self {
             display_handle,
@@ -147,6 +152,7 @@ impl NovadeCompositorState {
             pointer_location: (0.0, 0.0).into(),
             current_cursor_status: Arc::new(StdMutex::new(CursorImageStatus::Default)),
             dmabuf_state,
+            xdg_decoration_state, // Add to struct instantiation
             vulkan_instance,
             vulkan_physical_device_info,
             vulkan_logical_device,
@@ -177,8 +183,9 @@ impl CompositorHandler for NovadeCompositorState {
         let client_id = surface.client().expect("Surface must have a client.").id();
         tracing::info!(surface_id = ?surface.id(), ?client_id, "New WlSurface created");
 
+        let client_id_str = format!("{:?}", client_id);
         let surface_data = Arc::new(StdMutex::new(
-            crate::compositor::surface_management::SurfaceData::new(client_id),
+            crate::compositor::surface_management::SurfaceData::new(client_id_str),
         ));
         
         surface.data_map().insert_if_missing_threadsafe(move || surface_data);
@@ -495,5 +502,7 @@ delegate_output!(NovadeCompositorState);
 delegate_seat!(NovadeCompositorState);
 // Delegate XdgShellHandler if NovadeCompositorState implements it
 delegate_xdg_shell!(NovadeCompositorState);
+// Delegate XdgDecorationHandler
+delegate_xdg_decoration!(NovadeCompositorState);
 // Delegate DamageTrackerHandler if NovadeCompositorState implements it
 delegate_damage_tracker!(NovadeCompositorState);
