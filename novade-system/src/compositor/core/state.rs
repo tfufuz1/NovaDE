@@ -29,12 +29,22 @@ use smithay::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex as StdMutex}, // Renamed to StdMutex to avoid conflict with tokio::sync::Mutex
+    sync::{Arc, Mutex as StdMutex, Mutex}, // Added Mutex for VulkanFrameRenderer
     time::Instant,
 };
 use crate::compositor::surface_management::{AttachedBufferInfo, SurfaceData}; 
 use crate::compositor::core::ClientCompositorData;
 use crate::compositor::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
+
+// Vulkan specific imports
+use crate::compositor::renderer::vulkan::{
+    instance::VulkanInstance,
+    physical_device::PhysicalDeviceInfo,
+    logical_device::LogicalDevice,
+    allocator::Allocator, // Assuming this is the correct path for the Vulkan allocator
+    frame_renderer::FrameRenderer as VulkanFrameRenderer,
+};
+
 
 // --- Imports for MCP and CPU Usage Service ---
 use tokio::sync::Mutex as TokioMutex; // Using tokio's Mutex for async services
@@ -43,16 +53,24 @@ use novade_domain::cpu_usage_service::ICpuUsageService;
 // Consider if mcp_client_spawner also needs to be stored
 // use crate::mcp_client_service::IMCPClientService;
 
+/// Represents the active renderer type being used by the compositor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveRendererType {
+    /// GLES2 renderer is active.
+    Gles,
+    /// Vulkan renderer is active.
+    Vulkan,
+}
 
-// Main desktop state
-pub struct DesktopState {
+// Main compositor state
+pub struct NovadeCompositorState {
     pub display_handle: DisplayHandle,
     pub loop_handle: LoopHandle<'static, Self>,
     pub clock: Clock<u64>,
     pub compositor_state: CompositorState,
     pub shm_state: ShmState,
     pub output_manager_state: OutputManagerState,
-    pub renderer: Option<crate::compositor::renderers::gles2::renderer::Gles2Renderer>,
+    pub gles_renderer: Option<crate::compositor::renderers::gles2::renderer::Gles2Renderer>, // Renamed from renderer
     pub xdg_shell_state: XdgShellState,
     pub space: Space<ManagedWindow>,
     pub windows: HashMap<DomainWindowIdentifier, Arc<ManagedWindow>>,
@@ -63,8 +81,18 @@ pub struct DesktopState {
     pub seat_name: String,
     pub seat: Seat<Self>,
     pub pointer_location: Point<f64, Logical>,
-    pub current_cursor_status: Arc<StdMutex<CursorImageStatus>>, // Using StdMutex for smithay compatibility
+    pub current_cursor_status: Arc<StdMutex<CursorImageStatus>>,
     pub dmabuf_state: DmabufState,
+
+    // Vulkan Renderer Components
+    pub vulkan_instance: Option<Arc<VulkanInstance>>,
+    pub vulkan_physical_device_info: Option<Arc<PhysicalDeviceInfo>>,
+    pub vulkan_logical_device: Option<Arc<LogicalDevice>>,
+    pub vulkan_allocator: Option<Arc<Allocator>>, // Assuming crate::compositor::renderer::vulkan::allocator::Allocator
+    pub vulkan_frame_renderer: Option<Arc<Mutex<VulkanFrameRenderer>>>,
+    
+    /// Specifies which renderer is currently active.
+    pub active_renderer_type: ActiveRendererType,
 
     // --- Added for MCP and CPU Usage Service ---
     pub mcp_connection_service: Option<Arc<TokioMutex<MCPConnectionService>>>,
@@ -72,8 +100,19 @@ pub struct DesktopState {
     // pub mcp_client_spawner: Option<Arc<dyn IMCPClientService>>,
 }
 
-impl DesktopState {
-    pub fn new(event_loop: &mut EventLoop<'static, Self>, display_handle: DisplayHandle) -> Self {
+impl NovadeCompositorState {
+    #[allow(clippy::too_many_arguments)] // Constructor naturally has many arguments for state initialization
+    pub fn new(
+        event_loop: &mut EventLoop<'static, Self>,
+        display_handle: DisplayHandle,
+        gles_renderer: Option<crate::compositor::renderers::gles2::renderer::Gles2Renderer>,
+        vulkan_instance: Option<Arc<VulkanInstance>>,
+        vulkan_physical_device_info: Option<Arc<PhysicalDeviceInfo>>,
+        vulkan_logical_device: Option<Arc<LogicalDevice>>,
+        vulkan_allocator: Option<Arc<Allocator>>,
+        vulkan_frame_renderer: Option<Arc<Mutex<VulkanFrameRenderer>>>,
+        active_renderer_type: ActiveRendererType,
+    ) -> Self {
         let loop_handle = event_loop.handle();
         let clock = Clock::new(None).expect("Failed to create clock");
 
@@ -95,7 +134,7 @@ impl DesktopState {
             compositor_state,
             shm_state,
             output_manager_state,
-            renderer: None,
+            gles_renderer, // Now an Option passed in
             xdg_shell_state,
             space,
             windows: HashMap::new(),
@@ -108,6 +147,12 @@ impl DesktopState {
             pointer_location: (0.0, 0.0).into(),
             current_cursor_status: Arc::new(StdMutex::new(CursorImageStatus::Default)),
             dmabuf_state,
+            vulkan_instance,
+            vulkan_physical_device_info,
+            vulkan_logical_device,
+            vulkan_allocator,
+            vulkan_frame_renderer,
+            active_renderer_type,
             // --- Initialize new service fields ---
             mcp_connection_service: None,
             cpu_usage_service: None,
@@ -116,7 +161,7 @@ impl DesktopState {
     }
 }
 
-impl CompositorHandler for DesktopState {
+impl CompositorHandler for NovadeCompositorState {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
     }
@@ -232,56 +277,129 @@ impl CompositorHandler for DesktopState {
 
             if new_buffer_attached {
                 let buffer_to_texture = new_buffer_wl.unwrap();
-                if let Some(renderer) = self.renderer.as_mut() {
-                    // Attempt DMABUF import first
-                    if let Some(dmabuf_attributes) = self.dmabuf_state.get_dmabuf_attributes(buffer_to_texture) {
-                        let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
-                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting DMABUF import");
-                        match renderer.create_texture_from_dmabuf(&dmabuf_attributes) {
-                            Ok(new_texture) => {
-                                surface_data.texture_handle = Some(new_texture);
-                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created texture from DMABUF");
-                                surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
-                                    buffer: buffer_to_texture.clone(),
-                                    scale: current_surface_attributes.buffer_scale,
-                                    transform: current_surface_attributes.buffer_transform,
-                                    dimensions: (dmabuf_attributes.width(), dmabuf_attributes.height()).into(),
-                                });
+                let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
+
+                match self.active_renderer_type {
+                    ActiveRendererType::Gles => {
+                        if let Some(gles_renderer) = self.gles_renderer.as_mut() {
+                            if let Some(dmabuf_attributes) = self.dmabuf_state.get_dmabuf_attributes(buffer_to_texture) {
+                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting DMABUF import for surface (GLES)");
+                                match gles_renderer.create_texture_from_dmabuf(&dmabuf_attributes) {
+                                    Ok(new_texture) => {
+                                        surface_data.texture_handle = Some(new_texture);
+                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created GLES texture from DMABUF");
+                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
+                                            buffer: buffer_to_texture.clone(),
+                                            scale: current_surface_attributes.buffer_scale,
+                                            transform: current_surface_attributes.buffer_transform,
+                                            dimensions: (dmabuf_attributes.width(), dmabuf_attributes.height()).into(),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create GLES texture from DMABUF: {:?}", e);
+                                        surface_data.texture_handle = None;
+                                        surface_data.current_buffer_info = None;
+                                    }
+                                }
+                            } else {
+                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import (GLES)");
+                                match gles_renderer.create_texture_from_shm(buffer_to_texture) {
+                                    Ok(new_texture) => {
+                                        surface_data.texture_handle = Some(new_texture);
+                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created GLES texture from SHM");
+                                        let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
+                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
+                                            buffer: buffer_to_texture.clone(),
+                                            scale: current_surface_attributes.buffer_scale,
+                                            transform: current_surface_attributes.buffer_transform,
+                                            dimensions,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create GLES texture from SHM: {:?}", e);
+                                        surface_data.texture_handle = None;
+                                        surface_data.current_buffer_info = None;
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create texture from DMABUF: {:?}", e);
-                                surface_data.texture_handle = None;
-                                surface_data.current_buffer_info = None;
-                            }
-                        }
-                    } else {
-                        // Fallback to SHM import
-                        let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
-                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import");
-                        match renderer.create_texture_from_shm(buffer_to_texture) {
-                            Ok(new_texture) => {
-                                surface_data.texture_handle = Some(new_texture);
-                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created texture from SHM");
-                                let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
-                                surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
-                                    buffer: buffer_to_texture.clone(),
-                                    scale: current_surface_attributes.buffer_scale,
-                                    transform: current_surface_attributes.buffer_transform,
-                                    dimensions,
-                                });
-                            }
-                            Err(e) => {
-                                tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create texture from SHM: {:?}", e);
-                                surface_data.texture_handle = None;
-                                surface_data.current_buffer_info = None;
-                            }
+                        } else {
+                            tracing::warn!(surface_id = ?surface.id(), client_info = %client_id_str, "GLES renderer selected but not available for texture import.");
+                            surface_data.texture_handle = None;
+                            surface_data.current_buffer_info = None;
                         }
                     }
-                } else {
-                    let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
-                    tracing::warn!(surface_id = ?surface.id(), client_info = %client_id_str, "No renderer available to create texture");
-                    surface_data.texture_handle = None;
-                    surface_data.current_buffer_info = None;
+                    ActiveRendererType::Vulkan => {
+                        if let (
+                            Some(vk_renderer_mutex),
+                            Some(vk_allocator),
+                            Some(vk_instance),
+                            Some(vk_physical_device),
+                            Some(vk_logical_device)
+                        ) = (
+                            self.vulkan_frame_renderer.as_ref(),
+                            self.vulkan_allocator.as_ref(),
+                            self.vulkan_instance.as_ref(),
+                            self.vulkan_physical_device_info.as_ref(),
+                            self.vulkan_logical_device.as_ref()
+                        ) {
+                            let mut vk_renderer = vk_renderer_mutex.lock().unwrap(); // Handle MutexGuard
+
+                            if let Some(dmabuf_attributes) = self.dmabuf_state.get_dmabuf_attributes(buffer_to_texture) {
+                                tracing::debug!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting DMABUF import for surface (Vulkan path)");
+                                match vk_renderer.import_dmabuf_texture(
+                                    &dmabuf_attributes,
+                                    vk_instance,
+                                    vk_physical_device,
+                                    vk_logical_device,
+                                    vk_allocator
+                                ) {
+                                    Ok(new_texture) => {
+                                        surface_data.texture_handle = Some(new_texture);
+                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully imported DMABUF as Vulkan texture.");
+                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
+                                            buffer: buffer_to_texture.clone(),
+                                            scale: current_surface_attributes.buffer_scale,
+                                            transform: current_surface_attributes.buffer_transform,
+                                            dimensions: (dmabuf_attributes.width(), dmabuf_attributes.height()).into(),
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create Vulkan texture from DMABUF: {:?}", e);
+                                        surface_data.texture_handle = None;
+                                        surface_data.current_buffer_info = None;
+                                    }
+                                }
+                            } else {
+                                tracing::debug!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import for surface (Vulkan path)");
+                                match vk_renderer.import_shm_texture(
+                                    buffer_to_texture,
+                                    vk_allocator,
+                                    vk_logical_device
+                                ) {
+                                    Ok(new_texture) => {
+                                        surface_data.texture_handle = Some(new_texture);
+                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully imported SHM as Vulkan texture.");
+                                        let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
+                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
+                                            buffer: buffer_to_texture.clone(),
+                                            scale: current_surface_attributes.buffer_scale,
+                                            transform: current_surface_attributes.buffer_transform,
+                                            dimensions,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create Vulkan texture from SHM: {:?}", e);
+                                        surface_data.texture_handle = None;
+                                        surface_data.current_buffer_info = None;
+                                    }
+                                }
+                            }
+                        } else {
+                            tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Vulkan renderer selected, but some core components (renderer, allocator, instance, devices) are missing. Cannot import texture.");
+                            surface_data.texture_handle = None;
+                            surface_data.current_buffer_info = None;
+                        }
+                    }
                 }
             } else if buffer_detached {
                 let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
@@ -354,17 +472,28 @@ impl Default for ClientCompositorData {
     }
 }
 
-delegate_compositor!(DesktopState);
-delegate_shm!(DesktopState);
+delegate_compositor!(NovadeCompositorState); // Renamed DesktopState
+delegate_shm!(NovadeCompositorState);       // Renamed DesktopState
 
-impl ShmHandler for DesktopState {
+impl ShmHandler for NovadeCompositorState { // Renamed DesktopState
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
     }
 }
 
-impl BufferHandler for DesktopState {
+impl BufferHandler for NovadeCompositorState { // Renamed DesktopState
     fn buffer_destroyed(&mut self, buffer: &WlBuffer) {
         tracing::debug!(buffer_id = ?buffer.id(), "WlBuffer destroyed notification received in BufferHandler.");
     }
 }
+
+// Delegate DmabufHandler if NovadeCompositorState implements it
+delegate_dmabuf!(NovadeCompositorState);
+// Delegate OutputHandler if NovadeCompositorState implements it
+delegate_output!(NovadeCompositorState);
+// Delegate SeatHandler if NovadeCompositorState implements it
+delegate_seat!(NovadeCompositorState);
+// Delegate XdgShellHandler if NovadeCompositorState implements it
+delegate_xdg_shell!(NovadeCompositorState);
+// Delegate DamageTrackerHandler if NovadeCompositorState implements it
+delegate_damage_tracker!(NovadeCompositorState);

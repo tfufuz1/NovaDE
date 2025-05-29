@@ -111,14 +111,28 @@ pub fn create_all_wayland_globals(
     // For Smithay 0.10.x, DmabufState itself doesn't directly store the global.
     // The global creation returns a Global<ZwpLinuxDmabufV1>, which we can store or drop.
     // The global is registered with the display upon creation.
-    let _dmabuf_global = _desktop_state.dmabuf_state.create_global_with_default_feedback::<DesktopState>(
-         _display_handle, // Use the passed display_handle
-         &[], // No formats advertised yet, as per plan
-         Some(tracing::Span::current()) // Pass a tracing span
-    );
-    // If _desktop_state.wayland_globals.dmabuf_global = Some(_dmabuf_global); was used.
 
-    tracing::info!("DMABUF global (zwp_linux_dmabuf_v1) registered (no formats advertised yet).");
+    // Define preferred DMABUF formats to advertise.
+    // ARGB8888 with LINEAR modifier is a widely supported baseline.
+    use smithay::backend::allocator::Format;
+    use smithay::reexports::drm_fourcc::{DrmFourcc, DrmFormatModifier};
+
+    let preferred_dmabuf_formats = [
+        Format { code: DrmFourcc::Argb8888, modifier: DrmFormatModifier::Linear },
+        // Optionally, add Xrgb8888 if it's also desired as a preferred default.
+        // Format { code: DrmFourcc::Xrgb8888, modifier: DrmFormatModifier::Linear },
+    ];
+    
+    let _dmabuf_global = _desktop_state.dmabuf_state.create_global_with_default_feedback::<DesktopState>(
+         _display_handle, 
+         &preferred_dmabuf_formats, // Pass the defined preferred formats
+         Some(tracing::Span::current()) 
+    );
+
+    tracing::info!(
+        "DMABUF global (zwp_linux_dmabuf_v1) registered, advertising preferred formats: {:?}",
+        preferred_dmabuf_formats
+    );
     
     // TODO: Add creation of other essential globals here as they are implemented, e.g.:
     // - Data Device Manager (wl_data_device_manager)
