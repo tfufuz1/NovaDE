@@ -27,6 +27,12 @@ use novade_domain::cpu_usage_service::{DefaultCpuUsageService, ICpuUsageService 
 
 mod compositor;
 use compositor::core::state::DesktopState;
+use crate::compositor::backend::{CompositorBackend, BackendType, winit_backend::WinitBackend, drm_backend::DrmBackend};
+use anyhow::Result;
+use novade_domain::initialize_domain_layer;
+use novade_core::config::DummyConfigService; // For initializing domain services
+use std::path::PathBuf; // For domain service init
+
 
 // For global creation
 use compositor::core::globals::create_all_wayland_globals;
@@ -152,45 +158,50 @@ fn main() {
     });
     // --- MCP Service Initialization END ---
 
-    let mut event_loop: EventLoop<'static, DesktopState /* NovadeCompositorState */> = EventLoop::try_new()
+    // --- Domain Services Initialization START ---
+    let core_config_service = Arc::new(DummyConfigService::new()); // Placeholder
+    let domain_services_arc = rt.block_on(async {
+        tracing::info!("Initializing NovaDE Domain Layer (async block)...");
+        match initialize_domain_layer(
+            core_config_service,
+            "current_user_id_placeholder".to_string(), // Replace with actual user ID logic if available
+            None, // event_broadcast_capacity_override
+            None, // theme_load_paths_override
+            None, // token_load_paths_override
+        ).await {
+            Ok(services) => {
+                tracing::info!("NovaDE Domain Layer Initialized Successfully.");
+                Some(Arc::new(services))
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize NovaDE Domain Layer: {:?}", e);
+                None
+            }
+        }
+    });
+    // --- Domain Services Initialization END ---
+
+    let mut event_loop: EventLoop<'static, DesktopState> = EventLoop::try_new()
         .expect("Failed to create event loop");
-    let mut display: Display<DesktopState /* NovadeCompositorState */> = Display::new()
+    let mut display: Display<DesktopState> = Display::new()
         .expect("Failed to create Wayland display");
     
-    let (mut backend, mut winit_event_loop) = winit::init_from_builder(
-        winit::WinitEventLoopBuilder::new().with_title("NovaDE Compositor (Winit)"),
-        None // No specific calloop handle needed here for init
-    ).expect("Failed to initialize Winit backend");
-
-    // Create the GlowRenderer using WinitGraphicsBackend
-    let mut renderer = unsafe { GlowRenderer::new(backend.renderer()) }
-        .expect("Failed to initialize GlowRenderer");
-    
     let display_handle = display.handle();
-    let loop_handle = event_loop.handle(); // Get loop_handle before moving event_loop into run
+    let loop_handle = event_loop.handle();
 
-    // NovadeCompositorState initialization
-    // Passing None for Gles2Renderer and Vulkan components as we are using GlowRenderer with Winit.
-    // This implies NovadeCompositorState needs to be adapted or a new field for GlowRenderer added.
-    // For this subtask, we focus on main.rs changes.
-    let mut desktop_state = DesktopState::new( 
-        loop_handle, // Pass the loop_handle here
+    // DesktopState initialization (Renderer specific parts are now handled by backends)
+    let mut desktop_state = DesktopState::new(
+        loop_handle.clone(), // Pass the loop_handle
         display_handle.clone(),
-        // None, // old gles_renderer
-        // None, None, None, None, None, // Vulkan parts
-        // smithay::compositor::ActiveRendererType::Gles, // This would be Glow/Winit specific if adapted
+        // Vulkan/GLES specific parts removed from here
     );
-    // If DesktopState is adapted to hold GlowRenderer:
-    // desktop_state.glow_renderer = Some(renderer); 
-    // Or, renderer is passed around/accessed via Winit backend.
-    // For now, `renderer` variable will be moved into the winit timer closure.
+    tracing::info!("DesktopState created.");
 
-    tracing::info!("DesktopState created for Winit backend.");
-
-    // Store initialized services in DesktopState (MCP, CPU Usage) - this part remains
+    // Store initialized services in DesktopState
     desktop_state.mcp_connection_service = Some(initialized_mcp_connection_service);
     desktop_state.cpu_usage_service = Some(initialized_cpu_usage_service);
-    tracing::info!("MCPConnectionService and CpuUsageService stored in DesktopState.");
+    desktop_state.domain_services = domain_services_arc; // Store domain services
+    tracing::info!("MCP, CPU, and Domain services stored in DesktopState.");
 
     create_all_wayland_globals(&mut desktop_state, &display_handle)
         .expect("Failed to ensure Wayland globals");
@@ -214,10 +225,31 @@ fn main() {
     }
 
 
+    // --- Backend Selection and Initialization START ---
+    let selected_backend_type = BackendType::Winit; // Hardcode Winit for now
+    tracing::info!("Selected backend type: {:?}", selected_backend_type);
+
+    // The backend variable needs to be mutable if its run method takes self by value
+    // or if it's modified later. The trait defines `run(self, ...)`.
+    // Let's use a Box<dyn CompositorBackend> to hold the selected backend.
+    let mut active_backend: Box<dyn CompositorBackend> = match selected_backend_type {
+        BackendType::Winit => {
+            Box::new(WinitBackend::init(loop_handle.clone(), display_handle.clone(), &mut desktop_state)
+                .expect("Failed to initialize Winit backend"))
+        }
+        BackendType::Drm => {
+            // Box::new(DrmBackend::init(loop_handle.clone(), display_handle.clone(), &mut desktop_state)
+            //    .expect("Failed to initialize DRM backend"))
+            panic!("DRM backend selected but not fully implemented for run.");
+        }
+    };
+    tracing::info!("Compositor backend initialized.");
+    // --- Backend Selection and Initialization END ---
+
     // Insert the Wayland display first
     event_loop.handle().insert_source(
         display,
-        |client_stream, _, state: &mut DesktopState /* NovadeCompositorState */| {
+        |client_stream, _, state: &mut DesktopState| {
             if let Err(err) = client_stream.dispatch(state) {
                 tracing::error!("Error dispatching Wayland client: {}", err);
             }
@@ -297,140 +329,29 @@ fn main() {
     } else {
         tracing::warn!("Failed to link libinput backend to seat, input will not work.");
     }
-    
-    // Winit event processing timer
-    let winit_timer = Timer::immediate();
-    let mut winit_renderer = renderer; // Move renderer here to be captured by the closure
 
-    event_loop.handle().insert_source(winit_timer, move |_, _, state: &mut DesktopState /* NovadeCompositorState */| {
-        let mut calloop_timeout_action = TimeoutAction::ToDuration(Duration::from_millis(16)); // Default reschedule
-        
-        if let Err(e) = winit_event_loop.dispatch_new_events(|event| {
-            match event {
-                WinitEvent::Resized { size, .. } => {
-                    // Resize the renderer. WinitGraphicsBackend's resize is usually called by winit::init or through OutputHandler.
-                    // For GlowRenderer, it might need explicit resize.
-                    // state.glow_renderer.as_mut().unwrap().resize(size.width, size.height); // If state stores GlowRenderer
-                    // For now, we assume the Winit backend handles output size changes which trigger OutputHandler.
-                    tracing::info!("Winit window resized to: {:?}", size);
-                }
-                WinitEvent::CloseRequested { .. } => {
-                    tracing::info!("Winit window close requested, initiating shutdown.");
-                    calloop_timeout_action = TimeoutAction::Break; // Set action to break from event_loop.run
-                }
-                WinitEvent::Input(input_event) => {
-                    // If not using LibinputInputBackend source, or for winit-specific inputs:
-                    // state.process_winit_input_event(input_event);
-                    tracing::trace!("Winit input event: {:?}", input_event);
-                }
-                WinitEvent::OutputCreated { output, .. } => {
-                    tracing::info!("Winit backend created an output: {}", output.name());
-                    // OutputHandler::new_output will be called for this.
-                }
-                WinitEvent::OutputResized { output, ..} => {
-                    tracing::info!("Winit backend resized an output: {}", output.name());
-                    // OutputHandler::output_mode_updated will be called.
-                }
-                WinitEvent::OutputDestroyed { output, .. } => {
-                    tracing::info!("Winit backend destroyed an output: {}", output.name());
-                    // OutputHandler::output_destroyed will be called.
-                }
-                // WinitEvent::Redraw => { /* Handled by rendering logic below */ }
-                _ => {
-                    // tracing::trace!("Other Winit event: {:?}", event);
-                }
-            }
-        }) {
-            tracing::error!("Error dispatching winit events: {}", e);
-            calloop_timeout_action = TimeoutAction::Break; // Exit loop on error
+    // Call the backend's run method to set up its event sources within the main event loop
+    if let Err(e) = active_backend.run(&mut desktop_state) {
+       if selected_backend_type == BackendType::Winit {
+            tracing::error!("WinitBackend setup via run() failed: {:?}", e);
+            return;
+       } else {
+           tracing::error!("DRMBackend run failed: {:?}", e);
+           return;
+       }
+    }
+
+    tracing::info!("NovaDE System event loop starting with {} backend...",
+        match selected_backend_type {
+            BackendType::Winit => "Winit",
+            BackendType::Drm => "DRM (Placeholder - expected to fail or not run)",
         }
+    );
 
-        if calloop_timeout_action == TimeoutAction::Break {
-            return TimeoutAction::Break; // Propagate break request
-        }
-
-        // Perform rendering using Winit backend and GlowRenderer
-        // This replaces the old manual rendering loop.
-        let damage = state.space.damage_for_outputs(&state.outputs); // Get damage for all outputs known to space
-
-        if let Err(e) = backend.bind() {
-            tracing::error!("Failed to bind winit backend for rendering: {}", e);
-            return calloop_timeout_action; // Reschedule or break
-        }
-
-        // Iterate over outputs known to the compositor state (which Winit should have created)
-        for output in &state.outputs {
-            let output_geometry = state.space.output_geometry(output).unwrap_or_else(|| {
-                let fallback_size = backend.window_size().physical_size; // Use winit window size as fallback
-                tracing::warn!("Output {} not found in space, using winit window size for geometry.", output.name());
-                smithay::utils::Rectangle::from_loc_and_size((0,0), fallback_size)
-            });
-            let output_scale = output.current_scale().fractional_scale();
-            
-            // Collect render elements for this output
-            let mut render_elements: Vec<crate::compositor::renderer_interface::abstraction::RenderElement> = Vec::new();
-            for window_arc in state.space.elements_for_output(output) {
-                if !window_arc.is_mapped() { continue; }
-                let window_geometry = window_arc.geometry();
-                let window_wl_surface = match window_arc.wl_surface() { Some(s) => s, None => continue };
-                
-                // Get SurfaceData - Assuming it's stored in WlSurface's user_data
-                let surface_data_arc = match window_wl_surface.data_map().get::<std::sync::Arc<std::sync::Mutex<crate::compositor::surface_management::SurfaceData>>>() {
-                    Some(data) => data.clone(), 
-                    None => {
-                        tracing::warn!("SurfaceData not found for WlSurface {:?} during Winit rendering.", window_wl_surface.id());
-                        continue;
-                    }
-                };
-
-                render_elements.push(crate::compositor::renderer_interface::abstraction::RenderElement::WaylandSurface {
-                    surface_wl: &window_wl_surface, // This is a short-lived reference. Ensure it's valid.
-                    surface_data_arc, // This Arc keeps SurfaceData alive.
-                    geometry: window_geometry, // Geometry in space coordinates.
-                    damage_surface_local: vec![], // TODO: Pass actual surface damage.
-                });
-            }
-            
-            // Actual rendering call
-            // The GlowRenderer::render_frame needs to be adapted to take elements by reference or similar.
-            // Or, elements need to be structured to be clonable or passed differently.
-            // For now, assuming render_frame can work with this structure or will be adapted.
-            // The render_frame method from the old loop might need to be a method on GlowRenderer or a helper.
-            // This part is a placeholder for the actual rendering invocation.
-            match unsafe { winit_renderer.render_frame_legacy_wrapper(&render_elements, output_geometry, output_scale) } {
-                Ok(_) => {
-                    tracing::trace!("Rendered frame for output {}", output.name());
-                }
-                Err(e) => {
-                    tracing::error!("Error rendering frame for output {}: {:?}", output.name(), e);
-                }
-            }
-        }
-        
-        if let Err(e) = backend.submit(None) { // Present to all windows/outputs managed by Winit backend
-            tracing::error!("Failed to submit frame via winit backend: {}", e);
-        }
-
-        state.space.damage_all_outputs(); // Request redraw for next frame unconditionally for now
-        
-        // Dispatch frame callbacks to clients
-        let now_ns = state.clock.now();
-        let time_for_send_frames = std::time::Duration::from_nanos(now_ns);
-        state.space.send_frames(time_for_send_frames);
-        tracing::trace!("Dispatched frame callbacks via space.send_frames() at time (ns): {}", now_ns);
-
-        if let Err(e) = state.display_handle.flush_clients() {
-            tracing::warn!("Failed to flush clients post-winit-render: {}", e);
-        }
-
-        calloop_timeout_action // Reschedule or break
-    }).expect("Failed to insert Winit event timer");
-
-    tracing::info!("NovaDE System with Winit backend event loop starting...");
-    event_loop.run(None, &mut desktop_state, |data| {
+    // This is the main blocking call.
+    event_loop.run(None, &mut desktop_state, |_desktop_state| {
         // This closure is called after each event loop dispatch cycle.
         // Can be used for cleanup or periodic tasks not fitting other handlers.
-        // For example, if we needed to manually clear damage: data.space.clear_damage();
     }).expect("Event loop failed");
 
     tracing::info!("NovaDE System shutting down.");

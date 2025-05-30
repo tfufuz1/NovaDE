@@ -1,3 +1,4 @@
+pub mod backend;
 pub mod core;
 pub mod display_loop;
 pub mod renderer_interface;
