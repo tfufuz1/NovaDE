@@ -42,6 +42,8 @@ svg = "0.13.1"
 resvg = "0.35.0"
 usvg = "0.35.0"
 tiny-skia = "0.10.0"
+zbus = { version = "3.14", default-features = false, features = ["tokio"] } # Check latest zbus version
+ashpd = { version = "0.4.0", features = ["gtk4"] } # Check latest ashpd version, enable gtk4 feature for parent window
 
 [build-dependencies]
 glib-build-tools = "0.19.0" # Or the version compatible with your glib/gio
