@@ -64,6 +64,7 @@ pub struct NotificationsServer {
 }
 
 impl NotificationsServer {
+    // pub fn new -> already public from previous step, ensuring here.
     pub fn new(notification_service: Arc<dyn NotificationService>) -> Self {
         Self {
             notification_service,
@@ -244,6 +245,7 @@ impl NotificationsServer {
 // Function to create and run the server (example, might be part of main.rs or a service manager)
 // This is a simplified example of how to run the server.
 // In a real application, this would be more integrated.
+#[allow(dead_code)] // Mark as dead_code as DbusServiceManager will handle serving
 pub async fn run_notifications_server() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init(); // Basic tracing setup
 

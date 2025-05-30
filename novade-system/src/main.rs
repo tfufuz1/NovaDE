@@ -29,6 +29,7 @@ mod compositor;
 use compositor::core::state::DesktopState;
 use crate::compositor::backend::{CompositorBackend, BackendType, winit_backend::WinitBackend, drm_backend::DrmBackend};
 use anyhow::Result;
+use crate::system_services::SystemServices; // Added SystemServices import
 use novade_domain::initialize_domain_layer;
 use novade_core::config::DummyConfigService; // For initializing domain services
 use std::path::PathBuf; // For domain service init
@@ -184,6 +185,26 @@ fn main() {
     });
     // --- Domain Services Initialization END ---
 
+    // --- System Services Initialization START ---
+    let system_services_arc = if let Some(ds_arc) = domain_services_arc.as_ref() {
+        rt.block_on(async { // Use the existing tokio runtime
+            match SystemServices::new(ds_arc.clone()).await {
+                Ok(services) => {
+                    tracing::info!("SystemServices initialized successfully.");
+                    Some(Arc::new(services))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to initialize SystemServices: {:?}", e);
+                    None
+                }
+            }
+        })
+    } else {
+        tracing::warn!("DomainServices not available, skipping SystemServices initialization.");
+        None
+    };
+    // --- System Services Initialization END ---
+
     let mut event_loop: EventLoop<'static, DesktopState> = EventLoop::try_new()
         .expect("Failed to create event loop");
     let mut display: Display<DesktopState> = Display::new()
@@ -203,8 +224,9 @@ fn main() {
     // Store initialized services in DesktopState
     desktop_state.mcp_connection_service = Some(initialized_mcp_connection_service);
     desktop_state.cpu_usage_service = Some(initialized_cpu_usage_service);
-    desktop_state.domain_services = domain_services_arc; // Store domain services
-    tracing::info!("MCP, CPU, and Domain services stored in DesktopState.");
+    desktop_state.domain_services = domain_services_arc;
+    desktop_state.system_services = system_services_arc; // Add this line
+    tracing::info!("Domain and System services stored in DesktopState.");
 
     create_all_wayland_globals(&mut desktop_state, &display_handle)
         .expect("Failed to ensure Wayland globals");
