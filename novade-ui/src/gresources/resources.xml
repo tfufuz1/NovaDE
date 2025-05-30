@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/org/novade/ui">
+    <file alias="icons/my-custom-icon.svg">icons/my-custom-icon.svg</file>
+  </gresource>
+</gresources>

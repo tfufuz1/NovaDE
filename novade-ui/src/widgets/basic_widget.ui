@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<interface>
+  <template class="BasicWidget" parent="GtkBox">
+    <property name="orientation">vertical</property>
+    <property name="spacing">12</property>
+    <property name="halign">center</property>
+    <property name="valign">center</property>
+    <child>
+      <object class="GtkLabel" id="label">
+        <property name="label">Default Label</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkButton" id="button">
+        <property name="label">Click Me!</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkImage" id="image">
+        <property name="icon-name">dialog-information-symbolic</property> <!-- Main image -->
+        <property name="pixel-size">64</property>
+      </object>
+    </child>
+    <child>
+      <object class="GtkBox"> <!-- Box to hold status image and maybe a small label later -->
+        <property name="orientation">horizontal</property>
+        <property name="spacing">6</property>
+        <property name="halign">center</property>
+        <child>
+          <object class="GtkLabel">
+            <property name="label">Status:</property>
+          </object>
+        </child>
+        <child>
+          <object class="GtkImage" id="status_image">
+            <property name="icon-name">image-missing-symbolic</property> <!-- Default status icon -->
+            <property name="pixel-size">24</property>
+          </object>
+        </child>
+      </object>
+    </child>
+  </template>
+</interface>
