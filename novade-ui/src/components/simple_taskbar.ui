@@ -7,7 +7,7 @@
     <child>
       <object class="AdwButtonContent" id="menu_button">
         <property name="icon-name">view-grid-symbolic</property>
-        <property name="label">Menu</property>
+        <property name="label" translatable="yes">Menu</property> <!-- i18n -->
         <style><class name="pill"/></style>
         <layout>
           <constraint target="super" attribute="start" relation="eq" constant="6"/>
@@ -36,7 +36,7 @@
         <property name="halign">center</property>
         <child>
             <object class="GtkLabel">
-                <property name="label">(Task Items Area - ConstraintLayout)</property>
+                <property name="label" translatable="yes">(Task Items Area - ConstraintLayout)</property> <!-- i18n -->
             </object>
         </child>
         <layout>
@@ -56,7 +56,7 @@
       <object class="GtkDrawingArea" id="status_indicator_area">
         <property name="width-request">20</property>
         <property name="height-request">20</property>
-        <property name="tooltip-text">Status Indicator</property>
+        <property name="tooltip-text" translatable="yes">Status Indicator</property> <!-- i18n -->
         <layout>
           <constraint source_attribute="end" target="animate_clock_button" target_attribute="start" relation="eq" constant="-8"/>
           <constraint source_attribute="centery" target="super" target_attribute="centery" relation="eq"/>
@@ -66,7 +66,7 @@
 
     <child>
       <object class="GtkButton" id="animate_clock_button">
-        <property name="label">Blink Clock</property>
+        <property name="label" translatable="yes">Blink Clock</property> <!-- i18n -->
         <property name="valign">center</property>
         <layout>
           <constraint source_attribute="end" target="clock_label" target_attribute="start" relation="eq" constant="-8"/>

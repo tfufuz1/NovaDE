@@ -59,13 +59,25 @@ impl ObjectSubclass for SimpleTaskbarPriv {
         let widget = obj.get(); // Get the wrapper SimpleTaskbar instance
         
         // Setup draw function for the DrawingArea (as before)
-        widget.imp().status_indicator_area.set_draw_func(|_drawing_area, cr, width, height| {
+        let status_indicator_area = widget.imp().status_indicator_area.get();
+        status_indicator_area.set_draw_func(|_drawing_area, cr, width, height| {
             let radius = (width.min(height) as f64 / 2.0) - 2.0; 
             if radius <= 0.0 { return; }
             cr.arc(width as f64 / 2.0, height as f64 / 2.0, radius, 0.0, 2.0 * std::f64::consts::PI);
-            cr.set_source_rgb(0.3, 0.8, 0.3); 
+            cr.set_source_rgb(0.3, 0.8, 0.3); // Green for "OK"
             if let Err(e) = cr.fill() { eprintln!("Cairo fill failed: {:?}", e); }
         });
+
+        // Set accessibility properties for the status_indicator_area
+        let accessible_indicator = status_indicator_area.accessible();
+        accessible_indicator.set_accessible_role(gtk::AccessibleRole::Image);
+        // For a dynamic indicator, this label should be updated when its state changes.
+        if let Err(e) = accessible_indicator.update_property(gtk::AccessibleProperty::Label, &"System status: OK".to_value()) {
+            eprintln!("Failed to set accessible label for status indicator: {:?}", e);
+        }
+        // Also, consider setting a description if the label is very brief.
+        // accessible_indicator.update_property(gtk::AccessibleProperty::Description, &"A green circle indicating system is OK.".to_value());
+
 
         // Setup animation button
         let clock_label_clone = widget.imp().clock_label.get(); // Get the GtkLabel instance
