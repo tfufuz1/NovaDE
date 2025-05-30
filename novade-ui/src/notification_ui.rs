@@ -4,668 +4,395 @@
 //! # Notification UI Module
 //!
 //! This module provides UI components for displaying notifications in the NovaDE desktop environment.
-//! It handles the rendering, interaction, and management of notification popups.
+//! It handles the rendering, interaction, and management of notification popups using the
+//! new NotificationPopup widget.
 
 use gtk4 as gtk;
 use gtk::prelude::*;
-use std::sync::{Arc, Mutex, RwLock};
+use gtk::glib; // Required for glib::timeout_add_local and glib::Sender (if used directly here)
+use std::sync::{Arc, Mutex as StdMutex}; // Using StdMutex for active_notifications
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration; // For glib::timeout_add_local
+use tracing::{debug, error, info, warn};
 
-use crate::error::UiError;
-use crate::common::{UiResult, UiComponent};
+use crate::error::UiError; // Assuming UiError is defined
+use crate::common::{UiResult, UiComponent}; // Assuming these are defined
 use crate::styles::StyleManager;
 use crate::compositor_integration::{CompositorIntegration, SurfaceType};
 
+// Use the new NotificationPopup widget and its related data structures
+use crate::widgets::notification_popup::{
+    NotificationPopup, 
+    NotificationPopupData, 
+    PopupAction, // This is crate::widgets::notification_popup::PopupAction
+    NotificationPopupEvent
+};
+// For interacting with the D-Bus service layer
+use crate::shell::ui_notification_service::UINotificationService;
+
+
+// NotificationSettings and NotificationPosition enums can remain as they are.
+#[derive(Clone, Debug)]
+pub enum NotificationPosition { TopRight, TopCenter, TopLeft, BottomRight, BottomCenter, BottomLeft }
+
+#[derive(Debug, Clone)] // Added Clone for settings
+pub struct NotificationSettings {
+    pub position: NotificationPosition,
+    pub timeout_secs: u32, // Default timeout for non-resident notifications in seconds
+    pub width: i32,
+    pub spacing: i32,
+    pub max_popups: usize, // Renamed from max_notifications for clarity (popups on screen)
+    pub show_icons: bool, // This would be used by NotificationPopupData construction
+    pub show_actions: bool, // This would be used by NotificationPopupData construction
+    // pub enable_sounds: bool, // Sounds are not handled in this iteration
+    // pub enable_animations: bool, // Animations are GTK theme dependent or custom widget work
+}
+
+impl Default for NotificationSettings {
+    fn default() -> Self {
+        NotificationSettings {
+            position: NotificationPosition::TopRight,
+            timeout_secs: 5, // seconds
+            width: 350,    // pixels
+            spacing: 10,   // pixels
+            max_popups: 5,
+            show_icons: true,
+            show_actions: true,
+        }
+    }
+}
+
 /// Notification UI manager
 pub struct NotificationUi {
-    /// The GTK application
     app: gtk::Application,
-    
-    /// Style manager for theming
     style_manager: Arc<StyleManager>,
-    
-    /// Compositor integration
     compositor: Arc<CompositorIntegration>,
-    
-    /// Active notifications
-    active_notifications: Arc<Mutex<HashMap<String, NotificationPopup>>>,
-    
-    /// Notification settings
-    settings: Arc<RwLock<NotificationSettings>>,
+    // Key is D-Bus notification ID (u32). Value is the GTK Window hosting the popup.
+    active_popups: Arc<StdMutex<HashMap<u32, gtk::Window>>>,
+    settings: Arc<StdMutex<NotificationSettings>>,
+    // To call back for actions/close, this needs to be set after UINotificationService is created.
+    ui_notification_service: Arc<StdMutex<Option<Arc<UINotificationService>>>>,
+    // Monitor where popups are placed. This is a simplified representation.
+    // A real implementation would need detailed screen geometry.
+    screen_width: i32, 
+    screen_height: i32,
 }
 
-/// Notification popup
-pub struct NotificationPopup {
-    /// Notification ID
-    id: String,
-    
-    /// Notification window
-    window: gtk::Window,
-    
-    /// Notification content
-    content: NotificationContent,
-    
-    /// Notification state
-    state: Arc<RwLock<NotificationState>>,
-    
-    /// Creation time
-    created_at: Instant,
-    
-    /// Expiration time
-    expires_at: Option<Instant>,
-    
-    /// Surface ID
-    surface_id: Option<String>,
-}
-
-/// Notification content
-pub struct NotificationContent {
-    /// Notification title
-    title: String,
-    
-    /// Notification body
-    body: String,
-    
-    /// Notification icon
-    icon: Option<String>,
-    
-    /// Notification actions
-    actions: Vec<NotificationAction>,
-    
-    /// Notification urgency
-    urgency: NotificationUrgency,
-    
-    /// Notification category
-    category: Option<String>,
-    
-    /// Notification application
-    application: Option<String>,
-}
-
-/// Notification action
-pub struct NotificationAction {
-    /// Action ID
-    id: String,
-    
-    /// Action label
-    label: String,
-    
-    /// Action callback
-    callback: Box<dyn Fn() -> UiResult<()> + Send + Sync>,
-}
-
-/// Notification urgency
-pub enum NotificationUrgency {
-    /// Low urgency
-    Low,
-    
-    /// Normal urgency
-    Normal,
-    
-    /// Critical urgency
-    Critical,
-}
-
-/// Notification state
-pub struct NotificationState {
-    /// Is the notification visible
-    pub visible: bool,
-    
-    /// Is the notification expanded
-    pub expanded: bool,
-    
-    /// Is the notification interactive
-    pub interactive: bool,
-    
-    /// Is the notification being hovered
-    pub hovered: bool,
-    
-    /// Is the notification being dismissed
-    pub dismissing: bool,
-}
-
-/// Notification settings
-pub struct NotificationSettings {
-    /// Notification position
-    pub position: NotificationPosition,
-    
-    /// Notification timeout (in seconds)
-    pub timeout: u32,
-    
-    /// Notification width
-    pub width: i32,
-    
-    /// Notification spacing
-    pub spacing: i32,
-    
-    /// Maximum number of notifications
-    pub max_notifications: usize,
-    
-    /// Show notification icons
-    pub show_icons: bool,
-    
-    /// Show notification actions
-    pub show_actions: bool,
-    
-    /// Enable notification sounds
-    pub enable_sounds: bool,
-    
-    /// Enable notification animations
-    pub enable_animations: bool,
-}
-
-/// Notification position
-pub enum NotificationPosition {
-    /// Top right
-    TopRight,
-    
-    /// Top center
-    TopCenter,
-    
-    /// Top left
-    TopLeft,
-    
-    /// Bottom right
-    BottomRight,
-    
-    /// Bottom center
-    BottomCenter,
-    
-    /// Bottom left
-    BottomLeft,
-}
 
 impl NotificationUi {
-    /// Creates a new notification UI manager
     pub fn new(
         app: gtk::Application,
         style_manager: Arc<StyleManager>,
         compositor: Arc<CompositorIntegration>,
     ) -> Self {
+        // Get primary monitor dimensions (simplified)
+        let (screen_width, screen_height) = match app.primary_monitor() {
+            Some(monitor) => (monitor.geometry().width(), monitor.geometry().height()),
+            None => {
+                warn!("Could not get primary monitor, defaulting to 1920x1080 for layout.");
+                (1920, 1080)
+            }
+        };
+
         Self {
             app,
             style_manager,
             compositor,
-            active_notifications: Arc::new(Mutex::new(HashMap::new())),
-            settings: Arc::new(RwLock::new(NotificationSettings {
-                position: NotificationPosition::TopRight,
-                timeout: 5,
-                width: 300,
-                spacing: 10,
-                max_notifications: 5,
-                show_icons: true,
-                show_actions: true,
-                enable_sounds: true,
-                enable_animations: true,
-            })),
+            active_popups: Arc::new(StdMutex::new(HashMap::new())),
+            settings: Arc::new(StdMutex::new(NotificationSettings::default())),
+            ui_notification_service: Arc::new(StdMutex::new(None)),
+            screen_width,
+            screen_height,
         }
     }
+
+    pub fn set_ui_notification_service(&self, service: Arc<UINotificationService>) {
+        let mut service_guard = self.ui_notification_service.lock().unwrap();
+        *service_guard = Some(service);
+        info!("UINotificationService linked to NotificationUi.");
+    }
     
-    /// Shows a notification
-    pub fn show_notification(&self, content: NotificationContent) -> UiResult<String> {
-        // Generate a notification ID
-        let notification_id = format!("notification_{}", uuid::Uuid::new_v4());
+    // Simplified data structure for showing a notification via NotificationUi
+    // This is constructed by UINotificationService from domain Notification or D-Bus data
+    pub struct ShowNotificationParams {
+        pub dbus_id: u32,
+        pub app_name: String, // For context, not directly displayed by PopupWidget unless in title/body
+        pub replaces_id: u32, // D-Bus ID of notification to replace (0 if new)
+        pub title: String,
+        pub body: String,
+        pub icon_name: Option<String>,
+        pub actions: Vec<PopupAction>, // Uses PopupAction from widgets::notification_popup
+        pub resident: bool, // If true, doesn't auto-expire based on default timeout
+        pub default_timeout_ms: i32, // Server provided timeout (-1 for server default, 0 for persistent)
+        // pub urgency: UIPriority, // Could be used for styling or priority in queue
+    }
+
+
+    pub fn show_notification(&self, params: ShowNotificationParams) -> Result<(), String> {
+        let dbus_id = params.dbus_id;
+        debug!("NotificationUi: show_notification called for D-Bus ID {}", dbus_id);
         
-        // Create the notification window
-        let window = gtk::Window::new();
-        window.set_title(Some(&content.title));
-        window.set_default_size(self.get_notification_width()?, -1);
-        window.set_resizable(false);
-        window.set_decorated(false);
-        window.set_skip_taskbar_hint(true);
-        window.set_skip_pager_hint(true);
-        window.set_keep_above(true);
-        window.set_accept_focus(false);
-        
-        // Set up the window content
-        let content_box = self.create_notification_content(&content)?;
-        window.set_child(Some(&content_box));
-        
-        // Apply styles
-        self.style_manager.apply_styles_to_widget(&window, "notification")?;
-        
-        // Create the notification popup
-        let notification = NotificationPopup {
-            id: notification_id.clone(),
-            window,
-            content,
-            state: Arc::new(RwLock::new(NotificationState {
-                visible: false,
-                expanded: false,
-                interactive: true,
-                hovered: false,
-                dismissing: false,
-            })),
-            created_at: Instant::now(),
-            expires_at: Some(Instant::now() + Duration::from_secs(self.get_notification_timeout()? as u64)),
-            surface_id: None,
+        let mut popups_guard = self.active_popups.lock().unwrap();
+        let settings = self.settings.lock().unwrap().clone(); // Clone settings for this operation
+
+        // Handle replaces_id: if it's non-zero, dismiss the old one first.
+        if params.replaces_id != 0 {
+            if let Some(window_to_replace) = popups_guard.remove(&params.replaces_id) {
+                info!("Replacing notification with D-Bus ID: {}", params.replaces_id);
+                window_to_replace.destroy(); // Destroy the old window
+                // Compositor surface destruction would happen here too if tracked per window
+            }
+        }
+
+        // Limit number of popups
+        if popups_guard.len() >= settings.max_popups {
+            warn!("Max popups ({}) reached. New notification D-Bus ID {} not shown.", settings.max_popups, dbus_id);
+            // Optionally, implement a queue or replace the oldest non-resident popup.
+            // For now, just reject.
+            return Err(format!("Max popups ({}) reached", settings.max_popups));
+        }
+
+        let popup_data = NotificationPopupData {
+            notification_dbus_id: dbus_id,
+            title: params.title,
+            body: params.body,
+            icon_name: if settings.show_icons { params.icon_name } else { None },
+            actions: if settings.show_actions { params.actions } else { vec![] },
         };
-        
-        // Register with the compositor
-        if let Ok(surface) = self.compositor.create_surface(&notification.window, SurfaceType::Notification) {
-            let mut state = notification.state.write().map_err(|_| {
-                UiError::LockError("Failed to acquire write lock on notification state".to_string())
-            })?;
-            
-            state.visible = true;
-            
-            // Store the surface ID
-            let mut notification = notification;
-            notification.surface_id = Some(surface.id.clone());
-            
-            // Store the notification
-            let mut active_notifications = self.active_notifications.lock().map_err(|_| {
-                UiError::LockError("Failed to acquire lock on active notifications".to_string())
-            })?;
-            
-            // Check if we need to remove old notifications
-            if active_notifications.len() >= self.get_max_notifications()? {
-                // Find the oldest notification
-                let oldest = active_notifications.values()
-                    .min_by_key(|n| n.created_at)
-                    .map(|n| n.id.clone());
-                
-                if let Some(oldest_id) = oldest {
-                    self.dismiss_notification(&oldest_id)?;
-                }
-            }
-            
-            // Position the notification
-            self.position_notifications()?;
-            
-            // Show the notification
-            notification.window.show();
-            
-            // Store the notification
-            active_notifications.insert(notification_id.clone(), notification);
-        }
-        
-        Ok(notification_id)
-    }
-    
-    /// Creates the notification content widget
-    fn create_notification_content(&self, content: &NotificationContent) -> UiResult<gtk::Box> {
-        let content_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        content_box.set_margin_start(12);
-        content_box.set_margin_end(12);
-        content_box.set_margin_top(12);
-        content_box.set_margin_bottom(12);
-        
-        // Header
-        let header_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        
-        // Icon
-        if self.get_show_icons()? {
-            if let Some(icon_name) = &content.icon {
-                let icon = gtk::Image::from_icon_name(icon_name);
-                icon.set_pixel_size(32);
-                header_box.append(&icon);
-            }
-        }
-        
-        // Title and body
-        let text_box = gtk::Box::new(gtk::Orientation::Vertical, 3);
-        
-        let title_label = gtk::Label::new(Some(&content.title));
-        title_label.set_halign(gtk::Align::Start);
-        title_label.set_valign(gtk::Align::Start);
-        title_label.set_wrap(true);
-        title_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        title_label.add_css_class("notification-title");
-        text_box.append(&title_label);
-        
-        let body_label = gtk::Label::new(Some(&content.body));
-        body_label.set_halign(gtk::Align::Start);
-        body_label.set_valign(gtk::Align::Start);
-        body_label.set_wrap(true);
-        body_label.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        body_label.set_lines(3);
-        body_label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        body_label.add_css_class("notification-body");
-        text_box.append(&body_label);
-        
-        header_box.append(&text_box);
-        
-        // Close button
-        let close_button = gtk::Button::from_icon_name("window-close-symbolic");
-        close_button.set_valign(gtk::Align::Start);
-        close_button.set_halign(gtk::Align::End);
-        close_button.add_css_class("notification-close");
-        
-        let notification_id = content.title.clone(); // This is a placeholder, in reality we would use the actual ID
-        let self_clone = self.clone();
-        close_button.connect_clicked(move |_| {
-            if let Err(e) = self_clone.dismiss_notification(&notification_id) {
-                eprintln!("Failed to dismiss notification: {}", e);
-            }
-        });
-        
-        header_box.append(&close_button);
-        
-        content_box.append(&header_box);
-        
-        // Actions
-        if self.get_show_actions()? && !content.actions.is_empty() {
-            let actions_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-            actions_box.set_halign(gtk::Align::End);
-            actions_box.set_margin_top(6);
-            
-            for action in &content.actions {
-                let button = gtk::Button::with_label(&action.label);
-                button.add_css_class("notification-action");
-                
-                let action_callback = action.callback.clone();
-                button.connect_clicked(move |_| {
-                    if let Err(e) = action_callback() {
-                        eprintln!("Failed to execute notification action: {}", e);
+
+        let service_opt_clone = self.ui_notification_service.lock().unwrap().clone();
+        // Important: Clone Arcs for the callback
+        let active_popups_cb_clone = self.active_popups.clone();
+        let compositor_cb_clone = self.compositor.clone();
+
+
+        let callback_fn = Arc::new(Box::new(move |event: NotificationPopupEvent| {
+            match event {
+                NotificationPopupEvent::Closed(id) => {
+                    info!("Popup event: Closed for D-Bus ID {}", id);
+                    if let Some(service) = &service_opt_clone {
+                        let service_clone_for_close = service.clone();
+                        // Offload to tokio runtime from UINotificationService
+                        service.tokio_handle().spawn(async move {
+                            if let Err(e) = service_clone_for_close.close_ui_notification(id).await {
+                                error!("NotificationUi: Failed to request D-Bus close for ID {}: {}", id, e);
+                            }
+                        });
                     }
-                });
-                
-                actions_box.append(&button);
-            }
-            
-            content_box.append(&actions_box);
-        }
-        
-        Ok(content_box)
-    }
-    
-    /// Dismisses a notification
-    pub fn dismiss_notification(&self, notification_id: &str) -> UiResult<()> {
-        let mut active_notifications = self.active_notifications.lock().map_err(|_| {
-            UiError::LockError("Failed to acquire lock on active notifications".to_string())
-        })?;
-        
-        if let Some(notification) = active_notifications.get(notification_id) {
-            // Update the state
-            let mut state = notification.state.write().map_err(|_| {
-                UiError::LockError("Failed to acquire write lock on notification state".to_string())
-            })?;
-            
-            state.dismissing = true;
-            state.visible = false;
-            
-            // Hide the window
-            notification.window.hide();
-            
-            // Remove the surface
-            if let Some(surface_id) = &notification.surface_id {
-                if let Err(e) = self.compositor.destroy_surface(surface_id) {
-                    eprintln!("Failed to destroy notification surface: {}", e);
+                    // Hide immediately. Actual removal from active_popups and destruction
+                    // should happen in `notification_confirmed_closed` after server confirms.
+                    if let Some(window) = active_popups_cb_clone.lock().unwrap().get(&id) {
+                        window.hide(); 
+                    }
+                }
+                NotificationPopupEvent::ActionInvoked(id, action_id) => {
+                    info!("Popup event: ActionInvoked for D-Bus ID {}, action_id {}", id, action_id);
+                    if let Some(service) = &service_opt_clone {
+                        let service_clone_for_action = service.clone();
+                        service.tokio_handle().spawn(async move {
+                            service_clone_for_action.handle_ui_invoked_action(id, &action_id).await;
+                        });
+                    }
                 }
             }
+        }) as crate::widgets::notification_popup::PopupCallback);
+
+        let notification_widget = NotificationPopup::new(popup_data, callback_fn);
+        
+        let window = gtk::Window::builder()
+            .application(&self.app)
+            // .title("NovaDE Notification") // Generally not needed for popups
+            .child(notification_widget.widget())
+            .decorated(false)
+            .resizable(false)
+            .can_focus(false) // Popups usually don't take focus
+            .default_width(settings.width)
+            // .css_name("notification-window") // Add a CSS name for the window itself if needed
+            .build();
+        
+        // Style the window or widget if necessary (StyleManager can be used here)
+        // self.style_manager.apply_styles_to_widget(&window, "notification-window-style-class");
+        // self.style_manager.apply_styles_to_widget(notification_widget.widget(), "notification-popup-style-class");
+
+        match self.compositor.create_surface(&window, SurfaceType::Notification) {
+            Ok(_surface_data) => {
+                info!("Compositor surface created for notification D-Bus ID {}", dbus_id);
+            }
+            Err(e) => {
+                error!("Failed to create compositor surface for notification D-Bus ID {}: {}. Showing window directly.", dbus_id, e);
+            }
         }
         
-        // Remove the notification
-        active_notifications.remove(notification_id);
+        window.present();
+        popups_guard.insert(dbus_id, window);
         
-        // Reposition remaining notifications
-        self.position_notifications()?;
-        
-        Ok(())
-    }
-    
-    /// Positions all active notifications
-    fn position_notifications(&self) -> UiResult<()> {
-        let active_notifications = self.active_notifications.lock().map_err(|_| {
-            UiError::LockError("Failed to acquire lock on active notifications".to_string())
-        })?;
-        
-        let position = self.get_notification_position()?;
-        let spacing = self.get_notification_spacing()?;
-        
-        // Get the screen dimensions
-        let display = gdk::Display::default().ok_or_else(|| {
-            UiError::InitializationError("Failed to get default display".to_string())
-        })?;
-        
-        let monitor = display.primary_monitor().ok_or_else(|| {
-            UiError::InitializationError("Failed to get primary monitor".to_string())
-        })?;
-        
-        let geometry = monitor.geometry();
-        let screen_width = geometry.width();
-        let screen_height = geometry.height();
-        
-        // Sort notifications by creation time
-        let mut notifications: Vec<_> = active_notifications.values().collect();
-        notifications.sort_by_key(|n| n.created_at);
-        
-        // Position each notification
-        let mut y_offset = match position {
-            NotificationPosition::TopRight | NotificationPosition::TopCenter | NotificationPosition::TopLeft => {
-                spacing
-            }
-            NotificationPosition::BottomRight | NotificationPosition::BottomCenter | NotificationPosition::BottomLeft => {
-                screen_height - spacing
-            }
+        // Drop the main lock before calling reposition
+        drop(popups_guard);
+        self.reposition_all_notifications();
+
+
+        // Handle auto-expiration
+        let effective_timeout_ms = match params.default_timeout_ms {
+            -1 => settings.timeout_secs * 1000, // Server default means use our configured default
+            0 => 0, // Persistent, don't auto-close with this timer
+            val => val as u32, // Use server-provided timeout
         };
-        
-        for notification in notifications {
-            // Get the notification size
-            let width = self.get_notification_width()?;
-            let height = notification.window.height();
-            
-            // Calculate the position
-            let x = match position {
-                NotificationPosition::TopLeft | NotificationPosition::BottomLeft => {
-                    spacing
+
+        if !params.resident && effective_timeout_ms > 0 {
+            let service_opt_clone_timeout = self.ui_notification_service.lock().unwrap().clone();
+            let active_popups_timeout_clone = self.active_popups.clone();
+
+            glib::timeout_add_local(Duration::from_millis(effective_timeout_ms.into()), move || {
+                // Check if popup still exists and is managed by us
+                if active_popups_timeout_clone.lock().unwrap().contains_key(&dbus_id) {
+                    if let Some(service) = &service_opt_clone_timeout {
+                        info!("Notification D-Bus ID {} timed out. Requesting close.", dbus_id);
+                        let service_clone_for_timeout = service.clone();
+                        service.tokio_handle().spawn(async move {
+                            if let Err(e) = service_clone_for_timeout.close_ui_notification(dbus_id).await {
+                                error!("NotificationUi: Failed to D-Bus close timed-out ID {}: {}", dbus_id, e);
+                            }
+                        });
+                    } else {
+                        // Fallback if service is not available: try to hide it directly.
+                        // This path should ideally not be taken if UINotificationService is always set.
+                        warn!("UINotificationService not available for timeout of ID {}. Hiding locally.", dbus_id);
+                         if let Some(window) = active_popups_timeout_clone.lock().unwrap().remove(&dbus_id) {
+                            window.destroy(); // Or just hide and let confirmed_closed handle full removal
+                        }
+                    }
                 }
-                NotificationPosition::TopCenter | NotificationPosition::BottomCenter => {
-                    (screen_width - width) / 2
-                }
-                NotificationPosition::TopRight | NotificationPosition::BottomRight => {
-                    screen_width - width - spacing
-                }
-            };
-            
-            let y = match position {
-                NotificationPosition::TopRight | NotificationPosition::TopCenter | NotificationPosition::TopLeft => {
-                    let y = y_offset;
-                    y_offset += height + spacing;
-                    y
-                }
-                NotificationPosition::BottomRight | NotificationPosition::BottomCenter | NotificationPosition::BottomLeft => {
-                    y_offset -= height;
-                    let y = y_offset;
-                    y_offset -= spacing;
-                    y
-                }
-            };
-            
-            // Move the window
-            notification.window.move_(x, y);
-            
-            // Update the surface position if available
-            if let Some(surface_id) = &notification.surface_id {
-                if let Err(e) = self.compositor.update_surface_properties(surface_id, |props| {
-                    props.position = (x, y);
-                }) {
-                    eprintln!("Failed to update notification surface position: {}", e);
-                }
-            }
+                glib::Continue(false)
+            });
         }
-        
         Ok(())
     }
-    
-    /// Gets the notification position
-    fn get_notification_position(&self) -> UiResult<NotificationPosition> {
-        let settings = self.settings.read().map_err(|_| {
-            UiError::LockError("Failed to acquire read lock on notification settings".to_string())
-        })?;
-        
-        Ok(settings.position.clone())
+
+    // Called by UINotificationService when the D-Bus server confirms a notification is closed
+    // (e.g., after CloseNotification D-Bus call completes, or server emits NotificationClosed signal)
+    pub fn notification_confirmed_closed(&self, dbus_id: u32) {
+        debug!("NotificationUi: Confirmed closed for D-Bus ID {}", dbus_id);
+        let mut popups_guard = self.active_popups.lock().unwrap();
+        if let Some(window) = popups_guard.remove(&dbus_id) {
+            // TODO: self.compositor.destroy_surface(...); needs surface ID to be tracked.
+            // For now, just destroy the GTK window.
+            window.destroy();
+            info!("Removed and destroyed window for D-Bus ID {}", dbus_id);
+            
+            // Drop lock before calling reposition
+            drop(popups_guard);
+            self.reposition_all_notifications();
+        } else {
+            warn!("NotificationUi: Tried to confirm close for D-Bus ID {}, but it was not found in active_popups.", dbus_id);
+        }
     }
     
-    /// Gets the notification timeout
-    fn get_notification_timeout(&self) -> UiResult<u32> {
-        let settings = self.settings.read().map_err(|_| {
-            UiError::LockError("Failed to acquire read lock on notification settings".to_string())
-        })?;
-        
-        Ok(settings.timeout)
+    // Renamed from dismiss_notification. This is for programmatic dismissal from UI itself,
+    // if needed, separate from server-side close.
+    pub fn dismiss_ui_managed_popup(&self, dbus_id: u32) {
+        info!("NotificationUi: Dismissing UI managed popup for D-Bus ID {}", dbus_id);
+        // This would typically also involve calling close_ui_notification on UINotificationService
+        if let Some(service) = self.ui_notification_service.lock().unwrap().clone() {
+            let service_clone = service.clone();
+            service.tokio_handle().spawn(async move {
+                if let Err(e) = service_clone.close_ui_notification(dbus_id).await {
+                    error!("Failed to D-Bus close notification ID {} during UI dismissal: {}", dbus_id, e);
+                }
+            });
+        }
+        // The actual removal and destruction will be handled by notification_confirmed_closed
+        // when the D-Bus roundtrip completes (server confirms via signal or method reply).
+        // For immediate visual feedback, we can hide it.
+        if let Some(window) = self.active_popups.lock().unwrap().get(&dbus_id) {
+            window.hide();
+        }
+    }
+
+    fn reposition_all_notifications(&self) {
+        let popups_guard = self.active_popups.lock().unwrap();
+        let settings = self.settings.lock().unwrap().clone(); // Clone for this operation
+        info!("Repositioning {} active popups...", popups_guard.len());
+
+        let mut y_offset = settings.spacing; // Start with spacing from the edge
+        // For bottom alignment, initial y_offset would be screen_height - settings.spacing
+
+        // TODO: Iterate popups in desired order (e.g., by D-Bus ID or creation time if stored)
+        // For now, iterating HashMap order is undefined, but sufficient for basic stacking.
+        for (_id, window) in popups_guard.iter() {
+            if !window.is_visible() { continue; }
+
+            let window_width = window.width(); // This might be settings.width or actual allocated
+            let window_height = window.height(); // Actual allocated height
+
+            let x = match settings.position {
+                NotificationPosition::TopLeft | NotificationPosition::BottomLeft => settings.spacing,
+                NotificationPosition::TopCenter | NotificationPosition::BottomCenter => (self.screen_width - window_width) / 2,
+                NotificationPosition::TopRight | NotificationPosition::BottomRight => self.screen_width - window_width - settings.spacing,
+            };
+            
+            let current_y = match settings.position {
+                NotificationPosition::TopRight | NotificationPosition::TopCenter | NotificationPosition::TopLeft => y_offset,
+                NotificationPosition::BottomRight | NotificationPosition::BottomCenter | NotificationPosition::BottomLeft => self.screen_height - y_offset - window_height,
+            };
+
+            // self.compositor.move_surface(surface_id, x, current_y);
+            // For GTK window directly:
+            window.move_(x, current_y); // Note: window.move_ is not standard GTK4 for positioning on screen for layered shells.
+                                        // Proper positioning requires compositor interaction (e.g. layer-shell protocol).
+                                        // This .move_ might work for traditional WMs or if the window is a child of a layer surface.
+                                        // For now, this is a placeholder for actual compositor-based positioning.
+            debug!("Attempting to position popup at x={}, y={}", x, current_y);
+
+            y_offset += window_height + settings.spacing;
+        }
     }
     
-    /// Gets the notification width
-    fn get_notification_width(&self) -> UiResult<i32> {
-        let settings = self.settings.read().map_err(|_| {
-            UiError::LockError("Failed to acquire read lock on notification settings".to_string())
-        })?;
-        
-        Ok(settings.width)
-    }
-    
-    /// Gets the notification spacing
-    fn get_notification_spacing(&self) -> UiResult<i32> {
-        let settings = self.settings.read().map_err(|_| {
-            UiError::LockError("Failed to acquire read lock on notification settings".to_string())
-        })?;
-        
-        Ok(settings.spacing)
-    }
-    
-    /// Gets the maximum number of notifications
-    fn get_max_notifications(&self) -> UiResult<usize> {
-        let settings = self.settings.read().map_err(|_| {
-            UiError::LockError("Failed to acquire read lock on notification settings".to_string())
-        })?;
-        
-        Ok(settings.max_notifications)
-    }
-    
-    /// Gets whether to show notification icons
-    fn get_show_icons(&self) -> UiResult<bool> {
-        let settings = self.settings.read().map_err(|_| {
-            UiError::LockError("Failed to acquire read lock on notification settings".to_string())
-        })?;
-        
-        Ok(settings.show_icons)
-    }
-    
-    /// Gets whether to show notification actions
-    fn get_show_actions(&self) -> UiResult<bool> {
-        let settings = self.settings.read().map_err(|_| {
-            UiError::LockError("Failed to acquire read lock on notification settings".to_string())
-        })?;
-        
-        Ok(settings.show_actions)
-    }
-    
-    /// Updates the notification settings
     pub fn update_settings(&self, settings_update: impl FnOnce(&mut NotificationSettings)) -> UiResult<()> {
-        let mut settings = self.settings.write().map_err(|_| {
-            UiError::LockError("Failed to acquire write lock on notification settings".to_string())
-        })?;
+        let mut settings_guard = self.settings.lock().unwrap();
+        settings_update(&mut *settings_guard);
+        drop(settings_guard); // Release lock before calling reposition
         
-        settings_update(&mut settings);
-        
-        // Reposition notifications if the position changed
-        self.position_notifications()?;
-        
+        self.reposition_all_notifications();
         Ok(())
     }
 }
 
+
+impl UiComponent for NotificationUi {
+    fn init(&self) -> UiResult<()> {
+        info!("NotificationUi initialized.");
+        // The old timer logic for expiration was per-popup and handled via glib::timeout_add_seconds_local
+        // in the old `init`. Now, timeouts are set when a popup is shown.
+        // Any global periodic checks could go here if needed.
+        Ok(())
+    }
+    
+    fn shutdown(&self) -> UiResult<()> {
+        info!("NotificationUi shutting down...");
+        let popups_guard = self.active_popups.lock().unwrap();
+        for (_id, window) in popups_guard.iter() {
+            // self.compositor.destroy_surface(...);
+            window.destroy();
+        }
+        drop(popups_guard);
+        self.active_popups.lock().unwrap().clear();
+        info!("All active notification popups destroyed.");
+        Ok(())
+    }
+}
+
+// Clone implementation needs to be careful with Arc<Mutex<Option<...>>>
 impl Clone for NotificationUi {
     fn clone(&self) -> Self {
         Self {
             app: self.app.clone(),
             style_manager: self.style_manager.clone(),
             compositor: self.compositor.clone(),
-            active_notifications: self.active_notifications.clone(),
+            active_popups: self.active_popups.clone(),
             settings: self.settings.clone(),
+            ui_notification_service: self.ui_notification_service.clone(),
+            screen_width: self.screen_width,
+            screen_height: self.screen_height,
         }
-    }
-}
-
-impl Clone for NotificationAction {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id.clone(),
-            label: self.label.clone(),
-            callback: Box::new(|| Ok(())), // Placeholder, actual callbacks can't be cloned
-        }
-    }
-}
-
-impl Clone for NotificationUrgency {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Low => Self::Low,
-            Self::Normal => Self::Normal,
-            Self::Critical => Self::Critical,
-        }
-    }
-}
-
-impl Clone for NotificationPosition {
-    fn clone(&self) -> Self {
-        match self {
-            Self::TopRight => Self::TopRight,
-            Self::TopCenter => Self::TopCenter,
-            Self::TopLeft => Self::TopLeft,
-            Self::BottomRight => Self::BottomRight,
-            Self::BottomCenter => Self::BottomCenter,
-            Self::BottomLeft => Self::BottomLeft,
-        }
-    }
-}
-
-impl UiComponent for NotificationUi {
-    fn init(&self) -> UiResult<()> {
-        // Set up notification expiration checking
-        let self_clone = self.clone();
-        glib::timeout_add_seconds_local(1, move || {
-            let active_notifications = match self_clone.active_notifications.lock() {
-                Ok(notifications) => notifications,
-                Err(_) => return glib::Continue(true),
-            };
-            
-            let now = Instant::now();
-            let expired: Vec<String> = active_notifications.iter()
-                .filter_map(|(id, notification)| {
-                    if let Some(expires_at) = notification.expires_at {
-                        if now >= expires_at {
-                            Some(id.clone())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            
-            drop(active_notifications);
-            
-            for id in expired {
-                if let Err(e) = self_clone.dismiss_notification(&id) {
-                    eprintln!("Failed to dismiss expired notification: {}", e);
-                }
-            }
-            
-            glib::Continue(true)
-        });
-        
-        Ok(())
-    }
-    
-    fn shutdown(&self) -> UiResult<()> {
-        // Dismiss all notifications
-        let active_notifications = self.active_notifications.lock().map_err(|_| {
-            UiError::LockError("Failed to acquire lock on active notifications".to_string())
-        })?;
-        
-        let notification_ids: Vec<String> = active_notifications.keys().cloned().collect();
-        
-        drop(active_notifications);
-        
-        for id in notification_ids {
-            self.dismiss_notification(&id)?;
-        }
-        
-        Ok(())
     }
 }

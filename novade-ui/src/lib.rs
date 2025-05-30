@@ -11,6 +11,7 @@ pub mod panel_ui;
 pub mod application_launcher;
 pub mod settings_ui;
 pub mod notification_ui;
+pub mod notification_client; // Added new module
 pub mod theme_ui;
 pub mod workspace_ui;
 pub mod system_tray;

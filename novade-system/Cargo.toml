@@ -55,5 +55,6 @@ novade-core = { path = "../novade-core" } # Assuming these are local sibling cra
 novade-domain = { path = "../novade-domain" } # Adjust paths as necessary
 zbus = "3"
 tokio = { version = "1", features = ["full"] }
+futures-util = { version = "0.3", features = ["std"] }
 
 [end of novade-system/Cargo.toml]
