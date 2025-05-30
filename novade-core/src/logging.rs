@@ -5,7 +5,7 @@
 //! file logging with configurable formats.
 
 use crate::config::LoggingConfig;
-use crate::error::CoreError;
+use crate::error::{CoreError, LoggingError};
 use crate::utils; // For utils::fs::ensure_dir_exists
 
 use std::io::stdout;
@@ -121,10 +121,10 @@ pub fn init_logging(config: &LoggingConfig, is_reload: bool) -> Result<(), CoreE
         "error" => Level::ERROR.to_string(),
         invalid_level => {
             // This error case is per spec for init_logging, even if validate_config should catch it.
-            return Err(CoreError::LoggingInitialization(format!(
+            return Err(CoreError::Logging(LoggingError::InitializationFailure(format!(
                 "Invalid log level in config: {}",
                 invalid_level // Use the actual invalid_level string from config for clarity
-            )));
+            ))));
         }
     };
 
@@ -158,9 +158,9 @@ pub fn init_logging(config: &LoggingConfig, is_reload: bool) -> Result<(), CoreE
         Ok(()) => Ok(()),
         Err(e) => {
             if !is_reload {
-                Err(CoreError::LoggingInitialization(format!(
+                Err(CoreError::Logging(LoggingError::InitializationFailure(format!(
                     "Failed to set global tracing subscriber. Was it already initialized? Error: {}", e
-                )))
+                ))))
             } else {
                 // If is_reload, log an info message. The actual logger might not have changed.
                 // Use eprintln as a fallback if tracing system is in an uncertain state.
@@ -249,7 +249,7 @@ mod tests {
         let result = init_logging(&config, false);
         assert!(result.is_err());
         match result.err().unwrap() {
-            CoreError::LoggingInitialization(msg) => {
+            CoreError::Logging(LoggingError::InitializationFailure(msg)) => {
                 assert!(msg.contains("Invalid log level in config: supertrace"));
             }
             other_error => panic!("Unexpected error type: {:?}", other_error),
@@ -356,7 +356,7 @@ mod tests {
         let result = init_logging(&config2, false); // is_reload = false
         assert!(result.is_err(), "Second init with is_reload=false should error");
         match result.err().unwrap() {
-            CoreError::LoggingInitialization(msg) => {
+            CoreError::Logging(LoggingError::InitializationFailure(msg)) => {
                 assert!(msg.contains("Failed to set global tracing subscriber"));
             }
             other_error => panic!("Unexpected error type: {:?}", other_error),
