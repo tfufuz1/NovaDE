@@ -6,10 +6,11 @@ use smithay::{
     },
     utils::{BufferCoords, Logical, Rectangle, Region, Size, Transform},
 };
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex}; // Added Arc
 use uuid::Uuid;
 
-use crate::compositor::renderer_interface::abstraction::RenderableTexture; // Assuming this path
+// use crate::compositor::renderer_interface::abstraction::RenderableTexture; // Old
+use crate::renderer::wgpu_texture::WgpuRenderableTexture; // New
 
 #[derive(Debug)]
 pub struct AttachedBufferInfo {
@@ -25,7 +26,7 @@ pub struct SurfaceData {
     pub role: Mutex<Option<String>>,
     pub client_id: ClientId,
     pub current_buffer_info: Mutex<Option<AttachedBufferInfo>>,
-    pub texture_handle: Mutex<Option<Box<dyn RenderableTexture>>>,
+    pub texture_handle: Mutex<Option<Arc<WgpuRenderableTexture>>>, // Changed type
     pub damage_buffer_coords: Mutex<Vec<Rectangle<i32, smithay::utils::Buffer>>>,
     pub opaque_region_surface_local: Mutex<Option<Region<Logical>>>,
     pub input_region_surface_local: Mutex<Option<Region<Logical>>>,

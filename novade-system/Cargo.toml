@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Graphics / Renderer dependencies
 glow = "0.13"
+wgpu = "0.18"
 khronos-egl = "6.0.0" # For EGL context management
 # libloading is often a transitive dependency of khronos-egl for dynamic loading of EGL symbols
 # but can be added explicitly if specific version is needed or direct use is planned.
@@ -57,3 +58,4 @@ novade-domain = { path = "../novade-domain" } # Adjust paths as necessary
 zbus = "3"
 tokio = { version = "1", features = ["full"] }
 futures-util = { version = "0.3", features = ["std"] }
+pollster = "0.3"

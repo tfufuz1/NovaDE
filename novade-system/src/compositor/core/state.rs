@@ -40,6 +40,8 @@ use crate::compositor::shell::xdg_shell::types::{DomainWindowIdentifier, Managed
 use novade_domain::DomainServices;
 use crate::input::input_dispatcher::InputDispatcher;
 use crate::input::keyboard_layout::KeyboardLayoutManager;
+use crate::renderer::wgpu_renderer::NovaWgpuRenderer;
+use crate::compositor::renderer_interface::abstraction::FrameRenderer; // Added FrameRenderer import
 
 mod input_handlers; // Added module declaration
 mod output_handlers; // Added module declaration for output handlers
@@ -67,8 +69,10 @@ use novade_domain::cpu_usage_service::ICpuUsageService;
 pub enum ActiveRendererType {
     /// GLES2 renderer is active.
     Gles,
-    /// Vulkan renderer is active.
+    /// Vulkan renderer is active (currently GLES-on-Vulkan interop or placeholder).
     Vulkan,
+    /// WGPU renderer is active.
+    Wgpu,
 }
 
 // Main compositor state
@@ -79,7 +83,7 @@ pub struct DesktopState {
     pub compositor_state: CompositorState,
     pub shm_state: ShmState,
     pub output_manager_state: OutputManagerState,
-    pub gles_renderer: Option<crate::compositor::renderers::gles2::renderer::Gles2Renderer>, // Renamed from renderer
+    // pub gles_renderer: Option<crate::compositor::renderers::gles2::renderer::Gles2Renderer>, // Removed
     pub xdg_shell_state: XdgShellState,
     pub space: Space<ManagedWindow>,
     pub windows: HashMap<DomainWindowIdentifier, Arc<ManagedWindow>>,
@@ -95,15 +99,16 @@ pub struct DesktopState {
     pub xdg_decoration_state: XdgDecorationState,
     pub screencopy_state: ScreencopyState, // Added screencopy_state
 
-    // Vulkan Renderer Components
-    pub vulkan_instance: Option<Arc<VulkanInstance>>,
-    pub vulkan_physical_device_info: Option<Arc<PhysicalDeviceInfo>>,
-    pub vulkan_logical_device: Option<Arc<LogicalDevice>>,
-    pub vulkan_allocator: Option<Arc<Allocator>>, // Assuming crate::compositor::renderer::vulkan::allocator::Allocator
-    pub vulkan_frame_renderer: Option<Arc<Mutex<VulkanFrameRenderer>>>,
+    // Vulkan Renderer Components - REMOVED
+    // pub vulkan_instance: Option<Arc<VulkanInstance>>,
+    // pub vulkan_physical_device_info: Option<Arc<PhysicalDeviceInfo>>,
+    // pub vulkan_logical_device: Option<Arc<LogicalDevice>>,
+    // pub vulkan_allocator: Option<Arc<Allocator>>,
+    // pub vulkan_frame_renderer: Option<Arc<Mutex<VulkanFrameRenderer>>>,
     
     /// Specifies which renderer is currently active.
     pub active_renderer_type: ActiveRendererType,
+    pub active_renderer: Option<Arc<Mutex<dyn FrameRenderer>>>, // Unified active renderer
 
     // --- Added for MCP and CPU Usage Service ---
     pub mcp_connection_service: Option<Arc<TokioMutex<MCPConnectionService>>>,
@@ -114,6 +119,11 @@ pub struct DesktopState {
     // --- Input Management ---
     pub input_dispatcher: InputDispatcher,
     pub keyboard_layout_manager: KeyboardLayoutManager,
+
+    // --- WGPU Renderer ---
+    // pub wgpu_renderer: Option<Arc<Mutex<NovaWgpuRenderer>>>, // Removed specific WGPU field
+    // Adding concrete WGPU renderer for commit path as a temporary solution
+    pub wgpu_renderer_concrete: Option<Arc<Mutex<NovaWgpuRenderer>>>,
 }
 
 impl DesktopState {
@@ -165,7 +175,7 @@ impl DesktopState {
             compositor_state,
             shm_state,
             output_manager_state,
-            gles_renderer: None, // Initialize to None
+            // gles_renderer: None, // Removed
             xdg_shell_state,
             space,
             windows: HashMap::new(),
@@ -180,12 +190,13 @@ impl DesktopState {
             dmabuf_state,
             xdg_decoration_state,
             screencopy_state, // Add to struct instantiation
-            vulkan_instance: None, // Initialize to None
-            vulkan_physical_device_info: None, // Initialize to None
-            vulkan_logical_device: None, // Initialize to None
-            vulkan_allocator: None, // Initialize to None
-            vulkan_frame_renderer: None, // Initialize to None
-            active_renderer_type: ActiveRendererType::Gles, // Default to Gles, backend should update
+            // vulkan_instance: None, // Removed
+            // vulkan_physical_device_info: None, // Removed
+            // vulkan_logical_device: None, // Removed
+            // vulkan_allocator: None, // Removed
+            // vulkan_frame_renderer: None, // Removed
+            active_renderer_type: ActiveRendererType::Gles, // Default, backend should update
+            active_renderer: None, // Initialize unified renderer as None
             // --- Initialize new service fields ---
             mcp_connection_service: None,
             cpu_usage_service: None,
@@ -193,6 +204,8 @@ impl DesktopState {
             domain_services: None,
             input_dispatcher,
             keyboard_layout_manager,
+            // wgpu_renderer: None, // Removed specific field
+            wgpu_renderer_concrete: None, // Initialize concrete WGPU renderer as None
         }
     }
 }
@@ -318,14 +331,20 @@ impl CompositorHandler for DesktopState {
 
                 match self.active_renderer_type {
                     ActiveRendererType::Gles => {
-                        if let Some(gles_renderer) = self.gles_renderer.as_mut() {
-                            if let Some(dmabuf_attributes) = self.dmabuf_state.get_dmabuf_attributes(buffer_to_texture) {
-                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting DMABUF import for surface (GLES)");
-                                match gles_renderer.create_texture_from_dmabuf(&dmabuf_attributes) {
-                                    Ok(new_texture) => {
-                                        surface_data.texture_handle = Some(new_texture);
-                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created GLES texture from DMABUF");
-                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
+                        // This path is problematic as gles_renderer was removed and texture_handle expects WgpuRenderableTexture.
+                        // For now, this means GLES support is effectively disabled for texture import.
+                        tracing::warn!("GLES renderer path in commit: gles_renderer field is removed. Cannot import texture for surface_id = {:?}.", surface.id());
+                        surface_data.texture_handle = None;
+                        surface_data.current_buffer_info = None;
+                        // if let Some(gles_renderer) = self.gles_renderer.as_mut() { // gles_renderer removed
+                        //     if let Some(dmabuf_attributes) = self.dmabuf_state.get_dmabuf_attributes(buffer_to_texture) {
+                        //         tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting DMABUF import for surface (GLES)");
+                        //         match gles_renderer.create_texture_from_dmabuf(&dmabuf_attributes) {
+                        //             Ok(new_texture_box) => {
+                        //                 tracing::warn!("GLES DMABUF texture created, but SurfaceData expects Arc<WgpuRenderableTexture>. This texture will not be usable with WGPU renderer.");
+                        //                 surface_data.texture_handle = None;
+                        //                 tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created GLES texture from DMABUF");
+                        //                 surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
                                             buffer: buffer_to_texture.clone(),
                                             scale: current_surface_attributes.buffer_scale,
                                             transform: current_surface_attributes.buffer_transform,
@@ -341,10 +360,11 @@ impl CompositorHandler for DesktopState {
                             } else {
                                 tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import (GLES)");
                                 match gles_renderer.create_texture_from_shm(buffer_to_texture) {
-                                    Ok(new_texture) => {
-                                        surface_data.texture_handle = Some(new_texture);
-                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created GLES texture from SHM");
-                                        let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
+                        //             Ok(new_texture_box) => {
+                        //                 tracing::warn!("GLES SHM texture created, but SurfaceData expects Arc<WgpuRenderableTexture>. This texture will not be usable with WGPU renderer.");
+                        //                 surface_data.texture_handle = None;
+                        //                 tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created GLES texture from SHM");
+                        //                 let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
                                         surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
                                             buffer: buffer_to_texture.clone(),
                                             scale: current_surface_attributes.buffer_scale,
@@ -360,16 +380,20 @@ impl CompositorHandler for DesktopState {
                                 }
                             }
                         } else {
-                            tracing::warn!(surface_id = ?surface.id(), client_info = %client_id_str, "GLES renderer selected but not available for texture import.");
-                            surface_data.texture_handle = None;
-                            surface_data.current_buffer_info = None;
-                        }
+                        //     tracing::warn!(surface_id = ?surface.id(), client_info = %client_id_str, "GLES renderer selected but not available for texture import.");
+                        //     surface_data.texture_handle = None;
+                        //     surface_data.current_buffer_info = None;
+                        // }
                     }
                     ActiveRendererType::Vulkan => {
-                        if let (
-                            Some(vk_renderer_mutex),
-                            Some(vk_allocator),
-                            Some(vk_instance),
+                        // This path is problematic as vulkan_frame_renderer was removed.
+                        tracing::warn!("Vulkan renderer path in commit: vulkan_frame_renderer field is removed. Cannot import texture for surface_id = {:?}.", surface.id());
+                        surface_data.texture_handle = None;
+                        surface_data.current_buffer_info = None;
+                        // if let ( // vulkan_frame_renderer removed
+                        //     Some(vk_renderer_mutex),
+                        //     Some(vk_allocator),
+                        //     Some(vk_instance),
                             Some(vk_physical_device),
                             Some(vk_logical_device)
                         ) = (
@@ -390,10 +414,11 @@ impl CompositorHandler for DesktopState {
                                     vk_logical_device,
                                     vk_allocator
                                 ) {
-                                    Ok(new_texture) => {
-                                        surface_data.texture_handle = Some(new_texture);
-                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully imported DMABUF as Vulkan texture.");
-                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
+                        //     Ok(new_texture_box) => {
+                        //         tracing::warn!("Vulkan (GL interop) DMABUF texture created, but SurfaceData expects Arc<WgpuRenderableTexture>.");
+                        //         surface_data.texture_handle = None;
+                        //         tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully imported DMABUF as Vulkan texture.");
+                        //         surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
                                             buffer: buffer_to_texture.clone(),
                                             scale: current_surface_attributes.buffer_scale,
                                             transform: current_surface_attributes.buffer_transform,
@@ -413,10 +438,11 @@ impl CompositorHandler for DesktopState {
                                     vk_allocator,
                                     vk_logical_device
                                 ) {
-                                    Ok(new_texture) => {
-                                        surface_data.texture_handle = Some(new_texture);
-                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully imported SHM as Vulkan texture.");
-                                        let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
+                        //     Ok(new_texture_box) => {
+                        //         tracing::warn!("Vulkan (GL interop) SHM texture created, but SurfaceData expects Arc<WgpuRenderableTexture>.");
+                        //         surface_data.texture_handle = None;
+                        //         tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully imported SHM as Vulkan texture.");
+                        //         let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
                                         surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
                                             buffer: buffer_to_texture.clone(),
                                             scale: current_surface_attributes.buffer_scale,
@@ -432,7 +458,61 @@ impl CompositorHandler for DesktopState {
                                 }
                             }
                         } else {
-                            tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Vulkan renderer selected, but some core components (renderer, allocator, instance, devices) are missing. Cannot import texture.");
+                        //     tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Vulkan renderer selected, but some core components (renderer, allocator, instance, devices) are missing. Cannot import texture.");
+                        //     surface_data.texture_handle = None;
+                        //     surface_data.current_buffer_info = None;
+                        // }
+                    }
+                    ActiveRendererType::Wgpu => {
+                        if let Some(wgpu_renderer_concrete_mutexed) = self.wgpu_renderer_concrete.as_ref() {
+                            let mut wgpu_renderer = wgpu_renderer_concrete_mutexed.lock().unwrap();
+                            if self.dmabuf_state.get_dmabuf_attributes(buffer_to_texture).is_some() {
+                                // TODO: Implement DMABUF for WGPU
+                                tracing::warn!(surface_id = ?surface.id(), client_info = %client_id_str, "DMABUF import for WGPU not yet implemented.");
+                                surface_data.texture_handle = None;
+                                surface_data.current_buffer_info = None;
+                            } else { // SHM Buffer
+                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import (WGPU)");
+                                match wgpu_renderer.create_texture_from_shm(buffer_to_texture) {
+                                    Ok(wgpu_texture_arc) => {
+                                        surface_data.texture_handle = Some(wgpu_texture_arc);
+                                        let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
+                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
+                                            buffer: buffer_to_texture.clone(),
+                                            scale: current_surface_attributes.buffer_scale,
+                                            transform: current_surface_attributes.buffer_transform,
+                                            dimensions,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create WGPU texture from SHM (DMABUF path fallback): {:?}", e);
+                                        surface_data.texture_handle = None;
+                                        surface_data.current_buffer_info = None;
+                                    }
+                                }
+                            } else { // SHM Buffer
+                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import (WGPU)");
+                                match wgpu_renderer.create_texture_from_shm(buffer_to_texture) {
+                                    Ok(wgpu_texture_arc) => {
+                                        surface_data.texture_handle = Some(wgpu_texture_arc);
+                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created WGPU texture from SHM.");
+                                        let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
+                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
+                                            buffer: buffer_to_texture.clone(),
+                                            scale: current_surface_attributes.buffer_scale,
+                                            transform: current_surface_attributes.buffer_transform,
+                                            dimensions,
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create WGPU texture from SHM: {:?}", e);
+                                        surface_data.texture_handle = None;
+                                        surface_data.current_buffer_info = None;
+                                    }
+                                }
+                            }
+                        } else {
+                            tracing::warn!("WGPU renderer selected but not available in commit path.");
                             surface_data.texture_handle = None;
                             surface_data.current_buffer_info = None;
                         }
