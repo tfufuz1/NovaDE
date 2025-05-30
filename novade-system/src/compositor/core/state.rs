@@ -36,7 +36,7 @@ use std::{
 };
 use crate::compositor::surface_management::{AttachedBufferInfo, SurfaceData}; 
 use crate::compositor::core::ClientCompositorData;
-use crate::compositor::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
+use crate::compositor::shell::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
 use novade_domain::DomainServices;
 
 mod input_handlers; // Added module declaration
