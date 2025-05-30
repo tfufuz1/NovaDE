@@ -51,7 +51,8 @@ pub trait RenderableTexture: Send + Sync + std::fmt::Debug {
 pub enum RenderElement<'a> {
     WaylandSurface {
         surface_wl: &'a WlSurface,
-        surface_data_arc: Arc<SurfaceData>,
+        // surface_data_arc: Arc<SurfaceData>, // OLD
+        surface_data_mutex_arc: Arc<std::sync::Mutex<crate::compositor::surface_management::SurfaceData>>, // NEW
         geometry: Rectangle<i32, Logical>,
         damage_surface_local: Vec<Rectangle<i32, SmithayBuffer>>, // Use the renamed SmithayBuffer
     },
