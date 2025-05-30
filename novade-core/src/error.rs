@@ -62,10 +62,10 @@ pub enum CoreError {
     #[error("Color Parsing Error: {0}")]
     ColorParse(#[from] ColorParseError),
 
-    /// Errors that occur during the initialization of the logging system.
-    /// Contains a descriptive message of the failure.
-    #[error("Logging Initialization Failed: {0}")]
-    LoggingInitialization(String),
+    /// Errors related to the logging system.
+    /// Wraps a [`LoggingError`].
+    #[error("Logging Error: {0}")]
+    Logging(#[from] LoggingError),
 
     /// Errors related to filesystem operations, such as creating directories or reading files,
     /// that are not covered by more specific configuration or logging I/O errors.
@@ -130,6 +130,29 @@ pub enum ConfigError {
     DirectoryUnavailable { dir_type: String },
 }
 
+/// Specific errors related to logging.
+#[derive(Debug, Error, Clone, PartialEq)]
+pub enum LoggingError {
+    /// Error indicating a failure during the initialization of the logging system.
+    #[error("Logging system initialization failed: {0}")]
+    InitializationFailure(String),
+
+    /// Error indicating a problem with logging configuration.
+    #[error("Logging configuration error: {0}")]
+    ConfigurationError(String),
+
+    /// Error indicating a failure during log output.
+    #[error("Logging output error: {0}")]
+    OutputError(String),
+    // If std::io::Error needs to be included, the variant might look like:
+    // #[error("Logging output error ({context})")]
+    // OutputIoError {
+    //     context: String,
+    //     #[source]
+    //     source: std::io::Error,
+    // },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,14 +207,95 @@ mod tests {
             _ => panic!("Incorrect source for CoreError::ColorParse after conversion"),
         }
     }
-    
+
     #[test]
-    fn test_core_error_logging_initialization_variant() {
+    fn test_core_error_logging_initialization_variant_updated() {
         let err_msg = "Failed to init logger".to_string();
-        let core_err = CoreError::LoggingInitialization(err_msg.clone());
+        // Update this test to use the new structure
+        let logging_err = LoggingError::InitializationFailure(err_msg.clone());
+        let core_err: CoreError = logging_err.clone().into(); // Test #[from] for CoreError::Logging
+
+        assert_eq!(
+            format!("{}", core_err),
+            format!("Logging Error: Logging system initialization failed: {}", err_msg)
+        );
+        assert!(core_err.source().is_some());
+        // Check that the source is the original LoggingError
+        match core_err.source().unwrap().downcast_ref::<LoggingError>() {
+            Some(original_err) => assert_eq!(original_err, &logging_err),
+            None => panic!("Source is not a LoggingError"),
+        }
+    }
+
+    // --- LoggingError Tests ---
+    #[test]
+    fn test_logging_error_display() {
+        assert_eq!(
+            format!("{}", LoggingError::InitializationFailure("init_test".to_string())),
+            "Logging system initialization failed: init_test"
+        );
+        assert_eq!(
+            format!("{}", LoggingError::ConfigurationError("config_test".to_string())),
+            "Logging configuration error: config_test"
+        );
+        assert_eq!(
+            format!("{}", LoggingError::OutputError("output_test".to_string())),
+            "Logging output error: output_test"
+        );
+    }
+
+    #[test]
+    fn test_core_error_from_logging_error_conversion() {
+        // Test InitializationFailure
+        let init_fail_msg = "init_fail_core_conversion".to_string();
+        let logging_err_init = LoggingError::InitializationFailure(init_fail_msg.clone());
+        let core_err_init: CoreError = logging_err_init.clone().into();
+        assert_eq!(
+            format!("{}", core_err_init),
+            format!("Logging Error: Logging system initialization failed: {}", init_fail_msg)
+        );
+        assert!(matches!(core_err_init, CoreError::Logging(_)));
+        if let CoreError::Logging(ref inner_err) = core_err_init {
+            assert_eq!(inner_err, &logging_err_init);
+        } else {
+            panic!("CoreError is not CoreError::Logging for InitializationFailure variant check");
+        }
+        assert!(core_err_init.source().is_some());
+        assert_eq!(core_err_init.source().unwrap().downcast_ref::<LoggingError>().unwrap(), &logging_err_init);
+
+        // Test ConfigurationError
+        let config_err_msg = "config_err_core_conversion".to_string();
+        let logging_err_config = LoggingError::ConfigurationError(config_err_msg.clone());
+        let core_err_config: CoreError = logging_err_config.clone().into();
+        assert_eq!(
+            format!("{}", core_err_config),
+            format!("Logging Error: Logging configuration error: {}", config_err_msg)
+        );
+        assert!(matches!(core_err_config, CoreError::Logging(_)));
+        if let CoreError::Logging(ref inner_err) = core_err_config {
+            assert_eq!(inner_err, &logging_err_config);
+        } else {
+            panic!("CoreError is not CoreError::Logging for ConfigurationError variant check");
+        }
+        assert!(core_err_config.source().is_some());
+        assert_eq!(core_err_config.source().unwrap().downcast_ref::<LoggingError>().unwrap(), &logging_err_config);
         
-        assert_eq!(format!("{}", core_err), format!("Logging Initialization Failed: {}", err_msg));
-        assert!(core_err.source().is_none());
+        // Test OutputError
+        let output_err_msg = "output_err_core_conversion".to_string();
+        let logging_err_output = LoggingError::OutputError(output_err_msg.clone());
+        let core_err_output: CoreError = logging_err_output.clone().into();
+        assert_eq!(
+            format!("{}", core_err_output),
+            format!("Logging Error: Logging output error: {}", output_err_msg)
+        );
+        assert!(matches!(core_err_output, CoreError::Logging(_)));
+        if let CoreError::Logging(ref inner_err) = core_err_output {
+            assert_eq!(inner_err, &logging_err_output);
+        } else {
+            panic!("CoreError is not CoreError::Logging for OutputError variant check");
+        }
+        assert!(core_err_output.source().is_some());
+        assert_eq!(core_err_output.source().unwrap().downcast_ref::<LoggingError>().unwrap(), &logging_err_output);
     }
 
     #[test]

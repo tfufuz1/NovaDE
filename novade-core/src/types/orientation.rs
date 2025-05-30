@@ -25,6 +25,7 @@
 //! ```
 
 use std::fmt;
+use serde::{Serialize, Deserialize};
 
 /// Represents a general orientation in 2D space, either Horizontal or Vertical.
 ///
@@ -42,9 +43,10 @@ use std::fmt;
 /// }
 /// assert_eq!(format!("{}", panel_orientation), "vertical");
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum Orientation {
     /// Represents a horizontal orientation (e.g., along the x-axis).
+    #[default]
     Horizontal,
     /// Represents a vertical orientation (e.g., along the y-axis).
     Vertical,
@@ -207,12 +209,36 @@ impl fmt::Display for Direction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json; // For testing serde
 
     #[test]
     fn test_orientation_is_horizontal() {
         assert!(Orientation::Horizontal.is_horizontal());
         assert!(!Orientation::Vertical.is_horizontal());
     }
+
+    #[test]
+    fn test_orientation_default() {
+        assert_eq!(Orientation::default(), Orientation::Horizontal);
+    }
+
+    #[test]
+    fn test_orientation_serde() {
+        let horizontal = Orientation::Horizontal;
+        let serialized_h = serde_json::to_string(&horizontal).unwrap();
+        // Default serde representation for simple enums is just the variant name as a string
+        assert_eq!(serialized_h, "\"Horizontal\"");
+        let deserialized_h: Orientation = serde_json::from_str(&serialized_h).unwrap();
+        assert_eq!(deserialized_h, Orientation::Horizontal);
+
+        let vertical = Orientation::Vertical;
+        let serialized_v = serde_json::to_string(&vertical).unwrap();
+        assert_eq!(serialized_v, "\"Vertical\"");
+        let deserialized_v: Orientation = serde_json::from_str(&serialized_v).unwrap();
+        assert_eq!(deserialized_v, Orientation::Vertical);
+    }
+
+    // Tests for Direction remain unchanged
 
     #[test]
     fn test_orientation_is_vertical() {

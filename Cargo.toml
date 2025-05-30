@@ -5,9 +5,6 @@ members = [
     "novade-domain",
     "novade-system",
     "novade-ui",
-    "clock_mcp_server",
-    "cpu_mcp_server",
-    "power_mcp_server",
     # nova_compositor will be merged into novade-system
 ]
 
