@@ -1,6 +1,8 @@
 pub mod dbus_integration;
 pub mod dbus_interfaces; // Added new module
 pub mod input;
+pub mod network_manager; // New module path
+pub mod power_management; // New module path
 pub mod renderer; // Added this line
 pub mod system_services;
 pub mod window_info_provider;

@@ -88,6 +88,9 @@ pub trait NetworkDBusOperations: Send + Sync {
     async fn disconnect(&self, id: &str) -> SystemResult<()>;
     async fn has_connectivity(&self) -> SystemResult<bool>;
     async fn start_signal_handlers(&self) -> SystemResult<()>;
+    async fn request_scan(&self, wireless_device_path: &ObjectPath<'_>) -> SystemResult<()>;
+    async fn get_access_points(&self, wireless_device_path: &ObjectPath<'_>) -> SystemResult<Vec<AccessPointInfo>>;
+    async fn add_and_activate_connection(&self, connection_settings: HashMap<String, HashMap<String, Value<'static>>>) -> SystemResult<(ObjectPath<'static>, ObjectPath<'static>)>;
 }
 
 /// Network connection.
@@ -130,6 +133,16 @@ impl NetworkConnection {
     pub fn is_default(&self) -> bool { self.is_default }
     pub fn strength(&self) -> Option<f64> { self.strength }
     pub fn speed(&self) -> Option<u32> { self.speed }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AccessPointInfo {
+    pub ssid: String,
+    pub strength: u8, // 0-100
+    pub frequency: u32, // MHz
+    pub hw_address: String, // BSSID
+    pub object_path: ObjectPath<'static>,
+    // Add other relevant fields like security flags, max_bitrate, etc.
 }
 
 /// Network event type.
@@ -470,6 +483,70 @@ impl NetworkDBusOperations for NetworkDBusConnection {
         });
         println!("NetworkManager D-Bus signal handlers started."); 
         Ok(())
+    }
+
+    async fn request_scan(&self, wireless_device_path: &ObjectPath<'_>) -> SystemResult<()> {
+        let device_proxy = Proxy::new(
+            self.connection.clone(),
+            Self::NM_DBUS_SERVICE,
+            wireless_device_path.clone(),
+            Self::NM_DEVICE_WIRELESS_INTERFACE,
+        ).await.map_err(|e| to_system_error(format!("Wireless device proxy failed for {}: {}", wireless_device_path, e), SystemErrorKind::DBus))?;
+
+        device_proxy.call_method("RequestScan", &(HashMap::<String, Value>::new())) // Empty options map
+            .await
+            .map_err(|e| to_system_error(format!("RequestScan failed for {}: {}", wireless_device_path, e), SystemErrorKind::DBus))?;
+        Ok(())
+    }
+
+    async fn get_access_points(&self, wireless_device_path: &ObjectPath<'_>) -> SystemResult<Vec<AccessPointInfo>> {
+        let device_proxy = Proxy::new(
+            self.connection.clone(),
+            Self::NM_DBUS_SERVICE,
+            wireless_device_path.clone(),
+            Self::NM_DEVICE_WIRELESS_INTERFACE,
+        ).await.map_err(|e| to_system_error(format!("Wireless device proxy failed for {}: {}", wireless_device_path, e), SystemErrorKind::DBus))?;
+
+        let ap_paths: Vec<ObjectPath> = Self::get_property_generic_priv(&device_proxy, "AccessPoints").await?;
+        let mut access_points_info = Vec::new();
+
+        for ap_path_cow in ap_paths {
+            let ap_path = ap_path_cow.into_owned();
+            let ap_proxy = Proxy::new(
+                self.connection.clone(),
+                Self::NM_DBUS_SERVICE,
+                ap_path.clone(),
+                Self::NM_ACCESS_POINT_INTERFACE,
+            ).await.map_err(|e| to_system_error(format!("AP proxy failed for {}: {}", ap_path, e), SystemErrorKind::DBus))?;
+
+            let ssid_bytes: Vec<u8> = Self::get_property_generic_priv(&ap_proxy, "Ssid").await?;
+            let ssid = String::from_utf8(ssid_bytes).unwrap_or_else(|_| "<invalid UTF-8>".to_string());
+
+            let strength: u8 = Self::get_property_generic_priv(&ap_proxy, "Strength").await?;
+            let frequency: u32 = Self::get_property_generic_priv(&ap_proxy, "Frequency").await?;
+            let hw_address: String = Self::get_property_generic_priv(&ap_proxy, "HwAddress").await?;
+
+            access_points_info.push(AccessPointInfo {
+                ssid,
+                strength,
+                frequency,
+                hw_address,
+                object_path: ap_path,
+            });
+        }
+        Ok(access_points_info)
+    }
+
+    async fn add_and_activate_connection(
+        &self,
+        connection_settings: HashMap<String, HashMap<String, Value<'static>>>,
+    ) -> SystemResult<(ObjectPath<'static>, ObjectPath<'static>)> {
+        let result: (ObjectPath<'static>, ObjectPath<'static>) = self.nm_proxy
+            .call_method("AddAndActivateConnection", &(connection_settings, ObjectPath::from_static_str_unchecked("/"), HashMap::<String,Value>::new()))
+            .await
+            .map_err(|e| to_system_error(format!("AddAndActivateConnection failed: {}", e), SystemErrorKind::DBus))?
+            .body()?;
+        Ok(result)
     }
 }
 
