@@ -38,6 +38,8 @@ use crate::compositor::surface_management::{AttachedBufferInfo, SurfaceData};
 use crate::compositor::core::ClientCompositorData;
 use crate::compositor::shell::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
 use novade_domain::DomainServices;
+use crate::input::input_dispatcher::InputDispatcher;
+use crate::input::keyboard_layout::KeyboardLayoutManager;
 
 mod input_handlers; // Added module declaration
 mod output_handlers; // Added module declaration for output handlers
@@ -108,6 +110,10 @@ pub struct DesktopState {
     pub cpu_usage_service: Option<Arc<dyn ICpuUsageService>>,
     // pub mcp_client_spawner: Option<Arc<dyn IMCPClientService>>,
     pub domain_services: Option<std::sync::Arc<novade_domain::DomainServices>>,
+
+    // --- Input Management ---
+    pub input_dispatcher: InputDispatcher,
+    pub keyboard_layout_manager: KeyboardLayoutManager,
 }
 
 impl DesktopState {
@@ -127,7 +133,27 @@ impl DesktopState {
         let damage_tracker_state = DamageTrackerState::new();
         let mut seat_state = SeatState::new();
         let seat_name = "seat0".to_string();
+
+        let input_dispatcher = InputDispatcher::new();
+        let keyboard_layout_manager = KeyboardLayoutManager::new()
+            .expect("Failed to initialize KeyboardLayoutManager");
+
         let seat = seat_state.new_wl_seat(&display_handle, seat_name.clone(), Some(tracing::Span::current()));
+
+        // Configure the keyboard for the seat using KeyboardLayoutManager
+        if let Err(e) = seat.add_keyboard(keyboard_layout_manager.xkb_config_cloned(), 200, 25) {
+            tracing::warn!("Failed to add keyboard to seat with XKB config: {}", e);
+        } else {
+            tracing::info!("Added keyboard to seat '{}' with XKB config from KeyboardLayoutManager.", seat.name());
+        }
+
+        if let Err(e) = seat.add_pointer() {
+            tracing::warn!("Failed to add pointer capability to seat in DesktopState::new: {}", e);
+        }
+        if let Err(e) = seat.add_touch() {
+            tracing::warn!("Failed to add touch capability to seat in DesktopState::new: {}", e);
+        }
+
         let dmabuf_state = DmabufState::new();
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let screencopy_state = ScreencopyState::new::<Self>(&display_handle, None); // Initialize ScreencopyState
@@ -165,6 +191,8 @@ impl DesktopState {
             cpu_usage_service: None,
             // mcp_client_spawner: None,
             domain_services: None,
+            input_dispatcher,
+            keyboard_layout_manager,
         }
     }
 }

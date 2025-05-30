@@ -5,12 +5,13 @@ use calloop::{LoopHandle, EventLoop, timer::{Timer, TimeoutAction}};
 use smithay::{
     backend::{
         renderer::{glow::GlowRenderer, gles::GlesError},
-        winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend},
+        winit::{self, WinitEvent, WinitEventLoop, WinitGraphicsBackend, WinitInputEvent}, // Added WinitInputEvent
     },
     reexports::wayland_server::DisplayHandle,
-    utils::Size,
+    utils::{Size, SERIAL_COUNTER}, // Added SERIAL_COUNTER
 };
 use std::time::Duration;
+use smithay::backend::input::Axis; // For Axis enum
 
 use crate::compositor::{
     core::state::DesktopState,
@@ -101,11 +102,75 @@ impl CompositorBackend for WinitBackend {
                         // For now, assuming DesktopState is correctly set up to handle this via its OutputHandler impl.
                         // Example: state.on_new_output(&output);
                     }
-                    WinitEvent::Input(ev) => {
-                         // The input processing logic from main.rs needs to be adapted here
-                         // or called out to a method on DesktopState or an input manager.
-                         tracing::debug!("Winit Input Event: {:?} (to be processed)", ev);
-                         // state.process_winit_input(ev); // Placeholder
+                    WinitEvent::Input(winit_event_data) => {
+                        match winit_event_data {
+                            WinitInputEvent::Keyboard { event } => {
+                                if let Some(keyboard) = state.seat.get_keyboard() {
+                                    let serial = SERIAL_COUNTER.next_serial();
+                                    keyboard.input(
+                                        state,
+                                        event.key_code(),
+                                        event.state(),
+                                        serial,
+                                        event.time_msec(),
+                                        |_, modifiers, handle| {
+                                            tracing::debug!(
+                                                "Winit Keyboard event: keycode {}, state {:?}, keysym {:?}, modifiers {:?}",
+                                                event.key_code(), event.state(), handle.modified_sym(), modifiers
+                                            );
+                                            smithay::input::keyboard::FilterResult::Forward
+                                        }
+                                    );
+                                }
+                            }
+                            WinitInputEvent::PointerMotion { delta, time, .. } => {
+                                if let Some(pointer) = state.seat.get_pointer() {
+                                    state.pointer_location = pointer.current_position() + delta;
+                                    pointer.motion(
+                                        state,
+                                        time,
+                                    );
+                                }
+                            }
+                            WinitInputEvent::PointerButton { button, state: button_state, time, .. } => {
+                                if let Some(pointer) = state.seat.get_pointer() {
+                                    let serial = SERIAL_COUNTER.next_serial();
+                                    pointer.button(
+                                        state,
+                                        button,
+                                        button_state,
+                                        serial,
+                                        time,
+                                    );
+                                }
+                            }
+                            WinitInputEvent::PointerAxis { source, horizontal, vertical, time, .. } => {
+                                if let Some(pointer) = state.seat.get_pointer() {
+                                    let mut axis_frame = smithay::input::pointer::AxisFrame::new(time)
+                                        .source(source);
+                                    if let Some((discrete_x, discrete_y)) = vertical.discrete_pixels().or_else(|| horizontal.discrete_pixels()) {
+                                        if horizontal.discrete_pixels().is_some() {
+                                            axis_frame = axis_frame.discrete(Axis::Horizontal, discrete_x as i32);
+                                        }
+                                        if vertical.discrete_pixels().is_some() {
+                                             axis_frame = axis_frame.discrete(Axis::Vertical, discrete_y as i32);
+                                        }
+                                    }
+                                    if let Some((continuous_x, continuous_y)) = vertical.pixels().or_else(|| horizontal.pixels()) {
+                                         if horizontal.pixels().is_some() {
+                                            axis_frame = axis_frame.value(Axis::Horizontal, continuous_x);
+                                         }
+                                         if vertical.pixels().is_some() {
+                                            axis_frame = axis_frame.value(Axis::Vertical, continuous_y);
+                                         }
+                                    }
+                                    pointer.axis(state, axis_frame);
+                                }
+                            }
+                            _ => {
+                                 tracing::trace!("Unhandled WinitInputEvent: {:?}", winit_event_data);
+                            }
+                        }
                     }
                     _ => {
                         // tracing::trace!("Other Winit event: {:?}", event);
