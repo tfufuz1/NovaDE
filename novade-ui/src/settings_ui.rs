@@ -41,21 +41,24 @@ impl NovaSettingsWindow {
     }
 
     fn setup_settings_ui(&self) {
+        // Use gettext for localizing strings
+        use gettextrs::gettext;
+
         // Create a PreferencesPage
         let page = PreferencesPage::new();
         self.add(&page); // Add page to the PreferencesWindow
 
         // --- Appearance Group ---
         let appearance_group = PreferencesGroup::builder()
-            .title("Appearance")
-            .description("Customize the look and feel.")
+            .title(&gettext("Appearance")) // i18n
+            .description(&gettext("Customize the look and feel.")) // i18n
             .build();
         page.add(&appearance_group);
 
         // Dark Theme Toggle
         let dark_theme_row = ActionRow::builder()
-            .title("Enable Dark Theme")
-            .subtitle("Toggle between light and dark system-wide themes.")
+            .title(&gettext("Enable Dark Theme")) // i18n
+            .subtitle(&gettext("Toggle between light and dark system-wide themes.")) // i18n
             .build();
         let dark_theme_switch = Switch::builder()
             .valign(gtk::Align::Center)
@@ -77,13 +80,19 @@ impl NovaSettingsWindow {
 
         // Font Size Selector
         let font_size_row = ComboRow::builder()
-            .title("Interface Font Size")
-            .subtitle("Choose the general font size for the interface.")
+            .title(&gettext("Interface Font Size")) // i18n
+            .subtitle(&gettext("Choose the general font size for the interface.")) // i18n
             .build();
-        let font_options = ["Small", "Medium", "Large", "Extra Large"];
+        // These options are typically translatable.
+        let font_options = [
+            &gettext("Small"), 
+            &gettext("Medium (Default)"), 
+            &gettext("Large"), 
+            &gettext("Extra Large")
+        ];
         let string_list = StringList::new(&font_options);
         font_size_row.set_model(Some(&string_list));
-        font_size_row.set_selected(1); // Default to "Medium"
+        font_size_row.set_selected(1); // Default to "Medium (Default)"
         
         font_size_row.connect_selected_notify(|combo_row| {
             tracing::info!("Font size selection changed: Index {}, Value: '{}'", 
@@ -95,16 +104,16 @@ impl NovaSettingsWindow {
 
         // --- Behavior Group (Example) ---
         let behavior_group = PreferencesGroup::builder()
-            .title("Behavior")
-            .description("Customize system behavior.")
+            .title(&gettext("Behavior")) // i18n
+            .description(&gettext("Customize system behavior.")) // i18n
             .build();
         page.add(&behavior_group);
 
         let placeholder_row = ActionRow::builder()
-            .title("Placeholder Setting")
-            .subtitle("This is just a placeholder for future settings.")
+            .title(&gettext("Placeholder Setting")) // i18n
+            .subtitle(&gettext("This is just a placeholder for future settings.")) // i18n
             .build();
-        let placeholder_button = gtk::Button::with_label("Click Action");
+        let placeholder_button = gtk::Button::with_label(&gettext("Click Action")); // i18n
         placeholder_button.connect_clicked(|_| {
             tracing::info!("Placeholder action button clicked.");
         });
@@ -113,6 +122,6 @@ impl NovaSettingsWindow {
         behavior_group.add(&placeholder_row);
 
         self.set_search_enabled(true); // Allow searching through preferences
-        self.set_title(Some("NovaDE Settings")); // Set window title
+        self.set_title(Some(&gettext("NovaDE Settings"))); // i18n Set window title
     }
 }

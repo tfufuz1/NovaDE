@@ -1,0 +1,195 @@
+# Dummy PO file for NovaDE UI (German)
+# Copyright (C) 2023 NovaDE Team
+# This file is distributed under the same license as the NovaDE UI package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: novade-ui 0.1.0\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2023-10-27 10:00+0000\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"Language: de\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+
+msgid "Increment Window Count"
+msgstr "Fensteranzahl erhöhen"
+
+msgid "Simulate Domain Events:"
+msgstr "Domänenereignisse simulieren:"
+
+msgid "Send WindowAdded Event"
+msgstr "WindowAdded-Ereignis senden"
+
+msgid "Send WindowRemoved Event"
+msgstr "WindowRemoved-Ereignis senden"
+
+msgid "Async Task Simulation:"
+msgstr "Async-Task-Simulation:"
+
+msgid "Simulate Long Task & Update UI"
+msgstr "Langen Task simulieren & UI aktualisieren"
+
+msgid "Status: Idle"
+msgstr "Status: Leerlauf"
+
+msgid "Long task started... (will take 3s)"
+msgstr "Langer Task gestartet... (dauert 3s)"
+
+msgid "Error receiving result from long task"
+msgstr "Fehler beim Empfangen des Ergebnisses vom langen Task"
+
+msgid "D-Bus Desktop Notification Test:"
+msgstr "D-Bus Desktop-Benachrichtigungstest:"
+
+msgid "Send Test Notification"
+msgstr "Testbenachrichtigung senden"
+
+msgid "Test Notification"
+msgstr "Testbenachrichtigung"
+
+msgid "This is a test notification sent from the NovaDE UI application via zbus."
+msgstr "Dies ist eine Testbenachrichtigung, die von der NovaDE UI-Anwendung über zbus gesendet wurde."
+
+msgid "XDG Portal File Chooser Test:"
+msgstr "XDG Portal Dateiauswahldialog-Test:"
+
+msgid "Open File (Portal)"
+msgstr "Datei öffnen (Portal)"
+
+msgid "BasicWidget status: Waiting..."
+msgstr "BasicWidget Status: Warten..."
+
+msgid "Interactive BasicWidget"
+msgstr "Interaktives BasicWidget"
+
+msgid "Standalone GtkImage:"
+msgstr "Eigenständiges GtkImage:"
+
+msgid "Sidebar Controls"
+msgstr "Seitenleisten-Steuerelemente"
+
+msgid "Trigger Sample Error Toast"
+msgstr "Beispiel-Fehler-Toast auslösen"
+
+msgid "This is a sample error toast from sidebar!"
+msgstr "Dies ist ein Beispiel-Fehler-Toast von der Seitenleiste!"
+
+msgid "Standard Dialogs Test (Adwaita):"
+msgstr "Standarddialoge-Test (Adwaita):"
+
+msgid "About NovaDE"
+msgstr "Über NovaDE"
+
+msgid "NovaDE"
+msgstr "NovaDE"
+
+msgid "NovaDE Development Team"
+msgstr "NovaDE Entwicklungsteam"
+
+msgid "A DEveloper-first Desktop Environment."
+msgstr "Eine Desktop-Umgebung mit Fokus auf Entwickler."
+
+msgid "Jules (AI Agent)"
+msgstr "Jules (KI-Agent)"
+
+msgid "And You!"
+msgstr "Und Du!"
+
+msgid "Inspired by many"
+msgstr "Inspiriert von vielen"
+
+msgid "Various icon artists"
+msgstr "Verschiedene Icon-Künstler"
+
+msgid "Show Message Dialog"
+msgstr "Nachrichtendialog anzeigen"
+
+msgid "A Friendly Message"
+msgstr "Eine freundliche Nachricht"
+
+msgid "This is an example of an Adwaita Message Dialog shown from NovaDE."
+msgstr "Dies ist ein Beispiel für einen Adwaita-Nachrichtendialog, der von NovaDE angezeigt wird."
+
+msgid "Got it!"
+msgstr "Verstanden!"
+
+msgid "Open Settings"
+msgstr "Einstellungen öffnen"
+
+# Strings from settings_ui.rs
+msgid "Appearance"
+msgstr "Erscheinungsbild"
+
+msgid "Customize the look and feel."
+msgstr "Passen Sie das Aussehen an."
+
+msgid "Enable Dark Theme"
+msgstr "Dunkles Design aktivieren"
+
+msgid "Toggle between light and dark system-wide themes."
+msgstr "Wechseln Sie zwischen hellem und dunklem systemweitem Design."
+
+msgid "Interface Font Size"
+msgstr "Schriftgröße der Benutzeroberfläche"
+
+msgid "Choose the general font size for the interface."
+msgstr "Wählen Sie die allgemeine Schriftgröße für die Benutzeroberfläche."
+
+msgid "Small"
+msgstr "Klein"
+
+msgid "Medium (Default)"
+msgstr "Mittel (Standard)"
+
+msgid "Large"
+msgstr "Groß"
+
+msgid "Extra Large"
+msgstr "Sehr Groß"
+
+msgid "Behavior"
+msgstr "Verhalten"
+
+msgid "Customize system behavior."
+msgstr "Passen Sie das Systemverhalten an."
+
+msgid "Placeholder Setting"
+msgstr "Platzhalter-Einstellung"
+
+msgid "This is just a placeholder for future settings."
+msgstr "Dies ist nur ein Platzhalter für zukünftige Einstellungen."
+
+msgid "Click Action"
+msgstr "Aktion klicken"
+
+msgid "NovaDE Settings"
+msgstr "NovaDE-Einstellungen"
+
+# Strings from simple_taskbar.ui (translatable="yes")
+msgid "Menu"
+msgstr "Menü"
+
+msgid "(Task Items Area - ConstraintLayout)"
+msgstr "(Aufgabenbereich - ConstraintLayout)"
+
+msgid "Status Indicator"
+msgstr "Statusanzeige"
+
+msgid "Blink Clock"
+msgstr "Taktsignal Blinken"
+
+# Strings from basic_widget.ui (translatable="yes")
+msgid "Default Label"
+msgstr "Standardbeschriftung"
+
+msgid "Click Me!"
+msgstr "Klick mich!"
+
+msgid "Status:"
+msgstr "Status:"

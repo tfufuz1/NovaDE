@@ -14,7 +14,10 @@ use std::rc::Rc;
 
 mod widgets;
 use widgets::basic_widget::BasicWidget;
-use tokio::sync::{mpsc, oneshot}; // For MPSC and Oneshot channels
+use tokio::sync::{mpsc, oneshot};
+
+// Internationalization
+use gettextrs::{gettext, LocaleCategory};
 
 // Declare and use ui_state module (now a GObject)
 mod ui_state;
@@ -36,6 +39,18 @@ static CSS_LOAD_SUCCESSFUL: AtomicBool = AtomicBool::new(false);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    // Setup localization
+    // Set the locale from the environment
+    gettextrs::setlocale(LocaleCategory::LcAll, "");
+    // Specify the location of the .mo files (translations)
+    // For development, this could be a local "./po" or "./locales" directory.
+    // For installed applications, this is often /usr/share/locale or similar.
+    gettextrs::bindtextdomain("novade-ui", "./po")?; // Using "?" to propagate potential errors
+    // Specify the text domain for future gettext calls
+    gettextrs::textdomain("novade-ui")?;
+    // To test if it's working, you might force a language if messages are compiled:
+    // std::env::set_var("LANGUAGE", "de_DE.UTF-8"); // Example for testing German
+
     tracing_subscriber::fmt::init(); // Initialize tracing first
 
     // Load GResources using include_bytes! via OUT_DIR
@@ -197,9 +212,9 @@ fn build_adw_ui(
 
 
     // Button to increment window_count in UIState
-    let increment_button = Button::with_label("Increment Window Count");
+    let increment_button = Button::with_label(&gettext("Increment Window Count")); 
     increment_button.set_halign(Align::Center);
-    let ui_state_clone_for_button = ui_state_instance.clone(); // Clone for the callback
+    let ui_state_clone_for_button = ui_state_instance.clone(); 
     increment_button.connect_clicked(move |_| {
         let current_count = ui_state_clone_for_button.window_count();
         ui_state_clone_for_button.set_window_count(current_count + 1);
@@ -209,7 +224,7 @@ fn build_adw_ui(
 
     // Separator before event simulation buttons
     main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
-    let event_sim_label = Label::new(Some("Simulate Domain Events:"));
+    let event_sim_label = Label::new(Some(&gettext("Simulate Domain Events:"))); 
     event_sim_label.set_halign(Align::Center);
     event_sim_label.set_margin_top(10);
     main_content_box.append(&event_sim_label);
@@ -217,7 +232,7 @@ fn build_adw_ui(
     let sim_buttons_box = GtkBox::new(Orientation::Horizontal, 6);
     sim_buttons_box.set_halign(Align::Center);
 
-    let add_event_button = Button::with_label("Send WindowAdded Event");
+    let add_event_button = Button::with_label(&gettext("Send WindowAdded Event")); 
     let sender_clone_add = domain_event_sender.clone();
     add_event_button.connect_clicked(move |_| {
         let sender = sender_clone_add.clone();
@@ -231,8 +246,8 @@ fn build_adw_ui(
     });
     sim_buttons_box.append(&add_event_button);
 
-    let remove_event_button = Button::with_label("Send WindowRemoved Event");
-    let sender_clone_remove = domain_event_sender.clone(); // Use the one passed to build_adw_ui
+    let remove_event_button = Button::with_label(&gettext("Send WindowRemoved Event")); 
+    let sender_clone_remove = domain_event_sender.clone(); 
     remove_event_button.connect_clicked(move |_| {
         let sender = sender_clone_remove.clone();
         glib::spawn_future_local(async move {
@@ -248,49 +263,86 @@ fn build_adw_ui(
 
     // Separator for Long Task Simulation
     main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
-    let long_task_title_label = Label::new(Some("Async Task Simulation:"));
+    let long_task_title_label = Label::new(Some(&gettext("Async Task Simulation:"))); 
     long_task_title_label.set_halign(Align::Center);
     long_task_title_label.set_margin_top(10);
     main_content_box.append(&long_task_title_label);
 
-    let long_task_status_label = Label::new(Some("Status: Idle"));
+    let long_task_status_label = Label::new(Some(&gettext("Status: Idle"))); 
     long_task_status_label.set_halign(Align::Center);
     long_task_status_label.set_margin_top(5);
     main_content_box.append(&long_task_status_label);
 
-    let long_task_button = Button::with_label("Simulate Long Task & Update UI");
+    let long_task_button = Button::with_label(&gettext("Simulate Long Task & Update UI")); 
     long_task_button.set_halign(Align::Center);
-    // Clone the label for use in the async block
     let long_task_status_label_clone = long_task_status_label.clone(); 
     long_task_button.connect_clicked(move |_| {
-        // Use glib::clone! for better handling of clones if more variables were needed
         let label_for_update = long_task_status_label_clone.clone();
         
+        // --- UI-Thread Optimization Example ---
+        // This entire block demonstrates best practices for offloading work from the UI thread
+        // to prevent UI freezes, and then safely updating the UI with the result.
+
+        // 1. `glib::spawn_future_local`:
+        //    Schedules this whole async block to run on the main GTK UI thread (GLib main context).
+        //    This is crucial because all direct UI widget manipulations *must* happen on this thread.
+        //    It allows using `await` within this block without blocking the entire UI, as it yields
+        //    control back to the main loop while waiting for futures.
         glib::spawn_future_local(async move {
-            label_for_update.set_text("Long task started... (will take 3s)");
+            // Initial UI update: Inform the user that the task has started.
+            // This is safe as we are on the main thread here.
+            label_for_update.set_text(&gettext("Long task started... (will take 3s)")); 
             tracing::info!("Long task button clicked. Starting simulation.");
 
+            // 2. `tokio::sync::oneshot::channel`:
+            //    Creates a single-use channel to communicate a result from a background task (Tokio task)
+            //    back to this UI-thread task. `tx` (sender) is moved to the background task,
+            //    and `rx` (receiver) is awaited here.
             let (tx, rx) = oneshot::channel();
 
-            // Spawn the potentially long-running task onto Tokio's thread pool
-            tokio::spawn(async move {
+            // 3. `tokio::spawn`:
+            //    Offloads the actual potentially blocking work (here, `tokio::time::sleep`)
+            //    to a separate thread managed by Tokio's multi-thread runtime.
+            //    This is the key to preventing the UI thread from freezing.
+            //    If `std::thread::sleep` or any synchronous I/O (file reading, network request)
+            //    or heavy computation were done directly in the `connect_clicked` handler
+            //    (even within `glib::spawn_future_local` without `tokio::spawn` for the blocking part),
+            //    the UI would become unresponsive for the duration of that operation.
+            tokio::spawn(async move { // This async block runs on a Tokio worker thread.
                 tracing::info!("Long task executing on Tokio worker thread...");
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await; // Simulate non-CPU-intensive I/O-bound work
+                
+                // The result of the background task. This could be any data that needs to be sent back.
+                // If it's a translatable string, it should be `gettext`ed here or before sending.
+                // For this example, it's a dynamic result string.
                 let result = "Long task complete! Result from background.";
                 tracing::info!("Long task finished on Tokio worker. Sending result back to UI thread.");
+                
+                // Send the result back to the main thread task via the oneshot channel's sender (`tx`).
+                // If `tx.send` fails, it typically means the `rx` (receiver) on the main thread task
+                // was dropped, which might happen if the UI/widget waiting for the result was destroyed.
                 if tx.send(result.to_string()).is_err() {
                     tracing::error!("Failed to send result from long task: oneshot receiver was dropped.");
                 }
             });
 
-            // Await the result from the oneshot channel on the main GLib context
+            // 4. Awaiting the result and updating UI:
+            //    `rx.await` suspends execution of *this specific glib::spawn_future_local task*,
+            //    allowing other GTK events and UI updates to be processed on the main thread.
+            //    It does NOT block the entire main UI thread thanks to `glib::spawn_future_local`'s
+            //    integration with the GLib main event loop.
             match rx.await {
                 Ok(result) => {
-                    label_for_update.set_text(&result);
+                    // Once the result is received (i.e., the background task has sent it),
+                    // update the UI label. This is safe because this part of the code
+                    // (after `rx.await`) is still running within the `glib::spawn_future_local`
+                    // context, hence on the main GTK thread.
+                    label_for_update.set_text(&result); 
                     tracing::info!("UI updated with long task result: {}", result);
                 }
                 Err(e) => {
-                    let error_msg = format!("Error receiving result from long task: {}", e);
+                    // Handle potential error if the sender (background task) fails or the channel closes prematurely.
+                    let error_msg = format!("{}: {}", gettext("Error receiving result from long task"), e); 
                     label_for_update.set_text(&error_msg);
                     tracing::error!("{}", error_msg);
                 }
@@ -301,32 +353,29 @@ fn build_adw_ui(
 
     // Separator for D-Bus Notification Test
     main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
-    let dbus_title_label = Label::new(Some("D-Bus Desktop Notification Test:"));
+    let dbus_title_label = Label::new(Some(&gettext("D-Bus Desktop Notification Test:"))); 
     dbus_title_label.set_halign(Align::Center);
     dbus_title_label.set_margin_top(10);
     main_content_box.append(&dbus_title_label);
 
-    let send_notification_button = Button::with_label("Send Test Notification");
+    let send_notification_button = Button::with_label(&gettext("Send Test Notification")); 
     send_notification_button.set_halign(Align::Center);
-    // It's good practice to clone any data needed by the async block if it's from outside
     // For this simple call, we are using static strings or direct values.
     send_notification_button.connect_clicked(move |_| {
         glib::spawn_future_local(async move {
             tracing::info!("'Send Test Notification' button clicked.");
             match dbus_utils::send_desktop_notification(
-                "NovaDE-UI",
-                "Test Notification",
-                "This is a test notification sent from the NovaDE UI application via zbus.",
-                "dialog-information-symbolic", // A standard icon name
-                5000 // 5 seconds timeout
+                "NovaDE-UI", 
+                &gettext("Test Notification"), 
+                &gettext("This is a test notification sent from the NovaDE UI application via zbus."), 
+                "dialog-information-symbolic", 
+                5000 
             ).await {
                 Ok(id) => {
                     tracing::info!("Desktop notification successfully sent with ID: {}", id);
-                    // Optionally, show a toast or update a label in the UI on success
                 }
                 Err(e) => {
                     tracing::error!("Failed to send desktop notification: {}", e);
-                    // Optionally, show an error toast or update a label
                 }
             }
         });
@@ -335,15 +384,13 @@ fn build_adw_ui(
 
     // Separator for XDG Portal File Chooser Test
     main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
-    let portal_title_label = Label::new(Some("XDG Portal File Chooser Test:"));
+    let portal_title_label = Label::new(Some(&gettext("XDG Portal File Chooser Test:"))); 
     portal_title_label.set_halign(Align::Center);
     portal_title_label.set_margin_top(10);
     main_content_box.append(&portal_title_label);
 
-    let open_file_portal_button = Button::with_label("Open File (Portal)");
+    let open_file_portal_button = Button::with_label(&gettext("Open File (Portal)")); 
     open_file_portal_button.set_halign(Align::Center);
-    
-    // The button handler needs a reference to the main window to pass as parent.
     // We get the window when `build_adw_ui` is called, but the ApplicationWindow
     // is typically built towards the end of this function.
     // We can connect the signal *after* the window is built, or pass the window via Rc<RefCell<Option<Window>>>
@@ -362,14 +409,14 @@ fn build_adw_ui(
     main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
     
     // Existing status label (from previous task, for BasicWidget interaction)
-    let status_label = Rc::new(RefCell::new(Label::new(Some("BasicWidget status: Waiting..."))));
+    let status_label = Rc::new(RefCell::new(Label::new(Some(&gettext("BasicWidget status: Waiting..."))))); 
     status_label.borrow().set_halign(Align::Center);
     status_label.borrow().set_margin_top(10);
     status_label.borrow().add_css_class("status-label");
     main_content_box.append(&*status_label.borrow());
 
     let basic_widget_instance = BasicWidget::new();
-    basic_widget_instance.set_label_text("Interactive BasicWidget");
+    basic_widget_instance.set_label_text(&gettext("Interactive BasicWidget")); 
     basic_widget_instance.set_main_image_from_icon_name("document-open-symbolic"); 
     let resource_path = "/org/novade/ui/icons/my-custom-icon.svg";
     basic_widget_instance.set_status_image_from_resource(resource_path); 
@@ -395,7 +442,7 @@ fn build_adw_ui(
     standalone_image.set_pixel_size(48);
     standalone_image.set_halign(Align::Center);
     standalone_image.set_margin_top(15);
-    let image_title_label = Label::new(Some("Standalone GtkImage:"));
+    let image_title_label = Label::new(Some(&gettext("Standalone GtkImage:"))); 
     image_title_label.set_halign(Align::Center);
     main_content_box.append(&image_title_label);
     main_content_box.append(&standalone_image);
@@ -431,13 +478,13 @@ fn build_adw_ui(
     // ... (sidebar content setup remains the same) ...
     sidebar_box.add_css_class("sidebar-box");
     sidebar_box.set_width_request(220);
-    let sidebar_label = Label::new(Some("Sidebar Controls"));
+    let sidebar_label = Label::new(Some(&gettext("Sidebar Controls"))); 
     sidebar_label.set_halign(Align::Center);
     sidebar_box.append(&sidebar_label);
-    let error_button = Button::with_label("Trigger Sample Error Toast");
+    let error_button = Button::with_label(&gettext("Trigger Sample Error Toast")); 
     let toast_overlay_clone_for_error_button = toast_overlay.clone();
     error_button.connect_clicked(move |_| {
-        toast_overlay_clone_for_error_button.add_toast(Toast::new("This is a sample error toast from sidebar!"));
+        toast_overlay_clone_for_error_button.add_toast(Toast::new(&gettext("This is a sample error toast from sidebar!"))); 
     });
     sidebar_box.append(&error_button);
     flap.set_flap(Some(&sidebar_box));
@@ -479,79 +526,116 @@ fn build_adw_ui(
     let window = ApplicationWindow::builder()
         .application(app)
         .default_width(850)
-        .default_height(850) // Even Taller for Settings button
+        .default_height(900) // Adjusted for new button
         .content(&toolbar_view) 
         .build();
 
+    // Stress Test Button
+    main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
+    let stress_test_label = Label::new(Some(&gettext("UI Responsiveness Stress Test:")));
+    stress_test_label.set_halign(Align::Center);
+    stress_test_label.set_margin_top(10);
+    main_content_box.append(&stress_test_label);
+
+    let stress_test_button = Button::with_label(&gettext("Start Stress Test (Rapid State Changes)"));
+    stress_test_button.set_halign(Align::Center);
+    let stress_sender_clone = domain_event_sender.clone(); // Clone sender for the button
+    stress_test_button.connect_clicked(move |_| {
+        let sender = stress_sender_clone.clone();
+        tracing::info!("Stress Test button clicked. Starting rapid event simulation...");
+
+        // Offload the event sending loop to a Tokio worker thread
+        // to avoid blocking the UI thread while sending many messages.
+        tokio::spawn(async move {
+            let num_events_to_send = 1000; // Send 1000 add and 1000 remove events
+            for i in 0..num_events_to_send {
+                if sender.send(DomainEvent::WindowAdded).await.is_err() {
+                    tracing::error!("StressTest: Failed to send WindowAdded event {}.", i);
+                    break; // Stop if channel is closed (e.g., app shutting down)
+                }
+                // Optional: Small delay to allow UI thread some breathing room,
+                // though with a buffered channel, this might not be strictly necessary
+                // for the sender not to block. The receiver on the main thread will process
+                // these as fast as it can.
+                // tokio::time::sleep(std::time::Duration::from_micros(50)).await; 
+
+                if sender.send(DomainEvent::WindowRemoved).await.is_err() {
+                    tracing::error!("StressTest: Failed to send WindowRemoved event {}.", i);
+                    break;
+                }
+                // if i % 100 == 0 { // Log progress
+                //    tracing::debug!("StressTest: Sent {} add/remove event pairs.", i);
+                // }
+            }
+            tracing::info!("Stress Test: Finished sending {} event pairs.", num_events_to_send);
+        });
+    });
+    main_content_box.append(&stress_test_button);
+
+
     // Add AboutDialog and MessageDialog test buttons (as before)
     main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
-    let dialogs_title_label = Label::new(Some("Standard Dialogs Test (Adwaita):"));
+    let dialogs_title_label = Label::new(Some(&gettext("Standard Dialogs Test (Adwaita):"))); 
     dialogs_title_label.set_halign(Align::Center);
     dialogs_title_label.set_margin_top(10);
     main_content_box.append(&dialogs_title_label);
     let dialog_buttons_box = GtkBox::new(Orientation::Horizontal, 6);
     dialog_buttons_box.set_halign(Align::Center);
-    // ... (About and Message dialog buttons setup remains here)
 
-    // About Dialog Button (code from previous step, ensure it's within this structure)
-    let about_button = Button::with_label("About NovaDE");
+    // About Dialog Button
+    let about_button = Button::with_label(&gettext("About NovaDE")); 
     let window_clone_for_about = window.clone();
     about_button.connect_clicked(move |_| {
         let parent_window = &window_clone_for_about;
         let about_dialog = adw::AboutWindow::builder()
             .transient_for(parent_window)
             .modal(true)
-            .application_name("NovaDE")
-            .version("0.1.0-dev")
-            .developer_name("NovaDE Development Team")
-            .license_type(gtk::License::MitX11)
-            .website("https://github.com/systeminmation/NovaDE") // Replace with actual if exists
-            .application_icon("application-x-executable-symbolic") // Placeholder icon
-            .comments("A DEveloper-first Desktop Environment.")
-            .developers(vec!["Jules (AI Agent)", "And You!"])
-            .designers(vec!["Inspired by many"])
-            .artists(vec!["Various icon artists"])
-            .issue_url("https://github.com/systeminmation/NovaDE/issues") // Replace
+            .application_name(&gettext("NovaDE")) 
+            .version("0.1.0-dev") // Version typically not translated
+            .developer_name(&gettext("NovaDE Development Team")) 
+            .license_type(gtk::License::MitX11) // License type usually not translated
+            .website("https://github.com/systeminmation/NovaDE") // URLs not translated
+            .application_icon("application-x-executable-symbolic") // Icon names not translated
+            .comments(&gettext("A DEveloper-first Desktop Environment.")) 
+            .developers(vec![&gettext("Jules (AI Agent)"), &gettext("And You!")]) 
+            .designers(vec![&gettext("Inspired by many")]) 
+            .artists(vec![&gettext("Various icon artists")]) 
+            .issue_url("https://github.com/systeminmation/NovaDE/issues") // URLs not translated
             .build();
-        
         about_dialog.present();
     });
     dialog_buttons_box.append(&about_button);
 
     // Message Dialog Button
-    let message_button = Button::with_label("Show Message Dialog");
+    let message_button = Button::with_label(&gettext("Show Message Dialog")); 
     let window_clone_for_message = window.clone();
     message_button.connect_clicked(move |_| {
         let parent_window = &window_clone_for_message;
         let message_dialog = adw::MessageDialog::builder()
             .transient_for(parent_window)
             .modal(true)
-            .heading("A Friendly Message")
-            .body("This is an example of an Adwaita Message Dialog shown from NovaDE.")
+            .heading(&gettext("A Friendly Message")) 
+            .body(&gettext("This is an example of an Adwaita Message Dialog shown from NovaDE.")) 
             .build();
-        
-        message_dialog.add_response("ok", "Got it!");
+        message_dialog.add_response("ok", &gettext("Got it!")); 
         message_dialog.set_default_response(Some("ok"));
-        message_dialog.set_close_response("ok"); // Closes dialog when "ok" is chosen or Esc is pressed
-
+        message_dialog.set_close_response("ok");
         message_dialog.connect_response(None, |dialog, response| {
             tracing::info!("MessageDialog response: {}", response);
-            dialog.destroy(); // Or close() if it's not a one-time dialog
+            dialog.destroy();
         });
-        
         message_dialog.present();
     });
     dialog_buttons_box.append(&message_button);
     main_content_box.append(&dialog_buttons_box);
 
     // Settings Window Button
-    let settings_button = Button::with_label("Open Settings");
+    let settings_button = Button::with_label(&gettext("Open Settings")); 
     let window_clone_for_settings = window.clone();
     settings_button.connect_clicked(move |_| {
         let settings_window = NovaSettingsWindow::new(&window_clone_for_settings);
         settings_window.present();
     });
-    // Add this button to a new box or directly to main_content_box
     let settings_button_box = GtkBox::new(Orientation::Horizontal, 0); // Centering box
     settings_button_box.set_halign(Align::Center);
     settings_button_box.set_margin_top(10);
