@@ -19,8 +19,8 @@ use smithay::{
 use std::sync::Arc;
 
 use crate::compositor::{
-    core::state::NovadeCompositorState,
-    xdg_shell::types::{DomainWindowIdentifier, ManagedWindow},
+    core::state::DesktopState, // Changed from NovadeCompositorState
+    shell::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow}, // Changed path
     // Removed unused XdgShellError import
 };
 
@@ -30,7 +30,7 @@ use smithay::wayland::shell::xdg::decoration::{
 };
 // ToplevelSurface is already imported above.
 
-impl XdgShellHandler for NovadeCompositorState {
+impl XdgShellHandler for DesktopState { // Changed from NovadeCompositorState
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
     }
@@ -334,7 +334,7 @@ impl XdgShellHandler for NovadeCompositorState {
     }
 }
 
-impl XdgDecorationHandler for NovadeCompositorState {
+impl XdgDecorationHandler for DesktopState { // Changed from NovadeCompositorState
     fn xdg_decoration_state(&mut self) -> &mut ServerDecorationState {
         &mut self.xdg_decoration_state
     }
@@ -406,8 +406,8 @@ impl XdgDecorationHandler for NovadeCompositorState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compositor::core::state::NovadeCompositorState;
-    use crate::compositor::xdg_shell::types::{ManagedWindow, WindowState, DomainWindowIdentifier, WindowManagerData, WindowLayer};
+    use crate::compositor::core::state::DesktopState; // Changed from NovadeCompositorState
+    use crate::compositor::shell::xdg_shell::types::{ManagedWindow, WindowState, DomainWindowIdentifier, WindowManagerData, WindowLayer}; // Changed path
     use smithay::reexports::wayland_server::{Display, DisplayHandle, Client, protocol::wl_surface::WlSurface, globals::GlobalData, UserData, backend::{ClientId, GlobalId}};
     use smithay::reexports::calloop::EventLoop;
     use smithay::utils::{Point, Size, Rectangle};
@@ -425,9 +425,9 @@ mod tests {
 
     // Helper to create a DisplayHandle and a Client for tests.
     fn create_test_display_and_client() -> (DisplayHandle, Client) {
-        let mut display: Display<NovadeCompositorState> = Display::new().unwrap();
+        let mut display: Display<DesktopState> = Display::new().unwrap(); // Changed from NovadeCompositorState
         let dh = display.handle();
-        // Cast needed for Client::create_object as UserData trait bound is on NovadeCompositorState via ClientData on TestClientData.
+        // Cast needed for Client::create_object as UserData trait bound is on DesktopState via ClientData on TestClientData.
         // This is a bit of a workaround for testing.
         let client = display.create_client(TestClientData::default());
         (dh, client)
@@ -441,47 +441,28 @@ mod tests {
         ToplevelSurface::from_wl_surface(surface, Default::default()).unwrap()
     }
 
-    // Helper to create a minimal NovadeCompositorState for testing
-    fn create_minimal_test_state() -> (NovadeCompositorState, DisplayHandle) {
-        let mut event_loop: EventLoop<'static, NovadeCompositorState> = EventLoop::try_new().unwrap();
+    // Helper to create a minimal DesktopState for testing
+    fn create_minimal_test_state() -> (DesktopState, DisplayHandle) { // Changed from NovadeCompositorState
+        let mut event_loop: EventLoop<'static, DesktopState> = EventLoop::try_new().unwrap(); // Changed
         let display_handle = event_loop.handle().insert_source(
-            Display::<NovadeCompositorState>::new().unwrap(),
+            Display::<DesktopState>::new().unwrap(), // Changed
             |_, _, _| {},
         ).unwrap();
         
-        // Initialize NovadeCompositorState with Nones or defaults for fields not directly used in these tests.
+        // Initialize DesktopState with Nones or defaults for fields not directly used in these tests.
         // The ::new method in state.rs is quite complex. We simplify for unit test focus.
-        let state = NovadeCompositorState {
-            display_handle: display_handle.clone(),
-            loop_handle: event_loop.handle(),
-            clock: smithay::utils::Clock::new(None).unwrap(),
-            compositor_state: smithay::wayland::compositor::CompositorState::new::<NovadeCompositorState>(&display_handle),
-            shm_state: smithay::wayland::shm::ShmState::new::<NovadeCompositorState>(&display_handle, vec![]),
-            output_manager_state: smithay::wayland::output::OutputManagerState::new_with_xdg_output::<NovadeCompositorState>(&display_handle),
-            gles_renderer: None, // Not used in these specific tests
-            xdg_shell_state: smithay::wayland::shell::xdg::XdgShellState::new::<NovadeCompositorState>(&display_handle),
-            space: smithay::desktop::Space::new(tracing::info_span!("test_space")),
-            windows: std::collections::HashMap::new(),
-            outputs: Vec::new(),
-            last_render_time: std::time::Instant::now(),
-            damage_tracker_state: smithay::desktop::DamageTrackerState::new(),
-            seat_state: smithay::input::SeatState::new(),
-            seat_name: "seat0".to_string(),
-            seat: smithay::input::Seat::new(event_loop.handle(), "seat0".into(), None), // Seat needs loop_handle
-            pointer_location: Point::from((0.0, 0.0)),
-            current_cursor_status: Arc::new(std::sync::Mutex::new(smithay::input::pointer::CursorImageStatus::Default)),
-            dmabuf_state: smithay::wayland::dmabuf::DmabufState::new(),
-            xdg_decoration_state: smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<NovadeCompositorState>(&display_handle),
-            screencopy_state: smithay::wayland::screencopy::ScreencopyState::new::<NovadeCompositorState>(&display_handle, None),
-            vulkan_instance: None,
-            vulkan_physical_device_info: None,
-            vulkan_logical_device: None,
-            vulkan_allocator: None,
-            vulkan_frame_renderer: None,
-            active_renderer_type: crate::compositor::core::state::ActiveRendererType::Gles, // Default
-            mcp_connection_service: None,
-            cpu_usage_service: None,
-        };
+        // DesktopState::new now takes loop_handle and display_handle
+        let state = DesktopState::new(event_loop.handle(), display_handle.clone());
+        // Most fields are already defaulted to None or empty by the simplified DesktopState::new
+        // We might need to manually set some if the tests rely on them, e.g. seat.
+        // For now, let's assume the default new() is sufficient for what these tests cover.
+        // Adding seat back as it's used in some handlers, though not directly by maximize tests.
+        // let mut seat_state_for_test = smithay::input::SeatState::new();
+        // let seat_for_test = seat_state_for_test.new_wl_seat(&display_handle, "seat0_test".to_string(), None);
+        // state.seat_state = seat_state_for_test;
+        // state.seat = seat_for_test;
+        // state.seat_name = "seat0_test".to_string();
+
         (state, display_handle)
     }
 
