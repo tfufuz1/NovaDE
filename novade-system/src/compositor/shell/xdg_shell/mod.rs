@@ -4,35 +4,58 @@
 //! # XDG Shell Implementation
 //!
 //! This module implements the XDG shell protocol for the compositor.
+//! It defines errors, handlers, and manages the XDG shell global.
+//! Types are re-exported from the `types` submodule.
 
-// Copyright (c) 2025 NovaDE Contributors
-// SPDX-License-Identifier: MIT
-
-//! # XDG Shell Implementation
-//!
-//! This module implements the XDG shell protocol for the compositor.
-//! It primarily re-exports types from `xdg_shell::types` and relies on
-//! `xdg_shell::handlers` for the actual XdgShellHandler implementation.
-
-// Re-export types from the types module
+pub mod errors;
 pub mod types;
-pub use types::*;
+pub mod handlers;
 
-// Imports that might be needed by handlers if they were in this file,
-// but generally, handlers.rs will have its own imports.
-// use std::sync::{Arc, Mutex, RwLock};
-// use std::collections::HashMap;
-// use smithay::wayland::shell::xdg::{XdgShellHandler, XdgShellState, ToplevelSurface, PopupSurface, PositionerState, ResizeEdge};
-// use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-// use smithay::reexports::wayland_server::backend::ClientId;
-// use smithay::utils::{Logical, Point, Size, Rectangle};
-// use smithay::input::Seat;
+pub use errors::XdgShellError;
+pub use types::*; // Re-export types like ManagedWindow
 
-// use super::{CompositorError, CompositorResult};
-// use super::core::DesktopState; // This would be NovadeCompositorState
-// use super::surface_management::{SurfaceData, SurfaceRole, SurfaceManager}; // SurfaceManager is removed
+use crate::compositor::core::state::DesktopState;
+use smithay::reexports::wayland_server::{
+    Client, DisplayHandle, GlobalDispatch, DataInit, New, Resource,
+};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_wm_base::XdgWmBase;
+use smithay::wayland::shell::xdg::{XdgShellState, XdgWmBaseClientData, XdgActivationState};
+use std::sync::Arc;
 
-// All struct definitions (ManagedWindow, WindowState, WindowManagerData, WindowLayer),
-// the XdgShellManager, and the `impl XdgShellHandler for DesktopState`
-// have been removed from this file.
-// Logic is now either in `types.rs` or `handlers.rs`.
+// GlobalDispatch for XdgWmBase
+// The GlobalData for xdg_wm_base is Arc<XdgWmBaseClientData> as per Smithay's XdgShellState::new()
+impl GlobalDispatch<XdgWmBase, Arc<XdgWmBaseClientData>> for DesktopState {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<XdgWmBase>,
+        client_data: &Arc<XdgWmBaseClientData>,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        tracing::info!(client_id = ?_client.id(), "Client bound to XdgWmBase global");
+        data_init.init(resource, client_data.clone());
+    }
+
+    fn can_view(_client: Client, _global_data: &Arc<XdgWmBaseClientData>) -> bool {
+        true
+    }
+}
+
+// Function to ensure XDG Shell global is active
+pub fn create_xdg_shell_global(
+    desktop_state: &DesktopState,
+    _display_handle: &DisplayHandle,
+) -> Result<(), String> {
+    // XdgShellState::new() (called during DesktopState::new) already registers the xdg_wm_base global.
+    // Smithay 0.10+ XdgShellState::new() returns (XdgShellState, Global<XdgWmBase>).
+    // The Global<XdgWmBase> object would typically be stored by the caller (e.g., in DesktopState or a globals tracking struct)
+    // and then passed to display_handle.create_global(...).
+    // However, the current DesktopState directly holds XdgShellState.
+    // We rely on XdgShellState having been initialized with an XdgActivationState,
+    // and that its internal global was registered.
+    // A call to desktop_state.xdg_shell_state.global() (if it existed) would confirm.
+    // For now, just log that it's expected to be active.
+    tracing::info!("XDG WM Base global (managed by XdgShellState within DesktopState) is assumed to be active.");
+    Ok(())
+}

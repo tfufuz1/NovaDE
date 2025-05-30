@@ -22,7 +22,9 @@ use crate::compositor::{
     core::state::DesktopState, // Changed from NovadeCompositorState
     shell::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow}, // Changed path
     // Removed unused XdgShellError import
+    errors::XdgShellError, // Import the error type
 };
+use uuid::Uuid; // For DomainWindowIdentifier if not already via types
 
 // --- XDG Decoration Imports ---
 use smithay::wayland::shell::xdg::decoration::{
@@ -30,134 +32,177 @@ use smithay::wayland::shell::xdg::decoration::{
 };
 // ToplevelSurface is already imported above.
 
-impl XdgShellHandler for DesktopState { // Changed from NovadeCompositorState
+// Helper function to find ManagedWindow by WlSurface - takes &mut DesktopState to allow modification if needed, though current use is read-only
+fn find_managed_window_by_wl_surface_mut(desktop_state: &mut DesktopState, surface: &WlSurface) -> Option<Arc<ManagedWindow>> {
+    desktop_state.windows.values()
+        .find(|win_arc| win_arc.wl_surface().as_ref() == Some(surface))
+        .cloned()
+}
+// Read-only version
+fn find_managed_window_by_wl_surface(desktop_state: &DesktopState, surface: &WlSurface) -> Option<Arc<ManagedWindow>> {
+    desktop_state.windows.values()
+        .find(|win_arc| win_arc.wl_surface().as_ref() == Some(surface))
+        .cloned()
+}
+
+
+impl XdgShellHandler for DesktopState {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
         &mut self.xdg_shell_state
     }
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
-        tracing::info!(surface_id = ?surface.wl_surface().id(), "New XDG Toplevel created.");
+        tracing::info!(surface_id = ?surface.wl_surface().id(), "XDG New Toplevel requested");
         let domain_window_id = DomainWindowIdentifier::new_v4();
-        let managed_window_arc = Arc::new(ManagedWindow::new_toplevel(surface.clone(), domain_window_id));
 
-        {
-            let mut mw_state = managed_window_arc.state.write().unwrap();
-            mw_state.position = Point::from((100, 100)); // Example initial position
-            mw_state.size = Size::from((300, 200));     // Example initial size
-            // current_geometry on ManagedWindow struct is updated by space/layout logic
-        }
+        let mut managed_window = ManagedWindow::new_toplevel(surface.clone(), domain_window_id);
         
-        surface.with_pending_state(|xdg_state| {
-            let mw_state = managed_window_arc.state.read().unwrap();
-            xdg_state.size = Some(mw_state.size);
-            // Consider setting activated state if this is the currently focused new window
-        });
-        let _configure_serial = surface.send_configure(); 
-        // managed_window_arc.last_configure_serial = Some(_configure_serial); // Needs interior mutability for last_configure_serial
+        let initial_geometry = managed_window.current_geometry;
 
-        self.windows.insert(domain_window_id, managed_window_arc.clone());
-        tracing::info!("Created ManagedWindow with ID {:?}, initial size {:?}, configure serial {:?}", 
-            managed_window_arc.id, managed_window_arc.state.read().unwrap().size, _configure_serial);
+        surface.with_pending_state(|xdg_state| {
+            xdg_state.size = Some(initial_geometry.size);
+        });
+        let configure_serial = surface.send_configure();
+        managed_window.last_configure_serial = Some(configure_serial); // Set serial before Arc::new
+
+        let window_arc = Arc::new(managed_window);
+        self.windows.insert(domain_window_id, window_arc.clone());
+
+        tracing::info!("New XDG Toplevel (domain_id: {:?}, compositor_id: {:?}) created and configured with serial {:?}. Awaiting map.",
+                     domain_window_id, window_arc.id, configure_serial);
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _client_data: &XdgWmBaseClientData) {
-        tracing::info!(surface_id = ?surface.wl_surface().id(), "New XDG Popup created.");
-        let parent_wl_surface = surface.parent_surface();
-        let parent_arc = parent_wl_surface.and_then(|parent_surf| {
-            self.windows.values().find(|win| win.wl_surface().map_or(false, |s| s == parent_surf)).cloned()
-        });
-        let parent_domain_id = parent_arc.as_ref().map_or_else(DomainWindowIdentifier::new_v4, |p| p.domain_id);
-        let managed_popup_arc = Arc::new(ManagedWindow::new_popup(surface.clone(), parent_domain_id, parent_arc));
-        
-        // Store the Arc<ManagedWindow> in the PopupSurface's user data for later retrieval if needed,
-        // and for lifetime management.
-        surface.user_data().insert_if_missing_threadsafe(|| managed_popup_arc.clone());
-
-        // Add a destruction hook to the underlying WlSurface of the popup.
-        let popup_wl_surface = surface.wl_surface().clone();
-        smithay::wayland::compositor::add_destruction_hook(&popup_wl_surface, |data_map_of_destroyed_surface| {
-            // Attempt to retrieve our ManagedWindow Arc from user data.
-            // Note: The key type for retrieval must match exactly what was inserted.
-            // If we inserted Arc<ManagedWindow>, we retrieve Arc<ManagedWindow>.
-            if let Some(retrieved_popup_arc) = data_map_of_destroyed_surface.get::<Arc<ManagedWindow>>() {
-                tracing::info!(popup_managed_window_id = ?retrieved_popup_arc.id, "ManagedWindow for XDG Popup (surface {:?}) destroyed and its Arc dropped from user_data.", popup_wl_surface.id());
-            } else {
-                tracing::warn!("Could not retrieve ManagedWindow Arc from user_data for destroyed XDG Popup (surface {:?}). It might have been removed earlier or not set.", popup_wl_surface.id());
+        let parent_wl_surface = match surface.get_parent_surface() {
+            Some(s) => s,
+            None => {
+                tracing::error!("Popup {:?} created without a parent surface. Destroying popup.", surface.wl_surface().id());
+                surface.send_popup_done();
+                return;
             }
-            // The Arc itself is dropped when it goes out of scope here if this is the last reference,
-            // or when the UserDataMap is cleared upon surface destruction.
+        };
+
+        let parent_managed_window_arc = match find_managed_window_by_wl_surface(self, &parent_wl_surface) {
+             Some(arc) => arc,
+             None => {
+                tracing::error!("Parent WlSurface {:?} for popup {:?} does not correspond to a known ManagedWindow. Destroying popup.", parent_wl_surface.id(), surface.wl_surface().id());
+                surface.send_popup_done();
+                return;
+             }
+        };
+        
+        tracing::info!(popup_surface_id = ?surface.wl_surface().id(), parent_surface_id = ?parent_wl_surface.id(), "XDG New Popup requested");
+
+        let mut managed_popup = ManagedWindow::new_popup(surface.clone(), parent_managed_window_arc.domain_id(), Some(parent_managed_window_arc.clone()));
+
+        let positioner_state = surface.get_positioner();
+        let parent_geometry = parent_managed_window_arc.geometry();
+        let popup_size = positioner_state.get_size().unwrap_or_else(|| Size::from((10,10)));
+        let anchor_rect = positioner_state.get_anchor_rect().unwrap_or_else(|| Rectangle::from_loc_and_size((0,0), (0,0)));
+        let offset = positioner_state.get_offset().unwrap_or_else(|| (0,0).into());
+
+        let popup_loc_relative_to_parent_anchor = Point::from((anchor_rect.loc.x + offset.x, anchor_rect.loc.y + offset.y));
+        let popup_global_loc = parent_geometry.loc + popup_loc_relative_to_parent_anchor;
+
+        managed_popup.current_geometry = Rectangle::from_loc_and_size(popup_global_loc, popup_size);
+
+        let configure_serial = surface.send_configure();
+        managed_popup.last_configure_serial = Some(configure_serial);
+
+        let popup_arc = Arc::new(managed_popup);
+        // Storing popups in the main self.windows map.
+        // This might need differentiation later if popups have very different management needs.
+        self.windows.insert(popup_arc.domain_id(), popup_arc.clone());
+
+        // Optional: Store Arc<ManagedWindow> in PopupSurface's user data
+        surface.user_data().insert_if_missing_threadsafe(|| popup_arc.clone());
+        // Add destruction hook as in existing code if desired (good for cleanup logging)
+        let popup_wl_surface_clone = surface.wl_surface().clone(); // Clone for the closure
+        smithay::wayland::compositor::add_destruction_hook(&popup_wl_surface_clone, move |data_map_of_destroyed_surface| {
+            if data_map_of_destroyed_surface.get::<Arc<ManagedWindow>>().is_some() {
+                tracing::info!("ManagedWindow Arc for XDG Popup (surface {:?}) was present in user_data upon destruction.", popup_wl_surface_clone.id());
+            }
         });
 
-        let _configure_serial = surface.send_configure();
-        tracing::debug!("Sent initial configure for new popup {:?}, stored ManagedWindow ({:?}) in user_data.", surface.wl_surface().id(), managed_popup_arc.id);
+        tracing::info!("New XDG Popup (domain_id: {:?}, compositor_id: {:?}) created, configured with serial {:?}. Parent: {:?}",
+                     popup_arc.domain_id(), popup_arc.id, configure_serial, parent_managed_window_arc.id);
     }
 
     fn map_toplevel(&mut self, surface: &ToplevelSurface) {
-        tracing::info!(surface_id = ?surface.wl_surface().id(), "Mapping XDG Toplevel.");
-        if let Some(window_arc) = self.windows.values().find(|win| win.xdg_surface.wl_surface().as_ref() == Some(surface.wl_surface())).cloned() {
-            // The Window::is_mapped() on ManagedWindow should reflect its status in the space.
-            // is_mapped field on ManagedWindow struct is updated by the Window trait methods if needed.
-            let initial_pos = window_arc.state.read().unwrap().position;
-            self.space.map_window(window_arc.clone(), initial_pos, true); // activate on map
-            tracing::info!("Mapped window {:?} to space at {:?}.", window_arc.id, initial_pos);
+        let wl_surface = surface.wl_surface();
+        tracing::info!(surface_id = ?wl_surface.id(), "XDG Toplevel map request");
+
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, wl_surface) {
+            {
+                let mut state_guard = window_arc.state.write().unwrap();
+                state_guard.is_mapped = true;
+            }
+            self.space.map_window(window_arc.clone(), window_arc.geometry().loc, true);
+            tracing::info!("XDG Toplevel {:?} mapped to space at {:?}", window_arc.id, window_arc.geometry().loc);
             self.space.damage_all_outputs();
         } else {
-            tracing::error!("Tried to map a toplevel not found in internal tracking: {:?}", surface.wl_surface().id());
+            tracing::warn!("Map request for unknown XDG Toplevel (surface_id: {:?})", wl_surface.id());
         }
     }
 
     fn unmap_toplevel(&mut self, surface: &ToplevelSurface) {
-        tracing::info!(surface_id = ?surface.wl_surface().id(), "Unmapping XDG Toplevel.");
-        if let Some(window_arc) = self.windows.values().find(|win| win.xdg_surface.wl_surface().as_ref() == Some(surface.wl_surface())).cloned() {
+        let wl_surface = surface.wl_surface();
+        tracing::info!(surface_id = ?wl_surface.id(), "XDG Toplevel unmap request");
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, wl_surface) {
+            {
+                let mut state_guard = window_arc.state.write().unwrap();
+                state_guard.is_mapped = false;
+            }
             self.space.unmap_window(&window_arc);
-            tracing::info!("Unmapped window {:?} from space.", window_arc.id);
+            tracing::info!("XDG Toplevel {:?} unmapped from space.", window_arc.id);
             self.space.damage_all_outputs();
         } else {
-            tracing::error!("Tried to unmap a toplevel not found: {:?}", surface.wl_surface().id());
+            tracing::warn!("Unmap request for unknown XDG Toplevel (surface_id: {:?})", wl_surface.id());
         }
     }
     
-    fn ack_configure(&mut self, surface: WlSurface, configure_data: XdgSurfaceConfigure) {
-        let serial = configure_data.serial;
-        tracing::debug!(surface_id = ?surface.id(), ?serial, surface_type = ?configure_data.surface_type, "XDG Surface ack_configure received.");
-        if let Err(e) = XdgShellState::handle_ack_configure(&surface, configure_data) {
-            tracing::warn!("Error handling ack_configure from Smithay's XdgShellState: {}", e);
+    fn ack_configure(&mut self, surface: WlSurface, configure: xdg_surface::Configure) {
+        let xdg_surface_data = surface.data_map().get::<XdgSurfaceUserData>().unwrap();
+        tracing::debug!(surface_id = ?surface.id(), serial = ?configure.serial, "XDG Surface ack_configure received. Initial: {}", xdg_surface_data.initial_configure_sent);
+
+        // Smithay's XdgShellState::handle_ack_configure can be used for basic validation if needed,
+        // but often custom logic is applied here.
+        // if let Err(e) = XdgShellState::handle_ack_configure(&surface, configure.clone()) {
+        //     tracing::warn!("Error handling ack_configure via Smithay's XdgShellState: {}", e);
+        // }
+
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, &surface) {
+            // The configure.data is SurfaceCachedState. If it contains new_window_geometry,
+            // it means the client is acknowledging a resize.
+            // We might need to update our ManagedWindow.current_geometry and re-map in space.
+            // However, Smithay's ToplevelSurface itself updates its current_state upon ack.
+            // Our ManagedWindow should ideally sync from ToplevelSurface::current_state() if needed.
+            // For now, just log.
+            if xdg_surface_data.initial_configure_sent && !window_arc.state.read().unwrap().is_mapped {
+                 tracing::debug!("ack_configure for initial configure of window {:?}. Window mapped state: {}", window_arc.id, window_arc.state.read().unwrap().is_mapped);
+            }
+        } else {
+            tracing::warn!("ack_configure for unknown surface: {:?}", surface.id());
         }
     }
 
-    fn move_request(&mut self, surface: &ToplevelSurface, _seat: &Seat<Self>, _serial: Serial) {
-        tracing::info!(surface_id = ?surface.wl_surface().id(), "XDG Toplevel move request.");
-        if let Some(window) = self.windows.values().find(|w| w.xdg_surface.wl_surface().as_ref() == Some(surface.wl_surface())) {
-            // TODO: Validate serial against window.last_configure_serial if it's reliably updated.
-            let mut manager_data = window.manager_data.write().unwrap();
-            manager_data.moving = true;
-            // Actual grab logic (e.g., with PointerGrab) would start here.
-            tracing::debug!("Window {:?} manager_data.moving set to true.", window.id);
-            // Example: self.pointer_interaction.start_move_grab(window.clone(), seat, serial);
+    // Using find_managed_window_by_wl_surface (read-only) for these setters
+    fn toplevel_request_set_title(&mut self, surface: &ToplevelSurface, title: String) {
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, surface.wl_surface()) {
+            let mut state_guard = window_arc.state.write().unwrap();
+            state_guard.title = Some(title.clone());
+            drop(state_guard);
+            tracing::info!("Window {:?} requested title change to: {}", window_arc.id, title);
         }
     }
 
-    fn resize_request(&mut self, surface: &ToplevelSurface, _seat: &Seat<Self>, _serial: Serial, edges: XdgResizeEdge) {
-        tracing::info!(surface_id = ?surface.wl_surface().id(), ?edges, "XDG Toplevel resize request.");
-        if let Some(window) = self.windows.values().find(|w| w.xdg_surface.wl_surface().as_ref() == Some(surface.wl_surface())) {
-            let mut manager_data = window.manager_data.write().unwrap();
-            manager_data.resizing = true;
-            manager_data.resize_edges = Some(edges);
-            tracing::debug!("Window {:?} manager_data.resizing set to true, edges: {:?}.", window.id, edges);
-            // Example: self.pointer_interaction.start_resize_grab(window.clone(), seat, serial, edges);
+    fn toplevel_request_set_app_id(&mut self, surface: &ToplevelSurface, app_id: String) {
+         if let Some(window_arc) = find_managed_window_by_wl_surface(self, surface.wl_surface()) {
+            let mut state_guard = window_arc.state.write().unwrap();
+            state_guard.app_id = Some(app_id.clone());
+            drop(state_guard);
+            tracing::info!("Window {:?} requested app_id change to: {}", window_arc.id, app_id);
         }
-    }
-
-    fn set_title_request(&mut self, surface: &ToplevelSurface) {
-        let title = surface.title();
-        tracing::info!(surface_id = ?surface.wl_surface().id(), title = ?title, "XDG Toplevel set_title request.");
-        // ManagedWindow::self_update() (from Window trait) should be called elsewhere to sync this.
-    }
-
-    fn set_app_id_request(&mut self, surface: &ToplevelSurface) {
-        let app_id = surface.app_id();
-        tracing::info!(surface_id = ?surface.wl_surface().id(), app_id = ?app_id, "XDG Toplevel set_app_id request.");
-        // ManagedWindow::self_update() (from Window trait) should be called elsewhere to sync this.
     }
 
     fn set_parent_request(&mut self, surface: &ToplevelSurface, parent_surface_opt: Option<&ToplevelSurface>) {
@@ -188,34 +233,37 @@ impl XdgShellHandler for DesktopState { // Changed from NovadeCompositorState
         // The client is expected to commit the child surface for the parent change to be fully applied by Smithay.
     }
 
-    fn set_maximized_request(&mut self, surface: &ToplevelSurface) {
-        tracing::info!(surface_id = ?surface.wl_surface().id(), "XDG Toplevel set_maximized request.");
-        if let Some(window_arc) = self.windows.values().find(|w| w.xdg_surface.wl_surface().as_ref() == Some(surface.wl_surface())).cloned() {
+    fn toplevel_request_set_maximized(&mut self, surface: &ToplevelSurface) { // Renamed from set_maximized_request
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, surface.wl_surface()) {
+            tracing::info!("Window {:?} requested set_maximized", window_arc.id);
             let mut win_state_guard = window_arc.state.write().unwrap();
             if !win_state_guard.maximized {
-                // Save current geometry before maximizing
-                win_state_guard.saved_pre_action_geometry = Some(Rectangle::from_loc_and_size(
-                    win_state_guard.position,
-                    win_state_guard.size,
-                ));
+                // Save current geometry before maximizing. Use window_arc.geometry() for current actual geometry.
+                win_state_guard.saved_pre_action_geometry = Some(window_arc.geometry());
                 tracing::debug!("Saved pre-maximize geometry: {:?}", win_state_guard.saved_pre_action_geometry);
             }
             win_state_guard.maximized = true;
-            win_state_guard.minimized = false;
+            win_state_guard.fullscreen = false; // Ensure not fullscreen
+            drop(win_state_guard);
 
-            let maximized_size = self.space.outputs()
-                .find_map(|o| self.space.output_geometry(o).map(|g| g.size));
+            let maximized_geometry = self.space.outputs()
+                .next()
+                .and_then(|o| self.space.output_geometry(o))
+                .unwrap_or_else(|| Rectangle::from_loc_and_size((0,0), (800,600))); // Fallback
 
             surface.with_pending_state(|xdg_state| {
-                xdg_state.states.set(XdgToplevelState::Maximized, true);
-                xdg_state.size = maximized_size; 
+                xdg_state.states.set(XdgToplevelStateSmithay::Maximized); // Use aliased XdgToplevelStateSmithay
+                xdg_state.size = Some(maximized_geometry.size);
             });
-            let _serial = surface.send_configure();
-            tracing::debug!("Maximized request for {:?}, sent configure with size {:?}, serial {:?}", surface.wl_surface().id(), maximized_size, _serial);
+            let serial = surface.send_configure();
+            // TODO: Store serial in ManagedWindow if necessary for ack_configure logic
+            // window_arc.last_configure_serial = Some(serial); // Needs interior mutability or map update
+            tracing::info!("Window {:?} set_maximized request. Sent configure with serial {:?}, size {:?}.", window_arc.id, serial, maximized_geometry.size);
+            self.space.damage_all_outputs();
         }
     }
 
-    fn unset_maximized_request(&mut self, surface: &ToplevelSurface) {
+    fn toplevel_request_unset_maximized(&mut self, surface: &ToplevelSurface) { // Renamed from unset_maximized_request
         tracing::info!(surface_id = ?surface.wl_surface().id(), "XDG Toplevel unset_maximized request.");
         if let Some(window_arc) = self.windows.values().find(|w| w.xdg_surface.wl_surface().as_ref() == Some(surface.wl_surface())).cloned() {
             let mut win_state_guard = window_arc.state.write().unwrap();
@@ -243,8 +291,8 @@ impl XdgShellHandler for DesktopState { // Changed from NovadeCompositorState
             tracing::debug!("Unmaximized request for {:?}, sent configure with size {:?}, serial {:?}", surface.wl_surface().id(), restored_size, _serial);
         }
     }
-    
-    fn set_minimized_request(&mut self, surface: &ToplevelSurface) {
+
+    fn toplevel_request_set_minimized(&mut self, surface: &ToplevelSurface) { // Renamed from set_minimized_request
         tracing::info!(surface_id = ?surface.wl_surface().id(), "XDG Toplevel set_minimized request.");
         if let Some(window_arc) = self.windows.values().find(|w| w.xdg_surface.wl_surface().as_ref() == Some(surface.wl_surface())).cloned() {
             let mut win_state_guard = window_arc.state.write().unwrap();
@@ -255,86 +303,172 @@ impl XdgShellHandler for DesktopState { // Changed from NovadeCompositorState
         }
     }
 
-    fn set_fullscreen_request(&mut self, surface: &ToplevelSurface, output: Option<WaylandOutput>) {
-        tracing::info!(surface_id = ?surface.wl_surface().id(), ?output, "XDG Toplevel set_fullscreen request.");
-        if let Some(window_arc) = self.windows.values().find(|w| w.xdg_surface.wl_surface().as_ref() == Some(surface.wl_surface())).cloned() {
+    fn toplevel_request_set_fullscreen(&mut self, surface: &ToplevelSurface, output_opt: Option<&WaylandOutput>) { // Renamed from set_fullscreen_request
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, surface.wl_surface()) {
+            tracing::info!("Window {:?} requested set_fullscreen on output {:?}", window_arc.id, output_opt.map(|o| o.id()));
             let mut win_state_guard = window_arc.state.write().unwrap();
             if !win_state_guard.fullscreen {
-                // Save current geometry before fullscreen
-                 win_state_guard.saved_pre_action_geometry = Some(Rectangle::from_loc_and_size(
-                    win_state_guard.position,
-                    win_state_guard.size,
-                ));
-                tracing::debug!("Saved pre-fullscreen geometry: {:?}", win_state_guard.saved_pre_action_geometry);
+                 win_state_guard.saved_pre_action_geometry = Some(window_arc.geometry());
+                 tracing::debug!("Saved pre-fullscreen geometry for {:?}: {:?}", window_arc.id, win_state_guard.saved_pre_action_geometry);
             }
             win_state_guard.fullscreen = true;
-            win_state_guard.minimized = false;
-            
-            let target_output = output.as_ref().or_else(|| self.space.outputs().next());
-            let fullscreen_size = target_output.and_then(|o| self.space.output_geometry(o)).map(|g| g.size);
+            win_state_guard.maximized = false;
+            drop(win_state_guard);
+
+            let target_output = output_opt.or_else(|| self.space.outputs().next());
+            let fullscreen_geometry = target_output.and_then(|o| self.space.output_geometry(o));
 
             surface.with_pending_state(|xdg_state| {
-                xdg_state.states.set(XdgToplevelState::Fullscreen, true);
-                xdg_state.size = fullscreen_size;
+                xdg_state.states.set(XdgToplevelStateSmithay::Fullscreen);
+                xdg_state.size = fullscreen_geometry.map(|g| g.size);
             });
-            let _serial = surface.send_configure();
-            tracing::debug!("Fullscreen request for {:?}, output {:?}, sent configure with size {:?}, serial {:?}", surface.wl_surface().id(), target_output.map(|o|o.name()), fullscreen_size, _serial);
+            let serial = surface.send_configure();
+            // window_arc.last_configure_serial = Some(serial); // Update if needed
+
+            if let Some(geo) = fullscreen_geometry {
+                // TODO: This should ideally interact with a layout manager.
+                // For now, we assume client will position itself at (0,0) on the output.
+                // Or, we could adjust window_arc's position in space here.
+                // self.space.map_window(&window_arc, geo.loc, false); // Example: if map_window handles position update
+                tracing::info!("Window {:?} set_fullscreen request. Target output geometry {:?}. Sent configure with serial {:?}.", window_arc.id, geo, serial);
+            } else {
+                tracing::warn!("Could not determine fullscreen geometry for window {:?}. Sent configure with serial {:?}.", window_arc.id, serial);
+            }
+            self.space.damage_all_outputs();
         }
     }
 
-    fn unset_fullscreen_request(&mut self, surface: &ToplevelSurface) {
-        tracing::info!(surface_id = ?surface.wl_surface().id(), "XDG Toplevel unset_fullscreen request.");
-         if let Some(window_arc) = self.windows.values().find(|w| w.xdg_surface.wl_surface().as_ref() == Some(surface.wl_surface())).cloned() {
+    fn toplevel_request_unset_fullscreen(&mut self, surface: &ToplevelSurface) { // Renamed from unset_fullscreen_request
+         if let Some(window_arc) = find_managed_window_by_wl_surface(self, surface.wl_surface()) {
+            tracing::info!("Window {:?} requested unset_fullscreen", window_arc.id);
             let mut win_state_guard = window_arc.state.write().unwrap();
             win_state_guard.fullscreen = false;
-
-            let restored_geometry = win_state_guard.saved_pre_action_geometry.take();
-            let (restored_pos, restored_size) = if let Some(geom) = restored_geometry {
-                tracing::debug!("Restoring to saved geometry: {:?}", geom);
-                win_state_guard.position = geom.loc;
-                win_state_guard.size = geom.size;
-                (Some(geom.loc), Some(geom.size))
-            } else {
-                tracing::warn!("No saved geometry found for unfullscreen, using current size.");
-                (None, Some(win_state_guard.size))
-            };
+            let restored_size = win_state_guard.saved_pre_action_geometry.map(|g| g.size);
+            // Position restoration would be handled by layout logic or client, or from saved_pre_action_geometry.loc
+            if let Some(saved_geom) = win_state_guard.saved_pre_action_geometry {
+                 tracing::debug!("Restored size for {:?} to {:?}. Position would be {:?}", window_arc.id, saved_geom.size, saved_geom.loc);
+            }
+            drop(win_state_guard);
 
             surface.with_pending_state(|xdg_state| {
-                xdg_state.states.set(XdgToplevelState::Fullscreen, false);
+                xdg_state.states.unset(XdgToplevelStateSmithay::Fullscreen);
                 xdg_state.size = restored_size;
             });
-            let _serial = surface.send_configure();
-            tracing::debug!("Unfullscreen request for {:?}, sent configure with size {:?}, serial {:?}", surface.wl_surface().id(), restored_size, _serial);
+            let serial = surface.send_configure();
+            // window_arc.last_configure_serial = Some(serial);
+            tracing::info!("Window {:?} unset_fullscreen request. Sent configure with serial {:?}, proposed size {:?}.", window_arc.id, serial, restored_size);
+            self.space.damage_all_outputs();
         }
     }
 
-    fn toplevel_destroyed(&mut self, toplevel: ToplevelSurface) {
-        let wl_surface_id = toplevel.wl_surface().id();
-        tracing::info!(surface_id = ?wl_surface_id, "XDG Toplevel destroyed.");
-        
-        if let Some(window_arc) = self.windows.values().find(|win| win.xdg_surface.wl_surface().as_ref() == Some(toplevel.wl_surface())).cloned() {
-            self.space.unmap_window(&window_arc); 
-            if self.windows.remove(&window_arc.domain_id).is_some() {
-                tracing::info!("Removed window with domain ID {:?} (surface {:?}) from tracking.", window_arc.domain_id, wl_surface_id);
-            } else {
-                tracing::warn!("Window for domain ID {:?} (surface {:?}) already removed before destruction signal.", window_arc.domain_id, wl_surface_id);
-            }
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) { // Name changed to surface for consistency with prompt
+        let wl_surface = surface.wl_surface(); // Use wl_surface for clarity
+        tracing::info!(surface_id = ?wl_surface.id(), "XDG Toplevel destroyed by client");
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, wl_surface) {
+            self.space.unmap_window(&window_arc);
+            self.windows.remove(&window_arc.domain_id());
+            tracing::info!("ManagedWindow {:?} (domain: {:?}) removed due to toplevel destruction.", window_arc.id, window_arc.domain_id());
+            self.space.damage_all_outputs();
+        } else { // This case was missing in the prompt's version, good to keep.
+             tracing::warn!("Destroyed toplevel {:?} was not found in self.windows by its WlSurface.", wl_surface.id());
+        }
+    }
+
+    fn popup_destroyed(&mut self, surface: PopupSurface) { // Name changed to surface for consistency
+        let wl_surface = surface.wl_surface();
+        tracing::info!(surface_id = ?wl_surface.id(), "XDG Popup destroyed by client");
+        if let Some(popup_arc) = find_managed_window_by_wl_surface(self, wl_surface) {
+            // Popups might not be directly in space in the same way, or might be handled by space's window hierarchy
+            self.windows.remove(&popup_arc.domain_id());
+            tracing::info!("ManagedWindow (popup) {:?} (domain: {:?}) removed from self.windows due to popup destruction.", popup_arc.id, popup_arc.domain_id());
+        }
+        // The destruction hook for UserDataMap (if used in new_popup) will also run.
+        self.space.damage_all_outputs(); // Damage parent area or whole output
+    }
+
+    // Other required methods from the prompt (some might be stubs in existing file)
+    fn toplevel_request_set_minimized(&mut self, surface: &ToplevelSurface) {
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, surface.wl_surface()) {
+            tracing::info!("Window {:?} requested set_minimized", window_arc.id);
+            let mut win_state_guard = window_arc.state.write().unwrap();
+            win_state_guard.minimized = true;
+            drop(win_state_guard);
+            self.space.unmap_window(&window_arc);
+            tracing::info!("Window {:?} unmapped from space due to minimization request.", window_arc.id);
+            self.space.damage_all_outputs();
         } else {
-            tracing::warn!("Destroyed toplevel {:?} was not found in self.windows by its WlSurface.", wl_surface_id);
+            tracing::warn!("Set_minimized request for unknown toplevel: {:?}", surface.wl_surface().id());
         }
-        self.space.damage_all_outputs();
     }
 
-    fn popup_destroyed(&mut self, popup: PopupSurface) {
-        tracing::info!(surface_id = ?popup.wl_surface().id(), "XDG Popup destroyed signal received.");
-        // The Arc<ManagedWindow> stored in the popup's user_data (if any) will be dropped automatically
-        // when the PopupSurface and its WlSurface are destroyed by Smithay, as part of UserDataMap cleanup.
-        // The destruction hook added in `new_popup` will log this.
-        // If popups were tracked in a separate list in NovadeCompositorState, they would be removed here.
+    fn toplevel_request_show_window_menu(&mut self, surface: &ToplevelSurface, seat: &wl_seat::WlSeat, serial: Serial, position: Point<i32, Logical>) {
+        tracing::info!("Request to show window menu for {:?} at {:?} by seat {:?}", surface.wl_surface().id(), position, seat.id());
+        // TODO: Implement window menu if applicable. This might involve sending an event to the domain layer
+        // or opening a special compositor-drawn menu.
+    }
+
+    fn popup_grab(&mut self, surface: &PopupSurface, seat: &wl_seat::WlSeat, serial: Serial) {
+        tracing::info!("Popup grab requested for {:?} by seat {:?}", surface.wl_surface().id(), seat.id());
+        // Smithay's default XdgShellHandler might take care of the grab logic.
+        // If we override the default grab (which we are by implementing XdgShellHandler),
+        // we need to initiate the grab explicitly.
+        let xdg_shell_state = self.xdg_shell_state(); // Get &mut XdgShellState
+        match smithay::wayland::shell::xdg::grab_popup(xdg_shell_state, surface, seat, serial) {
+            Ok(_) => tracing::debug!("Popup grab initiated successfully for {:?}.", surface.wl_surface().id()),
+            Err(err) => tracing::warn!("Failed to start popup grab for {:?}: {}", surface.wl_surface().id(), err),
+        }
+    }
+
+    fn reposition_popup(&mut self, surface: &PopupSurface, positioner: &PositionerState, token: u32) {
+        tracing::info!("Reposition popup request for {:?} with token {}", surface.wl_surface().id(), token);
+        // This is a simplified handler. A full implementation would:
+        // 1. Find the ManagedWindow for this popup.
+        // 2. Calculate new geometry based on parent and new positioner state.
+        // 3. Update ManagedWindow.current_geometry.
+        // 4. Send a new configure to the popup reflecting the new position/size.
+        // Smithay's default handler does this. By overriding, we need to do it.
+        // For now, just sending a basic configure. This might not be enough for true repositioning.
+        // surface.send_configure(); // This is too basic.
+        // The default handler does something like:
+        // surface.with_pending_state(|popup_state: &mut smithay::wayland::shell::xdg::PopupState| {
+        //     popup_state.geometry = crate::some_module::calculate_popup_geometry(surface, positioner); // You'd need this helper
+        // });
+        // surface.send_repositioned(token); // This is the correct method in Smithay 0.10+
+
+        // For now, as a placeholder matching closer to what Smithay might do if we calculated geometry:
+        surface.send_configure(); // This tells the client its configure is done.
+                                  // Actual repositioning would need geometry calculation and applying it.
+        tracing::warn!("Popup repositioning logic for {:?} is placeholder. Sent basic configure.", surface.wl_surface().id());
+    }
+
+    // --- Requests for move and resize ---
+    // These are initiated by the client, typically after a pointer click/drag on a decoration or border.
+    // Smithay's default handlers might do basic validation.
+    // Our role is to integrate this with our window management (interactive_ops).
+
+    fn toplevel_request_move(&mut self, surface: &ToplevelSurface, seat_handle: &wl_seat::WlSeat, serial: Serial) {
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, surface.wl_surface()) {
+            tracing::info!("Window {:?} requested interactive move via client request (serial: {:?})", window_arc.id, serial);
+            // TODO: Validate seat, serial, and current input state.
+            // Then, potentially start an interactive move operation using a pointer grab.
+            // let smithay_seat = Seat::<Self>::from_resource(seat_handle).ok_or_else(|| XdgShellError::OperationNotPermitted("Seat not found".to_string()))?;
+            // interactive_ops::start_interactive_move(self, &smithay_seat, window_arc.clone(), serial);
+            tracing::warn!("Interactive move op (from client request) not fully implemented for window {:?}.", window_arc.id);
+        }
+    }
+    fn toplevel_request_resize(&mut self, surface: &ToplevelSurface, seat_handle: &wl_seat::WlSeat, serial: Serial, edges: XdgResizeEdge) {
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, surface.wl_surface()) {
+            tracing::info!("Window {:?} requested interactive resize via client request (edges: {:?}, serial: {:?})", window_arc.id, edges, serial);
+            // TODO: Validate seat, serial, edges, and current input state.
+            // Then, potentially start an interactive resize operation using a pointer grab.
+            // let smithay_seat = Seat::<Self>::from_resource(seat_handle).ok_or_else(|| XdgShellError::OperationNotPermitted("Seat not found".to_string()))?;
+            // interactive_ops::start_interactive_resize(self, &smithay_seat, window_arc.clone(), serial, edges);
+            tracing::warn!("Interactive resize op (from client request) not fully implemented for window {:?}.", window_arc.id);
+        }
     }
 }
 
-impl XdgDecorationHandler for DesktopState { // Changed from NovadeCompositorState
+impl XdgDecorationHandler for DesktopState {
     fn xdg_decoration_state(&mut self) -> &mut ServerDecorationState {
         &mut self.xdg_decoration_state
     }
@@ -357,7 +491,51 @@ impl XdgDecorationHandler for DesktopState { // Changed from NovadeCompositorSta
         }
     }
 
-    fn request_mode(&mut self, toplevel: ToplevelSurface, requested_mode: XdgDecorationMode) {
+    fn toplevel_request_show_window_menu(&mut self, surface: &ToplevelSurface, seat: &wl_seat::WlSeat, serial: Serial, position: Point<i32, Logical>) {
+        tracing::info!("Request to show window menu for {:?} at {:?} by seat {:?}", surface.wl_surface().id(), position, seat.id());
+        // TODO: Implement window menu if applicable. This might involve sending an event to the domain layer
+        // or opening a special compositor-drawn menu.
+    }
+
+    fn popup_grab(&mut self, surface: &PopupSurface, seat: &wl_seat::WlSeat, serial: Serial) {
+        tracing::info!("Popup grab requested for {:?} by seat {:?}", surface.wl_surface().id(), seat.id());
+        let xdg_shell_state = self.xdg_shell_state();
+        match smithay::wayland::shell::xdg::grab_popup(xdg_shell_state, surface, seat, serial) {
+            Ok(_) => tracing::debug!("Popup grab initiated successfully for {:?}.", surface.wl_surface().id()),
+            Err(err) => tracing::warn!("Failed to start popup grab for {:?}: {}", surface.wl_surface().id(), err),
+        }
+    }
+
+    fn reposition_popup(&mut self, surface: &PopupSurface, positioner: &PositionerState, token: u32) {
+        tracing::info!("Reposition popup request for {:?} with token {}", surface.wl_surface().id(), token);
+        // Placeholder: Actual repositioning would involve recalculating geometry based on positioner
+        // and then sending a configure event with the new geometry.
+        surface.send_configure(); // Basic ack
+        tracing::warn!("Popup repositioning logic for {:?} is placeholder. Sent basic configure.", surface.wl_surface().id());
+    }
+
+    fn toplevel_request_move(&mut self, surface: &ToplevelSurface, seat_handle: &wl_seat::WlSeat, serial: Serial) {
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, surface.wl_surface()) {
+            tracing::info!("Window {:?} requested interactive move via client request (serial: {:?})", window_arc.id, serial);
+            // TODO: Validate seat, serial, and current input state.
+            // Then, potentially start an interactive move operation using a pointer grab.
+            // let smithay_seat = Seat::<Self>::from_resource(seat_handle).ok_or_else(|| XdgShellError::OperationNotPermitted("Seat not found".to_string()))?;
+            // interactive_ops::start_interactive_move(self, &smithay_seat, window_arc.clone(), serial);
+            tracing::warn!("Interactive move op (from client request) not fully implemented for window {:?}.", window_arc.id);
+        }
+    }
+    fn toplevel_request_resize(&mut self, surface: &ToplevelSurface, seat_handle: &wl_seat::WlSeat, serial: Serial, edges: XdgResizeEdge) {
+        if let Some(window_arc) = find_managed_window_by_wl_surface(self, surface.wl_surface()) {
+            tracing::info!("Window {:?} requested interactive resize via client request (edges: {:?}, serial: {:?})", window_arc.id, edges, serial);
+            // TODO: Validate seat, serial, edges, and current input state.
+            // Then, potentially start an interactive resize operation using a pointer grab.
+            // let smithay_seat = Seat::<Self>::from_resource(seat_handle).ok_or_else(|| XdgShellError::OperationNotPermitted("Seat not found".to_string()))?;
+            // interactive_ops::start_interactive_resize(self, &smithay_seat, window_arc.clone(), serial, edges);
+            tracing::warn!("Interactive resize op (from client request) not fully implemented for window {:?}.", window_arc.id);
+        }
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         tracing::debug!(surface_id = ?toplevel.wl_surface().id(), ?requested_mode, "Client requested decoration mode");
         
         let chosen_mode = requested_mode; // For now, honor client's request directly.
