@@ -37,6 +37,7 @@ use std::{
 use crate::compositor::surface_management::{AttachedBufferInfo, SurfaceData}; 
 use crate::compositor::core::ClientCompositorData;
 use crate::compositor::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
+use novade_domain::DomainServices;
 
 mod input_handlers; // Added module declaration
 mod output_handlers; // Added module declaration for output handlers
@@ -69,7 +70,7 @@ pub enum ActiveRendererType {
 }
 
 // Main compositor state
-pub struct NovadeCompositorState {
+pub struct DesktopState {
     pub display_handle: DisplayHandle,
     pub loop_handle: LoopHandle<'static, Self>,
     pub clock: Clock<u64>,
@@ -106,22 +107,16 @@ pub struct NovadeCompositorState {
     pub mcp_connection_service: Option<Arc<TokioMutex<MCPConnectionService>>>,
     pub cpu_usage_service: Option<Arc<dyn ICpuUsageService>>,
     // pub mcp_client_spawner: Option<Arc<dyn IMCPClientService>>,
+    pub domain_services: Option<std::sync::Arc<novade_domain::DomainServices>>,
 }
 
-impl NovadeCompositorState {
-    #[allow(clippy::too_many_arguments)] // Constructor naturally has many arguments for state initialization
+impl DesktopState {
+    // #[allow(clippy::too_many_arguments)] // No longer needed
     pub fn new(
-        event_loop: &mut EventLoop<'static, Self>,
+        loop_handle: LoopHandle<'static, Self>, // Changed from event_loop
         display_handle: DisplayHandle,
-        gles_renderer: Option<crate::compositor::renderers::gles2::renderer::Gles2Renderer>,
-        vulkan_instance: Option<Arc<VulkanInstance>>,
-        vulkan_physical_device_info: Option<Arc<PhysicalDeviceInfo>>,
-        vulkan_logical_device: Option<Arc<LogicalDevice>>,
-        vulkan_allocator: Option<Arc<Allocator>>,
-        vulkan_frame_renderer: Option<Arc<Mutex<VulkanFrameRenderer>>>,
-        active_renderer_type: ActiveRendererType,
     ) -> Self {
-        let loop_handle = event_loop.handle();
+        // let loop_handle = event_loop.handle(); // loop_handle is now passed directly
         let clock = Clock::new(None).expect("Failed to create clock");
 
         let compositor_state = CompositorState::new::<Self>(&display_handle);
@@ -144,7 +139,7 @@ impl NovadeCompositorState {
             compositor_state,
             shm_state,
             output_manager_state,
-            gles_renderer, // Now an Option passed in
+            gles_renderer: None, // Initialize to None
             xdg_shell_state,
             space,
             windows: HashMap::new(),
@@ -159,21 +154,22 @@ impl NovadeCompositorState {
             dmabuf_state,
             xdg_decoration_state,
             screencopy_state, // Add to struct instantiation
-            vulkan_instance,
-            vulkan_physical_device_info,
-            vulkan_logical_device,
-            vulkan_allocator,
-            vulkan_frame_renderer,
-            active_renderer_type,
+            vulkan_instance: None, // Initialize to None
+            vulkan_physical_device_info: None, // Initialize to None
+            vulkan_logical_device: None, // Initialize to None
+            vulkan_allocator: None, // Initialize to None
+            vulkan_frame_renderer: None, // Initialize to None
+            active_renderer_type: ActiveRendererType::Gles, // Default to Gles, backend should update
             // --- Initialize new service fields ---
             mcp_connection_service: None,
             cpu_usage_service: None,
             // mcp_client_spawner: None,
+            domain_services: None,
         }
     }
 }
 
-impl CompositorHandler for NovadeCompositorState {
+impl CompositorHandler for DesktopState {
     fn compositor_state(&mut self) -> &mut CompositorState {
         &mut self.compositor_state
     }
@@ -485,32 +481,32 @@ impl Default for ClientCompositorData {
     }
 }
 
-delegate_compositor!(NovadeCompositorState); // Renamed DesktopState
-delegate_shm!(NovadeCompositorState);       // Renamed DesktopState
+delegate_compositor!(DesktopState);
+delegate_shm!(DesktopState);
 
-impl ShmHandler for NovadeCompositorState { // Renamed DesktopState
+impl ShmHandler for DesktopState {
     fn shm_state(&self) -> &ShmState {
         &self.shm_state
     }
 }
 
-impl BufferHandler for NovadeCompositorState { // Renamed DesktopState
+impl BufferHandler for DesktopState {
     fn buffer_destroyed(&mut self, buffer: &WlBuffer) {
         tracing::debug!(buffer_id = ?buffer.id(), "WlBuffer destroyed notification received in BufferHandler.");
     }
 }
 
-// Delegate DmabufHandler if NovadeCompositorState implements it
-delegate_dmabuf!(NovadeCompositorState);
-// Delegate OutputHandler if NovadeCompositorState implements it
-delegate_output!(NovadeCompositorState);
-// Delegate SeatHandler if NovadeCompositorState implements it
-delegate_seat!(NovadeCompositorState);
-// Delegate XdgShellHandler if NovadeCompositorState implements it
-delegate_xdg_shell!(NovadeCompositorState);
+// Delegate DmabufHandler if DesktopState implements it
+delegate_dmabuf!(DesktopState);
+// Delegate OutputHandler if DesktopState implements it
+delegate_output!(DesktopState);
+// Delegate SeatHandler if DesktopState implements it
+delegate_seat!(DesktopState);
+// Delegate XdgShellHandler if DesktopState implements it
+delegate_xdg_shell!(DesktopState);
 // Delegate XdgDecorationHandler
-delegate_xdg_decoration!(NovadeCompositorState);
+delegate_xdg_decoration!(DesktopState);
 // Delegate ScreencopyHandler
-delegate_screencopy!(NovadeCompositorState);
-// Delegate DamageTrackerHandler if NovadeCompositorState implements it
-delegate_damage_tracker!(NovadeCompositorState);
+delegate_screencopy!(DesktopState);
+// Delegate DamageTrackerHandler if DesktopState implements it
+delegate_damage_tracker!(DesktopState);
