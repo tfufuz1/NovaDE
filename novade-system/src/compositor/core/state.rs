@@ -27,13 +27,16 @@ use smithay::{
     backend::renderer::utils::buffer_dimensions,
     desktop::{Space, DamageTrackerState},
     output::Output,
-    input::{Seat, SeatState, pointer::CursorImageStatus},
+    input::{Seat, SeatHandler, SeatState, pointer::CursorImageStatus, keyboard::KeyboardHandle, touch::TouchSlotId}, // Added KeyboardHandle and TouchSlotId
+    reexports::wayland_server::protocol::wl_surface::{WlSurface, Weak}, // Added WlSurface, Weak
+    wayland::seat::WaylandSeatData, // Added WaylandSeatData
 };
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex as StdMutex, Mutex}, // Added Mutex for VulkanFrameRenderer
     time::Instant,
 };
+use crate::input::keyboard::xkb_config::XkbKeyboardData; // Added XkbKeyboardData
 use crate::compositor::surface_management::{AttachedBufferInfo, SurfaceData}; 
 use crate::compositor::core::ClientCompositorData;
 use crate::compositor::shell::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
@@ -119,6 +122,9 @@ pub struct DesktopState {
     // --- Input Management ---
     pub input_dispatcher: InputDispatcher,
     pub keyboard_layout_manager: KeyboardLayoutManager,
+    pub active_input_surface: Option<smithay::reexports::wayland_server::Weak<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>>,
+    pub keyboard_data_map: std::collections::HashMap<String, crate::input::keyboard::xkb_config::XkbKeyboardData>,
+    pub touch_focus_per_slot: HashMap<TouchSlotId, Weak<WlSurface>>,
 
     // --- WGPU Renderer ---
     // pub wgpu_renderer: Option<Arc<Mutex<NovaWgpuRenderer>>>, // Removed specific WGPU field
@@ -149,6 +155,21 @@ impl DesktopState {
             .expect("Failed to initialize KeyboardLayoutManager");
 
         let seat = seat_state.new_wl_seat(&display_handle, seat_name.clone(), Some(tracing::Span::current()));
+        seat.user_data().insert_if_missing(smithay::wayland::seat::WaylandSeatData::default);
+
+        let mut keyboard_data_map = std::collections::HashMap::new();
+        match crate::input::keyboard::xkb_config::XkbKeyboardData::new(&keyboard_layout_manager.xkb_config_cloned()) {
+            Ok(xkb_data) => {
+                keyboard_data_map.insert(seat.name().to_string(), xkb_data);
+                tracing::info!("XkbKeyboardData initialized and added for seat: {}", seat.name());
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize XkbKeyboardData for seat {}: {:?}", seat.name(), e);
+                // Potentially, we might not want to panic here, but log and continue without XKB on this seat.
+                // Or, if XKB is critical, then perhaps return an error from DesktopState::new.
+                // For now, logging the error.
+            }
+        }
 
         // Configure the keyboard for the seat using KeyboardLayoutManager
         if let Err(e) = seat.add_keyboard(keyboard_layout_manager.xkb_config_cloned(), 200, 25) {
@@ -206,6 +227,9 @@ impl DesktopState {
             keyboard_layout_manager,
             // wgpu_renderer: None, // Removed specific field
             wgpu_renderer_concrete: None, // Initialize concrete WGPU renderer as None
+            active_input_surface: None,
+            keyboard_data_map,
+            touch_focus_per_slot: HashMap::new(),
         }
     }
 }
@@ -216,10 +240,10 @@ impl CompositorHandler for DesktopState {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        client
+        &client
             .get_data::<ClientCompositorData>()
             .expect("ClientCompositorData not initialized for this client.")
-            .compositor_state()
+            .compositor_state // Directly access the public field
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
@@ -467,52 +491,34 @@ impl CompositorHandler for DesktopState {
                         if let Some(wgpu_renderer_concrete_mutexed) = self.wgpu_renderer_concrete.as_ref() {
                             let mut wgpu_renderer = wgpu_renderer_concrete_mutexed.lock().unwrap();
                             if self.dmabuf_state.get_dmabuf_attributes(buffer_to_texture).is_some() {
-                                // TODO: Implement DMABUF for WGPU
-                                tracing::warn!(surface_id = ?surface.id(), client_info = %client_id_str, "DMABUF import for WGPU not yet implemented.");
+                                tracing::warn!(surface_id = ?surface.id(), client_info = %client_id_str, "DMABUF import for WGPU not yet implemented in commit path. Clearing texture.");
                                 surface_data.texture_handle = None;
+                                // If DMABUF import fails for this new buffer, it's unusable with current renderer caps.
+                                // The surface_data.current_buffer_info was already updated to this new buffer's info.
+                                // Setting it to None here means this new buffer attachment is effectively void.
                                 surface_data.current_buffer_info = None;
                             } else { // SHM Buffer
-                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import (WGPU)");
+                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import for WGPU renderer.");
                                 match wgpu_renderer.create_texture_from_shm(buffer_to_texture) {
                                     Ok(wgpu_texture_arc) => {
                                         surface_data.texture_handle = Some(wgpu_texture_arc);
-                                        let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
-                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
-                                            buffer: buffer_to_texture.clone(),
-                                            scale: current_surface_attributes.buffer_scale,
-                                            transform: current_surface_attributes.buffer_transform,
-                                            dimensions,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create WGPU texture from SHM (DMABUF path fallback): {:?}", e);
-                                        surface_data.texture_handle = None;
-                                        surface_data.current_buffer_info = None;
-                                    }
-                                }
-                            } else { // SHM Buffer
-                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import (WGPU)");
-                                match wgpu_renderer.create_texture_from_shm(buffer_to_texture) {
-                                    Ok(wgpu_texture_arc) => {
-                                        surface_data.texture_handle = Some(wgpu_texture_arc);
-                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created WGPU texture from SHM.");
-                                        let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
-                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
-                                            buffer: buffer_to_texture.clone(),
-                                            scale: current_surface_attributes.buffer_scale,
-                                            transform: current_surface_attributes.buffer_transform,
-                                            dimensions,
-                                        });
+                                        // surface_data.current_buffer_info was already updated at the start of the
+                                        // `smithay::wayland::compositor::with_states` block if a new buffer was attached.
+                                        // We don't need to set it again here if texture creation is successful.
+                                        // It correctly reflects the new buffer's attributes.
+                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created WGPU texture from SHM. New buffer info: {:?}", surface_data.current_buffer_info);
                                     }
                                     Err(e) => {
                                         tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create WGPU texture from SHM: {:?}", e);
                                         surface_data.texture_handle = None;
+                                        // If texture creation failed for this *new* buffer, then this buffer cannot be displayed.
+                                        // The surface_data.current_buffer_info (already pointing to this new buffer) should be cleared.
                                         surface_data.current_buffer_info = None;
                                     }
                                 }
                             }
                         } else {
-                            tracing::warn!("WGPU renderer selected but not available in commit path.");
+                            tracing::warn!("WGPU renderer selected but wgpu_renderer_concrete is None. Cannot import texture for surface_id = {:?}.", surface.id());
                             surface_data.texture_handle = None;
                             surface_data.current_buffer_info = None;
                         }
@@ -565,28 +571,21 @@ impl CompositorHandler for DesktopState {
     }
 }
 
-#[derive(Debug)]
+// #[derive(Debug)] // Default derive should be fine if all fields are Debug
+#[derive(Debug, Default)] // Add Default for easier initialization
 pub struct ClientCompositorData {
-    _placeholder: (), 
-    pub client_specific_state: CompositorClientState,
+    pub compositor_state: CompositorClientState,
+    // Potentially other client-specific states from other protocols later,
+    // e.g. xdg_activation_client_data: XdgActivationClientData (hypothetical)
 }
 
 impl ClientCompositorData {
     pub fn new() -> Self {
         Self {
-            _placeholder: (),
-            client_specific_state: CompositorClientState::default(),
+            compositor_state: CompositorClientState::default(),
         }
     }
-    pub fn compositor_state(&self) -> &CompositorClientState {
-        &self.client_specific_state
-    }
-}
-
-impl Default for ClientCompositorData {
-    fn default() -> Self {
-        Self::new()
-    }
+    // compositor_state() getter removed as the field is public now
 }
 
 delegate_compositor!(DesktopState);
@@ -600,7 +599,38 @@ impl ShmHandler for DesktopState {
 
 impl BufferHandler for DesktopState {
     fn buffer_destroyed(&mut self, buffer: &WlBuffer) {
-        tracing::debug!(buffer_id = ?buffer.id(), "WlBuffer destroyed notification received in BufferHandler.");
+        tracing::debug!(buffer_id = ?buffer.id(), "WlBuffer destroyed (BufferHandler impl in DesktopState).");
+        let mut windows_to_damage = Vec::new();
+
+        // Iterate over a collection of Arcs, so clone window_arc_clone for use in this iteration.
+        // self.windows stores Arc<ManagedWindow>.
+        // self.space.elements() also returns Arcs. Using self.windows to be specific about what's being checked.
+        for window_arc_clone in self.windows.values().cloned() {
+            // window_arc_clone is Arc<ManagedWindow>
+            if let Some(surface) = window_arc_clone.wl_surface() { // ManagedWindow should provide wl_surface()
+                if let Some(surface_data_arc) = surface.data_map().get::<Arc<StdMutex<crate::compositor::surface_management::SurfaceData>>>() {
+                    let mut surface_data = surface_data_arc.lock().unwrap();
+                    if let Some(buffer_info) = &surface_data.current_buffer_info {
+                        if buffer_info.buffer.id() == buffer.id() {
+                            tracing::info!(
+                                "Buffer {:?} (used by surface {:?}, window with domain_id {:?}) was destroyed. Clearing texture and buffer info.",
+                                buffer.id(), surface.id(), window_arc_clone.domain_id() // Assuming domain_id() method on ManagedWindow
+                            );
+                            surface_data.texture_handle = None;
+                            surface_data.current_buffer_info = None;
+                            windows_to_damage.push(window_arc_clone.clone()); // Clone Arc for vector
+                        }
+                    }
+                }
+            }
+        }
+
+        for window_to_damage in windows_to_damage {
+            // Ensure window_to_damage is the correct type expected by space.damage_window.
+            // If space stores elements as Arc<ManagedWindow>, this is fine.
+            self.space.damage_window(&window_to_damage, None, None);
+            tracing::debug!("Damaged window (domain_id {:?}) due to buffer destruction.", window_to_damage.domain_id());
+        }
     }
 }
 
@@ -618,3 +648,55 @@ delegate_xdg_decoration!(DesktopState);
 delegate_screencopy!(DesktopState);
 // Delegate DamageTrackerHandler if DesktopState implements it
 delegate_damage_tracker!(DesktopState);
+
+impl SeatHandler for DesktopState {
+    type KeyboardFocus = WlSurface;
+    type PointerFocus = WlSurface;
+    type TouchFocus = WlSurface;
+
+    fn seat_state(&mut self) -> &mut SeatState<Self> {
+        &mut self.seat_state
+    }
+
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Self::KeyboardFocus>) {
+        let client_name = focused
+            .and_then(|s| s.client())
+            .map(|c| format!("{:?}", c.id()))
+            .unwrap_or_else(|| "<none>".to_string());
+
+        tracing::debug!(
+            seat = %seat.name(),
+            focused_surface_id = ?focused.map(|s| s.id()),
+            client = %client_name,
+            "Seat focus changed"
+        );
+
+        self.active_input_surface = focused.map(|s| s.downgrade());
+
+        if let Some(surface) = focused {
+            let surface_id_for_log = surface.id();
+            tracing::info!(
+                "Domain layer would be notified: Keyboard focus changed to surface_id: {:?}",
+                surface_id_for_log
+            );
+        } else {
+            tracing::info!("Domain layer would be notified: Keyboard focus lost (cleared)");
+        }
+        // IMPORTANT: Do NOT call keyboard_handle.set_focus() here.
+        // This method is the *result* of set_focus having been called.
+    }
+
+    fn cursor_image(&mut self, seat: &Seat<Self>, image: CursorImageStatus) {
+        tracing::trace!(
+            seat = %seat.name(),
+            new_status = ?image,
+            "Seat cursor image updated"
+        );
+        *self.current_cursor_status.lock().unwrap() = image.clone();
+        tracing::info!(
+            "Renderer to be signaled: Update cursor image to {:?} at location {:?}.",
+            image,
+            self.pointer_location
+        );
+    }
+}
