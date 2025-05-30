@@ -47,8 +47,11 @@ use std::time::Duration;
 // --- Winit Backend Imports END ---
 
 // --- Libinput Imports START ---
-use smithay::backend::input::{InputEvent, LibinputInputBackend, SeatEvent, Axis, KeyState};
-use smithay::input::Seat; // Already imported via compositor::core::state but good to have explicitly if used here
+// Remove: use smithay::backend::input::{InputEvent, LibinputInputBackend, SeatEvent, Axis, KeyState};
+// Keep: use smithay::input::Seat; // May still be used by other parts or can be removed if truly unused.
+// For now, let's assume Seat might be used somewhere else or by DesktopState implicitly.
+// If not, it can be cleaned up later.
+use crate::input::libinput_handler::NovadeLibinputManager;
 // UdevBackend and DirectSession are not used for the simplified approach
 // use smithay::backend::session::direct::DirectSession;
 // use smithay::backend::udev::UdevBackend;
@@ -207,23 +210,18 @@ fn main() {
         .expect("Failed to ensure Wayland globals");
     tracing::info!("Wayland globals initialized.");
 
-    // Initialize input capabilities on the seat
-    if let Err(e) = desktop_state.seat.add_keyboard(Default::default(), 200, 25) {
-        tracing::warn!("Failed to add keyboard capability to seat: {}", e);
-    } else {
-        tracing::info!("Added keyboard capability to seat '{}'.", desktop_state.seat.name());
-    }
-    if let Err(e) = desktop_state.seat.add_pointer() {
-        tracing::warn!("Failed to add pointer capability to seat: {}", e);
-    } else {
-        tracing::info!("Added pointer capability to seat '{}'.", desktop_state.seat.name());
-    }
-    if let Err(e) = desktop_state.seat.add_touch() { // Add touch capability
-        tracing::warn!("Failed to add touch capability to seat: {}", e);
-    } else {
-        tracing::info!("Added touch capability to seat '{}'.", desktop_state.seat.name());
-    }
+    // --- Libinput Backend Initialization START ---
+    let mut novade_libinput_manager = NovadeLibinputManager::new(&desktop_state.seat_name)
+        .expect("Failed to initialize NovadeLibinputManager");
+    let libinput_event_source = novade_libinput_manager.into_event_source();
 
+    event_loop.handle().insert_source(libinput_event_source, move |event, _, d_state: &mut DesktopState| {
+        // Dispatch the event using the InputDispatcher from DesktopState
+        d_state.input_dispatcher.dispatch_event(d_state, event);
+        // No PostAction needed unless specific conditions arise
+    }).expect("Failed to insert libinput event source into event loop.");
+    tracing::info!("Libinput event source inserted into event loop.");
+    // --- Libinput Backend Initialization END ---
 
     // --- Backend Selection and Initialization START ---
     let selected_backend_type = BackendType::Winit; // Hardcode Winit for now
@@ -255,80 +253,6 @@ fn main() {
             }
         },
     ).expect("Failed to insert Wayland display source into event loop.");
-
-    // Insert the libinput backend
-    let mut libinput_backend = LibinputInputBackend::new(None::<fn(_)>);
-    if libinput_backend.link_seat(&desktop_state.seat_name).is_ok() {
-        event_loop.handle().insert_source(libinput_backend, move |event, _, state: &mut DesktopState| {
-            // This is the existing libinput processing logic.
-            // It should be adapted if process_input_event is implemented on DesktopState.
-            match event {
-                InputEvent::Keyboard { event, .. } => {
-                    if let Some(keyboard) = state.seat.get_keyboard() {
-                        let serial = smithay::utils::Serial::next();
-                        keyboard.input(state, event.key_code(), event.state(), serial, event.time_msec(), |_, _, _| true);
-                    }
-                }
-                InputEvent::PointerMotion { event, .. } => {
-                    if let Some(pointer) = state.seat.get_pointer() {
-                        let pos = pointer.current_position() + event.delta();
-                        state.pointer_location = pos; 
-                        pointer.motion(state, state.pointer_location, event.time_msec());
-                    }
-                }
-                InputEvent::PointerButton { event, .. } => {
-                    if let Some(pointer) = state.seat.get_pointer() {
-                        pointer.button(state, event.button_code(), event.state(), event.time_msec());
-                    }
-                }
-                InputEvent::PointerAxis { event, .. } => {
-                    if let Some(pointer) = state.seat.get_pointer() {
-                        let h = event.amount_discrete(Axis::Horizontal).unwrap_or(0.0);
-                        let v = event.amount_discrete(Axis::Vertical).unwrap_or(0.0);
-                        let h_c = event.amount(Axis::Horizontal).unwrap_or(0.0);
-                        let v_c = event.amount(Axis::Vertical).unwrap_or(0.0);
-                        let source = match event.source() {
-                            smithay::backend::input::AxisSource::Wheel => smithay::input::pointer::AxisSource::Wheel,
-                            smithay::backend::input::AxisSource::Finger => smithay::input::pointer::AxisSource::Finger,
-                            smithay::backend::input::AxisSource::Continuous => smithay::input::pointer::AxisSource::Continuous,
-                            smithay::backend::input::AxisSource::WheelTilt => smithay::input::pointer::AxisSource::WheelTilt,
-                        };
-                        if h != 0.0 || v != 0.0 || h_c != 0.0 || v_c != 0.0 {
-                            pointer.axis(state, smithay::input::pointer::AxisFrame::new(event.time_msec())
-                                .discrete(Axis::Horizontal, h as i32)
-                                .discrete(Axis::Vertical, v as i32)
-                                .value_continuous(Axis::Horizontal, h_c)
-                                .value_continuous(Axis::Vertical, v_c)
-                                .source(source).build());
-                        }
-                    }
-                }
-                InputEvent::TouchDown { event, .. } => {
-                    if let Some(touch) = state.seat.get_touch() {
-                        let serial = smithay::utils::Serial::next();
-                        touch.down(state, serial, event.time_msec(), event.slot(), event.position(state.pointer_location.to_i32_round()));
-                    }
-                }
-                InputEvent::TouchUp { event, .. } => {
-                    if let Some(touch) = state.seat.get_touch() {
-                        let serial = smithay::utils::Serial::next();
-                        touch.up(state, serial, event.time_msec(), event.slot());
-                    }
-                }
-                InputEvent::TouchMotion { event, .. } => {
-                     if let Some(touch) = state.seat.get_touch() {
-                        let serial = smithay::utils::Serial::next();
-                        touch.motion(state, serial, event.time_msec(), event.slot(), event.position(state.pointer_location.to_i32_round()));
-                    }
-                }
-                InputEvent::TouchFrame { .. } => { if let Some(touch) = state.seat.get_touch() { touch.frame(state); } }
-                InputEvent::TouchCancel { .. } => { if let Some(touch) = state.seat.get_touch() { touch.cancel(state); } }
-                _ => { tracing::trace!("Unhandled libinput event: {:?}", event); }
-            }
-        }).expect("Failed to insert libinput event source");
-    } else {
-        tracing::warn!("Failed to link libinput backend to seat, input will not work.");
-    }
 
     // Call the backend's run method to set up its event sources within the main event loop
     if let Err(e) = active_backend.run(&mut desktop_state) {
