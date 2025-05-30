@@ -34,8 +34,10 @@ pub struct SimpleTaskbarPriv {
 
     #[template_child]
     pub task_items_box: TemplateChild<gtk::Box>,
-    // Note: The AdwButtonContent is not given an ID, so it's not a TemplateChild here.
-    // If we needed to interact with it, we'd give it an ID in the .ui file.
+    #[template_child]
+    pub status_indicator_area: TemplateChild<gtk::DrawingArea>,
+    #[template_child]
+    pub animate_clock_button: TemplateChild<gtk::Button>,
 }
 
 // GObject subclassing boilerplate.
@@ -53,6 +55,57 @@ impl ObjectSubclass for SimpleTaskbarPriv {
 
     fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {
         obj.init_template();
+        // Setup draw function for the DrawingArea
+        let widget = obj.get(); // Get the wrapper SimpleTaskbar instance
+        
+        // Setup draw function for the DrawingArea (as before)
+        widget.imp().status_indicator_area.set_draw_func(|_drawing_area, cr, width, height| {
+            let radius = (width.min(height) as f64 / 2.0) - 2.0; 
+            if radius <= 0.0 { return; }
+            cr.arc(width as f64 / 2.0, height as f64 / 2.0, radius, 0.0, 2.0 * std::f64::consts::PI);
+            cr.set_source_rgb(0.3, 0.8, 0.3); 
+            if let Err(e) = cr.fill() { eprintln!("Cairo fill failed: {:?}", e); }
+        });
+
+        // Setup animation button
+        let clock_label_clone = widget.imp().clock_label.get(); // Get the GtkLabel instance
+        widget.imp().animate_clock_button.connect_clicked(move |_| {
+            let clock_label = clock_label_clone.clone(); // Clone for use in each animation stage
+            
+            // Animation: 1.0 (opaque) to 0.0 (transparent)
+            let anim_fade_out = gtk::PropertyAnimation::new_for_target(
+                &clock_label,
+                "opacity",
+                1.0, // from_value (explicitly start from current or known start)
+                0.0  // to_value
+            );
+            anim_fade_out.set_duration(500); // 500 ms
+            anim_fade_out.set_easing(gtk::Easing::Linear);
+
+            // Animation: 0.0 (transparent) to 1.0 (opaque)
+            let anim_fade_in = gtk::PropertyAnimation::new_for_target(
+                &clock_label,
+                "opacity",
+                0.0, // from_value
+                1.0  // to_value
+            );
+            anim_fade_in.set_duration(500);
+            anim_fade_in.set_easing(gtk::Easing::Linear);
+
+            // Chain animations: play fade_in after fade_out is done
+            let clock_label_for_fade_in = clock_label.clone();
+            anim_fade_out.connect_done(move |_animation| {
+                // Ensure opacity is actually 0 before starting fade in,
+                // as animation might be interrupted or end slightly off.
+                clock_label_for_fade_in.set_opacity(0.0); 
+                anim_fade_in.play();
+            });
+            
+            // Start the first animation
+            // Ensure opacity is 1.0 before starting, in case it was interrupted mid-animation before
+            clock_label.set_opacity(1.0); 
+            anim_fade_out.play();
+        });
     }
 }
 

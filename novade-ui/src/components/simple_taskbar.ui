@@ -52,5 +52,27 @@
       </object>
     </child>
 
+    <child>
+      <object class="GtkDrawingArea" id="status_indicator_area">
+        <property name="width-request">20</property>
+        <property name="height-request">20</property>
+        <property name="tooltip-text">Status Indicator</property>
+        <layout>
+          <constraint source_attribute="end" target="animate_clock_button" target_attribute="start" relation="eq" constant="-8"/>
+          <constraint source_attribute="centery" target="super" target_attribute="centery" relation="eq"/>
+        </layout>
+      </object>
+    </child>
+
+    <child>
+      <object class="GtkButton" id="animate_clock_button">
+        <property name="label">Blink Clock</property>
+        <property name="valign">center</property>
+        <layout>
+          <constraint source_attribute="end" target="clock_label" target_attribute="start" relation="eq" constant="-8"/>
+          <constraint source_attribute="centery" target="super" target_attribute="centery" relation="eq"/>
+        </layout>
+      </object>
+    </child>
   </template>
 </interface>

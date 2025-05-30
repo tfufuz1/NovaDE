@@ -24,6 +24,13 @@ use ui_state::UIState;
 mod components;
 use components::simple_taskbar::SimpleTaskbar;
 
+// Declare dbus_utils module
+mod dbus_utils;
+
+// Declare settings_ui module
+mod settings_ui;
+use settings_ui::NovaSettingsWindow;
+
 const APP_ID: &str = "org.novade.UIShellTest";
 static CSS_LOAD_SUCCESSFUL: AtomicBool = AtomicBool::new(false);
 
@@ -292,7 +299,66 @@ fn build_adw_ui(
     });
     main_content_box.append(&long_task_button);
 
-    // Separator after event simulation buttons
+    // Separator for D-Bus Notification Test
+    main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
+    let dbus_title_label = Label::new(Some("D-Bus Desktop Notification Test:"));
+    dbus_title_label.set_halign(Align::Center);
+    dbus_title_label.set_margin_top(10);
+    main_content_box.append(&dbus_title_label);
+
+    let send_notification_button = Button::with_label("Send Test Notification");
+    send_notification_button.set_halign(Align::Center);
+    // It's good practice to clone any data needed by the async block if it's from outside
+    // For this simple call, we are using static strings or direct values.
+    send_notification_button.connect_clicked(move |_| {
+        glib::spawn_future_local(async move {
+            tracing::info!("'Send Test Notification' button clicked.");
+            match dbus_utils::send_desktop_notification(
+                "NovaDE-UI",
+                "Test Notification",
+                "This is a test notification sent from the NovaDE UI application via zbus.",
+                "dialog-information-symbolic", // A standard icon name
+                5000 // 5 seconds timeout
+            ).await {
+                Ok(id) => {
+                    tracing::info!("Desktop notification successfully sent with ID: {}", id);
+                    // Optionally, show a toast or update a label in the UI on success
+                }
+                Err(e) => {
+                    tracing::error!("Failed to send desktop notification: {}", e);
+                    // Optionally, show an error toast or update a label
+                }
+            }
+        });
+    });
+    main_content_box.append(&send_notification_button);
+
+    // Separator for XDG Portal File Chooser Test
+    main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
+    let portal_title_label = Label::new(Some("XDG Portal File Chooser Test:"));
+    portal_title_label.set_halign(Align::Center);
+    portal_title_label.set_margin_top(10);
+    main_content_box.append(&portal_title_label);
+
+    let open_file_portal_button = Button::with_label("Open File (Portal)");
+    open_file_portal_button.set_halign(Align::Center);
+    
+    // The button handler needs a reference to the main window to pass as parent.
+    // We get the window when `build_adw_ui` is called, but the ApplicationWindow
+    // is typically built towards the end of this function.
+    // We can connect the signal *after* the window is built, or pass the window via Rc<RefCell<Option<Window>>>
+    // or use glib::clone! with @strong_allow_none if we are sure window will exist.
+    // For simplicity, let's connect it here, but the `window` variable is not yet defined.
+    // This means we need to defer the connection or ensure `window` is available.
+    // A common pattern: define button, add to layout, then later connect signals that need `window`.
+    // Or, pass the application `app` and get the active window from it if available.
+    // Let's assume we will connect it after `window` is built.
+    // For now, this is a placeholder for where the button is added.
+    // The actual connect_clicked will be done after `window` is available.
+    main_content_box.append(&open_file_portal_button);
+
+
+    // Separator after XDG Portal test
     main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
     
     // Existing status label (from previous task, for BasicWidget interaction)
@@ -412,11 +478,113 @@ fn build_adw_ui(
     // --- Window Setup ---
     let window = ApplicationWindow::builder()
         .application(app)
-        // Title is now managed by HeaderBar in ToolbarView or AdwWindowTitle
         .default_width(850)
-        .default_height(750) // Adjusted height for taskbar
-        .content(&toolbar_view) // ToolbarView is the root content of the window
+        .default_height(850) // Even Taller for Settings button
+        .content(&toolbar_view) 
         .build();
+
+    // Add AboutDialog and MessageDialog test buttons (as before)
+    main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
+    let dialogs_title_label = Label::new(Some("Standard Dialogs Test (Adwaita):"));
+    dialogs_title_label.set_halign(Align::Center);
+    dialogs_title_label.set_margin_top(10);
+    main_content_box.append(&dialogs_title_label);
+    let dialog_buttons_box = GtkBox::new(Orientation::Horizontal, 6);
+    dialog_buttons_box.set_halign(Align::Center);
+    // ... (About and Message dialog buttons setup remains here)
+
+    // About Dialog Button (code from previous step, ensure it's within this structure)
+    let about_button = Button::with_label("About NovaDE");
+    let window_clone_for_about = window.clone();
+    about_button.connect_clicked(move |_| {
+        let parent_window = &window_clone_for_about;
+        let about_dialog = adw::AboutWindow::builder()
+            .transient_for(parent_window)
+            .modal(true)
+            .application_name("NovaDE")
+            .version("0.1.0-dev")
+            .developer_name("NovaDE Development Team")
+            .license_type(gtk::License::MitX11)
+            .website("https://github.com/systeminmation/NovaDE") // Replace with actual if exists
+            .application_icon("application-x-executable-symbolic") // Placeholder icon
+            .comments("A DEveloper-first Desktop Environment.")
+            .developers(vec!["Jules (AI Agent)", "And You!"])
+            .designers(vec!["Inspired by many"])
+            .artists(vec!["Various icon artists"])
+            .issue_url("https://github.com/systeminmation/NovaDE/issues") // Replace
+            .build();
+        
+        about_dialog.present();
+    });
+    dialog_buttons_box.append(&about_button);
+
+    // Message Dialog Button
+    let message_button = Button::with_label("Show Message Dialog");
+    let window_clone_for_message = window.clone();
+    message_button.connect_clicked(move |_| {
+        let parent_window = &window_clone_for_message;
+        let message_dialog = adw::MessageDialog::builder()
+            .transient_for(parent_window)
+            .modal(true)
+            .heading("A Friendly Message")
+            .body("This is an example of an Adwaita Message Dialog shown from NovaDE.")
+            .build();
+        
+        message_dialog.add_response("ok", "Got it!");
+        message_dialog.set_default_response(Some("ok"));
+        message_dialog.set_close_response("ok"); // Closes dialog when "ok" is chosen or Esc is pressed
+
+        message_dialog.connect_response(None, |dialog, response| {
+            tracing::info!("MessageDialog response: {}", response);
+            dialog.destroy(); // Or close() if it's not a one-time dialog
+        });
+        
+        message_dialog.present();
+    });
+    dialog_buttons_box.append(&message_button);
+    main_content_box.append(&dialog_buttons_box);
+
+    // Settings Window Button
+    let settings_button = Button::with_label("Open Settings");
+    let window_clone_for_settings = window.clone();
+    settings_button.connect_clicked(move |_| {
+        let settings_window = NovaSettingsWindow::new(&window_clone_for_settings);
+        settings_window.present();
+    });
+    // Add this button to a new box or directly to main_content_box
+    let settings_button_box = GtkBox::new(Orientation::Horizontal, 0); // Centering box
+    settings_button_box.set_halign(Align::Center);
+    settings_button_box.set_margin_top(10);
+    settings_button_box.append(&settings_button);
+    main_content_box.append(settings_button_box);
+
+
+    // Now that `window` is available, connect the portal button's clicked signal
+    let window_clone_for_portal = window.clone(); // Clone for the closure
+    open_file_portal_button.connect_clicked(move |_| {
+        let main_window = window_clone_for_portal.clone();
+        glib::spawn_future_local(async move {
+            tracing::info!("'Open File (Portal)' button clicked.");
+            // Pass the main window as parent
+            match dbus_utils::open_file_chooser(Some(&main_window)).await {
+                Ok(Some(paths)) => {
+                    tracing::info!("File(s) selected via portal: {:?}", paths);
+                    if let Some(first_path) = paths.first() {
+                        // For demonstration, show a toast with the first selected path
+                        // Requires access to toast_overlay, or pass it around.
+                        // For simplicity, just log.
+                        tracing::info!("First selected path: {}", first_path.display());
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("File selection cancelled by user (portal).");
+                }
+                Err(e) => {
+                    tracing::error!("Error using file chooser portal: {}", e);
+                }
+            }
+        });
+    });
 
     window.add_breakpoint(breakpoint); // Breakpoint still applies to the window
 
