@@ -10,6 +10,7 @@ pub mod theming;
 pub mod user_centric_services;
 pub mod window_management_policy;
 pub mod workspaces;
+pub mod notification_service;
 // pub mod entities; // Example, if you have a top-level entities module
 // pub mod error; // Example, for a general DomainError if used
 
