@@ -210,6 +210,12 @@ impl fmt::Display for Direction {
 mod tests {
     use super::*;
     use serde_json; // For testing serde
+    use static_assertions::assert_impl_all;
+
+    // --- Type Assertions ---
+    assert_impl_all!(Orientation: std::fmt::Debug, Clone, Copy, PartialEq, Eq, std::hash::Hash, Default, Serialize, Deserialize<'static>, Send, Sync, std::fmt::Display);
+    assert_impl_all!(Direction: std::fmt::Debug, Clone, Copy, PartialEq, Eq, std::hash::Hash, Send, Sync, std::fmt::Display);
+    // Note: Direction does not derive Serialize, Deserialize, or Default currently.
 
     #[test]
     fn test_orientation_is_horizontal() {

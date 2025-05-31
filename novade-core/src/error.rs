@@ -35,11 +35,11 @@ pub enum ColorParseError {
     #[error("Invalid hex string length: expected 3, 4, 6, or 8 characters after '#', found {0}")]
     InvalidLength(usize),
     /// The hex string contains invalid characters.
-    #[error("Invalid hex character: '{0}'")]
-    InvalidHexCharacter(char),
+    #[error("Invalid hex digit: '{0}'")]
+    InvalidHexDigit(char),
     /// The hex string is missing the leading '#' prefix.
-    #[error("Hex string must start with '#'")]
-    MissingPrefix,
+    #[error("Invalid hex string format: {0}")]
+    InvalidHexFormat(String),
     /// An error occurred during hex decoding.
     #[error("Failed to decode hex component: {0}")]
     HexDecodingError(String),
@@ -92,6 +92,22 @@ pub enum CoreError {
     /// Contains a descriptive message.
     #[error("An unexpected internal error occurred: {0}")]
     Internal(String),
+
+    /// Errors related to serialization processes.
+    #[error("Serialization Error: {description}")]
+    Serialization {
+        description: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    },
+
+    /// Errors related to deserialization processes.
+    #[error("Deserialization Error: {description}")]
+    Deserialization {
+        description: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    },
 }
 
 /// Specific errors related to configuration handling.
@@ -128,6 +144,14 @@ pub enum ConfigError {
     /// Contains a string identifying the type of directory that was unavailable.
     #[error("Could not determine base directory for {dir_type}")]
     DirectoryUnavailable { dir_type: String },
+
+    /// Error indicating that the configuration has already been initialized.
+    #[error("Configuration has already been initialized.")]
+    AlreadyInitializedError,
+
+    /// Error indicating that the configuration has not yet been initialized.
+    #[error("Configuration has not yet been initialized.")]
+    NotInitializedError,
 }
 
 /// Specific errors related to logging.
@@ -167,12 +191,12 @@ mod tests {
             "Invalid hex string length: expected 3, 4, 6, or 8 characters after '#', found 5"
         );
         assert_eq!(
-            format!("{}", ColorParseError::InvalidHexCharacter('X')),
-            "Invalid hex character: 'X'"
+            format!("{}", ColorParseError::InvalidHexDigit('X')),
+            "Invalid hex digit: 'X'"
         );
         assert_eq!(
-            format!("{}", ColorParseError::MissingPrefix),
-            "Hex string must start with '#'"
+            format!("{}", ColorParseError::InvalidHexFormat("Invalid format".to_string())),
+            "Invalid hex string format: Invalid format"
         );
         assert_eq!(
             format!("{}", ColorParseError::HexDecodingError("bad hex".to_string())),
@@ -181,6 +205,46 @@ mod tests {
     }
 
     // --- CoreError Tests ---
+
+    #[test]
+    fn test_core_error_serialization_variant() {
+        let err_description = "Failed to serialize data".to_string();
+        let core_err_no_source = CoreError::Serialization {
+            description: err_description.clone(),
+            source: None,
+        };
+        assert_eq!(format!("{}", core_err_no_source), format!("Serialization Error: {}", err_description));
+        assert!(core_err_no_source.source().is_none());
+
+        let source_err = IoError::new(ErrorKind::Other, "dummy source error");
+        let core_err_with_source = CoreError::Serialization {
+            description: err_description.clone(),
+            source: Some(Box::new(source_err)),
+        };
+        assert_eq!(format!("{}", core_err_with_source), format!("Serialization Error: {}", err_description));
+        assert!(core_err_with_source.source().is_some());
+        assert!(core_err_with_source.source().unwrap().is::<IoError>());
+    }
+
+    #[test]
+    fn test_core_error_deserialization_variant() {
+        let err_description = "Failed to deserialize data".to_string();
+        let core_err_no_source = CoreError::Deserialization {
+            description: err_description.clone(),
+            source: None,
+        };
+        assert_eq!(format!("{}", core_err_no_source), format!("Deserialization Error: {}", err_description));
+        assert!(core_err_no_source.source().is_none());
+
+        let source_err = IoError::new(ErrorKind::InvalidData, "dummy source error");
+        let core_err_with_source = CoreError::Deserialization {
+            description: err_description.clone(),
+            source: Some(Box::new(source_err)),
+        };
+        assert_eq!(format!("{}", core_err_with_source), format!("Deserialization Error: {}", err_description));
+        assert!(core_err_with_source.source().is_some());
+        assert!(core_err_with_source.source().unwrap().is::<IoError>());
+    }
 
     #[test]
     fn test_core_error_config_from_config_error() {
@@ -357,6 +421,20 @@ mod tests {
     }
 
     // --- ConfigError Tests ---
+
+    #[test]
+    fn test_config_error_already_initialized_variant() {
+        let config_err = ConfigError::AlreadyInitializedError;
+        assert_eq!(format!("{}", config_err), "Configuration has already been initialized.");
+        assert!(config_err.source().is_none());
+    }
+
+    #[test]
+    fn test_config_error_not_initialized_variant() {
+        let config_err = ConfigError::NotInitializedError;
+        assert_eq!(format!("{}", config_err), "Configuration has not yet been initialized.");
+        assert!(config_err.source().is_none());
+    }
 
     #[test]
     fn test_config_error_read_error_variant() {
