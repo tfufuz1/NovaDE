@@ -1,0 +1,16 @@
+[package]
+name = "nova_shell"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+gtk4 = { version = "0.7.3", features = ["gnome_44"] }
+glib = "0.17.10"
+tracing = "0.1"
+tracing-subscriber = "0.3" # Added as it's used in main.rs
+
+[[bin]]
+name = "nova-shell-ui"
+path = "src/main.rs"
