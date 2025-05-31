@@ -44,7 +44,8 @@
 
 use std::path::PathBuf;
 use std::fs;
-use crate::config::types::CoreConfig;
+// Use CoreConfig from the parent module (config/mod.rs)
+use crate::config::{CoreConfig, LoggingConfig, FeatureFlags, defaults};
 use crate::error::{CoreError, ConfigError};
 use crate::utils::paths::{get_app_config_dir, get_app_state_dir};
 use crate::utils::fs as nova_fs; // Renamed to avoid conflict with std::fs
@@ -104,9 +105,10 @@ impl ConfigLoader {
                         // falls back to defaults if a file is not found.
                         // The spec for ConfigLoader::load() in A1-Kernschicht.md says:
                         // "Wenn die Konfigurationsdatei nicht existiert, wird eine Standardkonfiguration verwendet."
-                        // This means we should return a default config here, then validate it.
+                        // This means we should create a default config here, then validate it.
                         let mut default_config = CoreConfig::default();
-                        Self::validate_config(&mut default_config)?; // Validate default config (e.g. to create log paths)
+                        // Ensure default config is validated (e.g., to create log paths if specified in defaults)
+                        Self::validate_config(&mut default_config)?;
                         return Ok(default_config);
                     }
                     _ => Err(CoreError::Config(ConfigError::ReadError {
@@ -201,7 +203,7 @@ impl ConfigLoader {
             }
         }
         
-        // FeatureFlags are not part of CoreConfig yet.
+        // FeatureFlags are part of CoreConfig. No specific validation needed here for them beyond parsing.
 
         Ok(())
     }
@@ -210,16 +212,77 @@ impl ConfigLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::types::LoggingConfig;
-    use tempfile::TempDir;
-    use std::fs::File;
+    // Use LoggingConfig from crate::config for tests as well
+    use crate::config::LoggingConfig;
+    use crate::utils::{self, paths::{get_app_config_dir, get_app_state_dir}}; // For test setup
+    use std::env;
+    use std::fs::{self, File}; // Added fs for create_temp_config_file and other operations
     use std::io::Write;
+    use std::path::{Path, PathBuf}; // Added Path
+    use tempfile::TempDir;
 
-    fn setup_test_config_file(temp_dir: &TempDir, filename: &str, content: &str) -> PathBuf {
-        let config_path = temp_dir.path().join(filename);
-        let mut file = File::create(&config_path).expect("Failed to create test config file");
-        file.write_all(content.as_bytes()).expect("Failed to write to test config file");
-        config_path
+
+    // Helper to create a temporary config file
+    fn create_temp_config_file(dir: &Path, filename: &str, content: &str) -> PathBuf {
+        let path = dir.join(filename);
+        fs::write(&path, content).expect("Failed to write temp config file");
+        path
+    }
+
+    // Helper to set up a temporary environment for config loading tests
+    // This involves overriding where get_app_config_dir() and get_app_state_dir() look.
+    // We can do this by setting XDG environment variables that `directories-next` respects.
+    struct TestEnv {
+        _temp_config_dir: TempDir, // Owns the temp dir, cleans up on drop
+        _temp_state_dir: TempDir,
+        original_xdg_config_home: Option<String>,
+        original_xdg_state_home: Option<String>,
+    }
+
+    impl TestEnv {
+        fn new() -> Self {
+            let temp_config_dir = TempDir::new().unwrap();
+            let temp_state_dir = TempDir::new().unwrap();
+
+            let original_xdg_config_home = env::var("XDG_CONFIG_HOME").ok();
+            let original_xdg_state_home = env::var("XDG_STATE_HOME").ok();
+
+            env::set_var("XDG_CONFIG_HOME", temp_config_dir.path());
+            env::set_var("XDG_STATE_HOME", temp_state_dir.path());
+
+            // For ProjectDirs, it might also use XDG_DATA_HOME for subpaths if qualifier/org/app is used.
+            // For simplicity, we assume get_app_config_dir will now effectively use temp_config_dir.path() / "NovaDE" (or app name)
+            // and get_app_state_dir will use temp_state_dir.path() / "NovaDE" (or app name)
+            // After setting XDG vars, resolve paths using the functions and ensure they exist.
+            // This ensures that the directories ConfigLoader will attempt to use are actually created.
+            let app_cfg_dir = get_app_config_dir().expect("TestEnv: Failed to resolve app config dir based on temp XDG_CONFIG_HOME");
+            utils::fs::ensure_dir_exists(&app_cfg_dir).expect("TestEnv: Failed to create temp app config dir");
+
+            let app_state_dir = get_app_state_dir().expect("TestEnv: Failed to resolve app state dir based on temp XDG_STATE_HOME");
+            utils::fs::ensure_dir_exists(&app_state_dir).expect("TestEnv: Failed to create temp app state dir");
+
+            Self {
+                _temp_config_dir: temp_config_dir, // Keep ownership of the temp dirs
+                _temp_state_dir: temp_state_dir,
+                original_xdg_config_home,
+                original_xdg_state_home,
+            }
+        }
+    }
+
+    impl Drop for TestEnv {
+        fn drop(&mut self) {
+            if let Some(val) = &self.original_xdg_config_home {
+                env::set_var("XDG_CONFIG_HOME", val);
+            } else {
+                env::remove_var("XDG_CONFIG_HOME");
+            }
+            if let Some(val) = &self.original_xdg_state_home {
+                env::set_var("XDG_STATE_HOME", val);
+            } else {
+                env::remove_var("XDG_STATE_HOME");
+            }
+        }
     }
     
     // Mock get_app_config_dir and get_app_state_dir for consistent testing environments
@@ -231,183 +294,209 @@ mod tests {
     // either:
     // 1. Mock `get_app_config_dir` and `get_app_state_dir`. (Requires a mocking framework or feature flags)
     // 2. Parameterize `ConfigLoader::load` with the config path (breaks current spec of `load()`).
-    // 3. Use environment variables during tests to control `directories-next` (can be flaky).
+    // 3. Use environment variables during tests to control `directories-next` (as TestEnv does).
     //
     // For now, these tests will *try* to run, but might fail or have side effects in some CI/local envs
     // if `get_app_config_dir` points to a real but unwriteable location or similar.
     // A robust solution would involve abstracting path resolution for testing.
+    // The TestEnv helper is a good step in this direction.
 
     #[test]
-    fn test_load_valid_config() {
-        // This test is tricky due to hardcoded paths in load().
-        // We'd ideally mock get_app_config_dir.
-        // For now, we can't easily test the positive load path without such mocking
-        // or writing to the actual user config dir, which is bad.
-        // So, we'll focus on testing validate_config and parsing logic with controlled inputs.
+    fn test_config_loader_load_success() {
+        let _test_env = TestEnv::new();
+        let app_config_dir = get_app_config_dir().unwrap();
         
-        // Test parsing and validation part assuming content is read.
-        let content = r#"
+        let toml_content = r#"
 [logging]
-level = "DEBUG"
-format = "JSON"
-file_path = "app.log" 
-        "#;
-        let mut config: CoreConfig = toml::from_str(content).unwrap();
-        
-        // Mock state dir for validation if file_path is relative
-        // This part is hard because validate_config calls get_app_state_dir()
-        // Let's assume for this specific test that file_path validation is tested separately
-        // or that get_app_state_dir() returns something sensible in test env.
-        // To avoid FS operations in this specific unit test for validation logic:
-        let temp_state_dir = TempDir::new().unwrap();
-        let original_get_app_state_dir = std::env::var_os("XDG_STATE_HOME");
-        std::env::set_var("XDG_STATE_HOME", temp_state_dir.path());
+level = "debug"
+format = "json"
+file_path = "logs/app.log"
 
-        let validation_result = ConfigLoader::validate_config(&mut config);
-        
-        if let Some(original_var) = original_get_app_state_dir {
-            std::env::set_var("XDG_STATE_HOME", original_var);
-        } else {
-            std::env::remove_var("XDG_STATE_HOME");
-        }
-        
-        assert!(validation_result.is_ok());
+[feature_flags]
+experimental_feature_x = true
+        "#;
+        create_temp_config_file(&app_config_dir, "config.toml", toml_content);
+
+        let config = ConfigLoader::load().expect("ConfigLoader::load failed");
+
         assert_eq!(config.logging.level, "debug");
         assert_eq!(config.logging.format, "json");
         assert!(config.logging.file_path.is_some());
-        if let Some(p) = config.logging.file_path {
-            assert!(p.is_absolute());
-            assert!(p.ends_with("app.log"));
-            if let Some(parent) = p.parent() {
-                assert!(parent.exists()); // validate_config should create it
+        let log_path = config.logging.file_path.unwrap();
+        assert!(log_path.is_absolute());
+        let log_path_str = log_path.to_string_lossy();
+        // Check that the path is under the state directory (which TestEnv sets up) and has the correct subpath.
+        // The exact path will vary, so check for key components.
+        assert!(log_path_str.contains("logs") && log_path_str.ends_with("app.log"));
+        assert!(log_path.parent().unwrap().exists());
+
+        assert_eq!(config.feature_flags.experimental_feature_x, true);
+    }
+
+    #[test]
+    fn test_config_loader_load_default_when_not_found() {
+        let _test_env = TestEnv::new(); // Sets up temp XDG dirs
+        // Ensure config.toml does not exist
+        let app_config_dir = get_app_config_dir().unwrap();
+        let config_file_path = app_config_dir.join("config.toml");
+        if config_file_path.exists() {
+            fs::remove_file(&config_file_path).unwrap();
+        }
+
+        // Also ensure no default log file path exists from a previous test run, if defaults specify one.
+        let default_log_path_opt = defaults::default_logging_config().file_path;
+        if let Some(default_log_path_segment) = default_log_path_opt {
+             let app_state_dir = get_app_state_dir().unwrap();
+             let full_default_log_path = app_state_dir.join(default_log_path_segment);
+             if full_default_log_path.exists() {
+                 fs::remove_file(&full_default_log_path).unwrap();
+             }
+             if let Some(parent) = full_default_log_path.parent() {
+                 if parent.exists() {
+                    // We only want to remove the specific log file, not necessarily the whole logs dir
+                    // if other tests might use it. But for a clean test of default creation,
+                    // ensuring the parent does not pre-exist for the *default* path could be an option.
+                    // However, validate_config is meant to *create* it.
+                 }
+             }
+        }
+
+
+        let result = ConfigLoader::load();
+        assert!(result.is_ok(), "ConfigLoader::load failed when config file not found: {:?}", result.err());
+        let config = result.unwrap();
+
+        // Check it's the default config
+        assert_eq!(config, CoreConfig::default());
+
+        // If the default config specifies a log file, ensure its parent directory was created by validate_config
+        if let Some(ref log_path) = config.logging.file_path {
+            assert!(log_path.is_absolute(), "Default log path should be absolute after validation");
+            if let Some(parent_dir) = log_path.parent() {
+                assert!(parent_dir.exists(), "Parent directory for default log path was not created");
             }
         }
     }
 
+
     #[test]
-    fn test_load_default_if_not_found() {
-        // This test also relies on get_app_config_dir behavior.
-        // If we assume get_app_config_dir returns a path to a temp dir where config.toml doesn't exist:
-        // A proper test would involve setting up a temporary config dir, ensuring config.toml is NOT there,
-        // then calling load(). This is hard due to the static nature of get_app_config_dir.
-        // For now, we check if default config is valid.
-        let mut default_config = CoreConfig::default();
-        
-        let temp_state_dir = TempDir::new().unwrap();
-        let original_get_app_state_dir = std::env::var_os("XDG_STATE_HOME");
-        std::env::set_var("XDG_STATE_HOME", temp_state_dir.path());
+    fn test_config_loader_load_parse_error() {
+        let _test_env = TestEnv::new();
+        let app_config_dir = get_app_config_dir().unwrap();
+        let invalid_toml_content = "this is not valid toml content";
+        create_temp_config_file(&app_config_dir, "config.toml", invalid_toml_content);
 
-        let validation_result = ConfigLoader::validate_config(&mut default_config);
-
-        if let Some(original_var) = original_get_app_state_dir {
-            std::env::set_var("XDG_STATE_HOME", original_var);
-        } else {
-            std::env::remove_var("XDG_STATE_HOME");
-        }
-
-        assert!(validation_result.is_ok());
-        // Check if default log file path (if any) is handled correctly
-        if let Some(log_path) = default_config.logging.file_path {
-            assert!(log_path.is_absolute());
-            if let Some(parent) = log_path.parent(){
-                assert!(parent.exists());
-            }
+        let result = ConfigLoader::load();
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            CoreError::Config(ConfigError::ParseError(_)) => { /* Expected */ }
+            e => panic!("Unexpected error type: {:?}", e),
         }
     }
 
     #[test]
-    fn test_validate_config_invalid_log_level() {
+    fn test_config_loader_load_io_error_other_than_not_found() {
+        let _test_env = TestEnv::new();
+        let app_config_dir = get_app_config_dir().unwrap();
+        let config_file_path = app_config_dir.join("config.toml");
+
+        // Create the file, but then make it unreadable (e.g. by making its parent dir unreadable)
+        // This is hard to do reliably cross-platform in tests.
+        // A simpler IO error to simulate might be if the path is a directory.
+        nova_fs::ensure_dir_exists(&config_file_path).unwrap(); // Create config.toml as a directory
+
+        let result = ConfigLoader::load();
+        assert!(result.is_err());
+        match result.err().unwrap() {
+            CoreError::Config(ConfigError::ReadError { path, source: _ }) => {
+                 assert_eq!(path, config_file_path);
+            }
+            // This might also be CoreError::Io if the read_to_string itself fails due to "is a directory"
+            // depending on OS and fs::read_to_string behavior.
+            // For now, ReadError is the expectation from the original tests.
+            e => panic!("Unexpected error type for ReadError: {:?}", e),
+        }
+        // Clean up the directory we created
+        fs::remove_dir_all(&config_file_path).ok();
+    }
+
+
+    #[test]
+    fn test_validate_config_valid_settings() {
+        let _test_env = TestEnv::new(); // For state dir resolution
         let mut config = CoreConfig {
-            logging: LoggingConfig {
-                level: "invalid_level".to_string(),
-                file_path: None,
-                format: "text".to_string(),
-            },
+            logging: defaults::default_logging_config(),
+            feature_flags: defaults::default_feature_flags(),
         };
+        config.logging.level = "TRACE".to_string(); // Test case normalization
+        config.logging.format = "JSON".to_string(); // Test case normalization
+        config.logging.file_path = Some(PathBuf::from("my_app/log.txt")); // Relative path
+
+        ConfigLoader::validate_config(&mut config).expect("Validation failed for valid settings");
+
+        assert_eq!(config.logging.level, "trace");
+        assert_eq!(config.logging.format, "json");
+        let log_path = config.logging.file_path.unwrap();
+        assert!(log_path.is_absolute());
+        assert!(log_path.to_string_lossy().ends_with("my_app/log.txt"));
+        assert!(log_path.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn test_validate_config_invalid_log_level() { // Replaced with version from mod.rs
+        let mut config = CoreConfig::default();
+        config.logging.level = "superlog".to_string();
         let result = ConfigLoader::validate_config(&mut config);
         assert!(matches!(result, Err(CoreError::Config(ConfigError::ValidationError(_)))));
         if let Err(CoreError::Config(ConfigError::ValidationError(msg))) = result {
-            assert!(msg.contains("Invalid log level"));
+            assert!(msg.contains("Invalid log level: 'superlog'"));
         }
     }
 
     #[test]
-    fn test_validate_config_invalid_log_format() {
-        let mut config = CoreConfig {
-            logging: LoggingConfig {
-                level: "info".to_string(),
-                file_path: None,
-                format: "invalid_format".to_string(),
-            },
-        };
+    fn test_validate_config_invalid_log_format() { // Replaced with version from mod.rs
+        let mut config = CoreConfig::default();
+        config.logging.format = "binary".to_string();
         let result = ConfigLoader::validate_config(&mut config);
         assert!(matches!(result, Err(CoreError::Config(ConfigError::ValidationError(_)))));
-         if let Err(CoreError::Config(ConfigError::ValidationError(msg))) = result {
-            assert!(msg.contains("Invalid log format"));
+        if let Err(CoreError::Config(ConfigError::ValidationError(msg))) = result {
+            assert!(msg.contains("Invalid log format: 'binary'"));
         }
     }
 
     #[test]
-    fn test_validate_config_log_file_path_relative() {
-        let temp_state_dir = TempDir::new().unwrap();
-        // Mock get_app_state_dir by setting XDG_STATE_HOME, assuming paths::get_app_state_dir honors it.
-        let original_state_home = std::env::var_os("XDG_STATE_HOME");
-        std::env::set_var("XDG_STATE_HOME", temp_state_dir.path().to_str().unwrap());
+    fn test_validate_config_absolute_log_path() { // Added from mod.rs
+        let _test_env = TestEnv::new();
+        let temp_dir_for_log = TempDir::new().unwrap();
+        let abs_log_path = temp_dir_for_log.path().join("sub/absolute.log");
 
-        let mut config = CoreConfig {
-            logging: LoggingConfig {
-                level: "info".to_string(),
-                file_path: Some(PathBuf::from("logs/app.log")),
-                format: "text".to_string(),
-            },
-        };
+        let mut config = CoreConfig::default();
+        config.logging.file_path = Some(abs_log_path.clone());
+
+        ConfigLoader::validate_config(&mut config).expect("Validation failed for absolute path");
         
-        let result = ConfigLoader::validate_config(&mut config);
-        assert!(result.is_ok());
-        assert!(config.logging.file_path.is_some());
-        let expected_path = temp_state_dir.path().join("logs/app.log");
-        assert_eq!(config.logging.file_path, Some(expected_path.clone()));
-        assert!(expected_path.parent().unwrap().exists()); // ensure_directory_exists should have created it.
-
-        // Restore XDG_STATE_HOME
-        if let Some(val) = original_state_home {
-            std::env::set_var("XDG_STATE_HOME", val);
-        } else {
-            std::env::remove_var("XDG_STATE_HOME");
-        }
+        assert_eq!(config.logging.file_path.unwrap(), abs_log_path);
+        assert!(abs_log_path.parent().unwrap().exists());
     }
     
     #[test]
-    fn test_validate_config_log_file_path_absolute() {
-        let temp_log_dir = TempDir::new().unwrap();
-        let log_file_path = temp_log_dir.path().join("absolute_app.log");
-
-        let mut config = CoreConfig {
-            logging: LoggingConfig {
-                level: "info".to_string(),
-                file_path: Some(log_file_path.clone()),
-                format: "text".to_string(),
-            },
-        };
+    fn test_validate_config_log_path_is_root_parent() { // Added from mod.rs
+        let _test_env = TestEnv::new();
+        let mut config = CoreConfig::default();
         
-        // Parent directory for the absolute path might not exist.
-        // Let's ensure it does for the test, or that validate_config creates it.
-        // The spec for validate_config implies ensure_directory_exists is called.
-        if let Some(parent) = log_file_path.parent() {
-             if !parent.exists() { std::fs::create_dir_all(parent).unwrap(); } // Pre-create for simplicity if needed
-        }
+        let log_file_name_only = PathBuf::from("logfile.log");
 
+        config.logging.file_path = Some(log_file_name_only.clone());
         let result = ConfigLoader::validate_config(&mut config);
-        assert!(result.is_ok());
-        assert_eq!(config.logging.file_path, Some(log_file_path.clone()));
-        if let Some(parent) = log_file_path.parent() {
-            assert!(parent.exists());
-        }
+        assert!(result.is_ok(), "Validation failed for log file in state_dir root: {:?}", result.err());
+
+        let app_state_dir = get_app_state_dir().unwrap();
+        let expected_abs_path = app_state_dir.join(log_file_name_only);
+        assert_eq!(config.logging.file_path, Some(expected_abs_path.clone()));
+        assert!(expected_abs_path.parent().unwrap().exists());
     }
-    
-    // Test for parsing error - this is more of an integration test for load()
-    // but we can test the toml::from_str part if load() was refactored to take content.
-    // For now, this kind of test would be better in a full load() test.
-    // e.g., create a temp file with invalid toml and call load()
-    // (which is hard due to hardcoded paths in load()).
+
+    // Note: test_validate_config_log_file_path_relative from original loader.rs tests
+    // is covered by test_validate_config_valid_settings and test_config_loader_load_success,
+    // which use relative paths initially and TestEnv for state dir.
 }

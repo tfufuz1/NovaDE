@@ -79,12 +79,10 @@ impl<T: Num + Copy + Signed> Point<T> {
 impl<T: Num + Copy + Zero> Point<T> {
     /// A point at the origin (0,0) for integer types.
     pub const ZERO_I32: Point<i32> = Point::new(0, 0);
-    #[allow(dead_code)] // If not used elsewhere but good for consistency
     pub const ZERO_U32: Point<u32> = Point::new(0, 0);
     /// A point at the origin (0.0, 0.0) for f32.
     pub const ZERO_F32: Point<f32> = Point::new(0.0, 0.0);
     /// A point at the origin (0.0, 0.0) for f64.
-    #[allow(dead_code)] // If not used elsewhere but good for consistency
     pub const ZERO_F64: Point<f64> = Point::new(0.0, 0.0);
 }
 
@@ -182,7 +180,6 @@ impl<T: Num + Copy + Zero> Size<T> {
     /// A size of (0.0,0.0) for f32.
     pub const ZERO_F32: Size<f32> = Size::new(0.0, 0.0);
     /// A size of (0.0,0.0) for f64.
-    #[allow(dead_code)]
     pub const ZERO_F64: Size<f64> = Size::new(0.0, 0.0);
 }
 
@@ -397,7 +394,6 @@ impl<T: Num + Copy + Zero> Rect<T> {
     /// A rectangle at (0.0,0.0) with size (0.0,0.0) for f32.
     pub const ZERO_F32: Rect<f32> = Rect::from_coords(0.0, 0.0, 0.0, 0.0);
     /// A rectangle at (0.0,0.0) with size (0.0,0.0) for f64.
-    #[allow(dead_code)]
     pub const ZERO_F64: Rect<f64> = Rect::from_coords(0.0, 0.0, 0.0, 0.0);
 }
 
@@ -527,6 +523,50 @@ impl RectInt {
     pub fn is_empty(&self) -> bool {
         self.size.is_empty()
     }
+
+    /// Creates a `RectInt` from two points, ensuring positive width and height.
+    /// The rectangle will encompass both points.
+    pub fn from_points(p1: PointInt, p2: PointInt) -> Self {
+        let x = p1.x.min(p2.x);
+        let y = p1.y.min(p2.y);
+        let width = (p1.x - p2.x).abs() as u32;
+        let height = (p1.y - p2.y).abs() as u32;
+        RectInt::from_coords(x, y, width, height)
+    }
+
+    /// Translates the rectangle by a given delta (dx, dy).
+    /// The origin is moved by (dx, dy), size remains the same.
+    /// Uses saturating arithmetic to prevent overflow.
+    pub fn translate(&self, dx: i32, dy: i32) -> Self {
+        RectInt::from_coords(
+            self.origin.x.saturating_add(dx),
+            self.origin.y.saturating_add(dy),
+            self.size.width,
+            self.size.height,
+        )
+    }
+
+    /// Inflates the rectangle by a given delta (dw, dh) from its center.
+    /// `dw` is added to each side for width (total width change is 2*dw).
+    /// `dh` is added to each side for height (total height change is 2*dh).
+    /// The origin is shifted by (-dw, -dh).
+    /// Width and height will not go below zero.
+    /// Uses saturating arithmetic.
+    pub fn inflate(&self, dw: i32, dh: i32) -> Self {
+        let new_x = self.origin.x.saturating_sub(dw);
+        let new_y = self.origin.y.saturating_sub(dh);
+
+        // Calculate new width and height with i64 to avoid overflow before max(0)
+        let new_width_signed = (self.size.width as i64).saturating_add(2 * dw as i64);
+        let new_height_signed = (self.size.height as i64).saturating_add(2 * dh as i64);
+
+        RectInt::from_coords(
+            new_x,
+            new_y,
+            new_width_signed.max(0) as u32,
+            new_height_signed.max(0) as u32,
+        )
+    }
 }
 
 
@@ -547,6 +587,16 @@ mod tests {
     assert_impl_all!(SizeInt: std::fmt::Debug, Clone, Copy, PartialEq, Eq, std::hash::Hash, Default, Serialize, Send, Sync);
     assert_impl_all!(RectInt: std::fmt::Debug, Clone, Copy, PartialEq, Eq, std::hash::Hash, Default, Serialize, Send, Sync);
 
+    // Additional Send/Sync assertions as per plan
+    assert_impl_all!(Point<i32>: Send, Sync);
+    assert_impl_all!(Size<u32>: Send, Sync); // Note: Size<u32> was already asserted with Send, Sync above. This is redundant but harmless.
+    assert_impl_all!(Rect<i32>: Send, Sync); // Note: Rect<i32> was already asserted with Send, Sync above. This is redundant but harmless.
+    assert_impl_all!(PointInt: Send, Sync);  // Note: PointInt was already asserted with Send, Sync above. This is redundant but harmless.
+    // SizeInt Send, Sync is already covered by the line:
+    // assert_impl_all!(SizeInt: std::fmt::Debug, Clone, Copy, PartialEq, Eq, std::hash::Hash, Default, Serialize, Send, Sync);
+    // RectInt Send, Sync is already covered by the line:
+    // assert_impl_all!(RectInt: std::fmt::Debug, Clone, Copy, PartialEq, Eq, std::hash::Hash, Default, Serialize, Send, Sync);
+
 
     // --- Point<T> Tests ---
     #[test]
@@ -558,6 +608,92 @@ mod tests {
         let p_f32 = Point::new(10.5, 20.5);
         assert_eq!(p_f32.x, 10.5);
         assert_eq!(p_f32.y, 20.5);
+    }
+
+    #[test]
+    fn rect_int_from_points() {
+        let p1 = PointInt::new(10, 20);
+        let p2 = PointInt::new(0, 5);
+        let r = RectInt::from_points(p1, p2);
+        assert_eq!(r.x(), 0);
+        assert_eq!(r.y(), 5);
+        assert_eq!(r.width(), 10);
+        assert_eq!(r.height(), 15);
+
+        let r_same_points = RectInt::from_points(p1, p1);
+        assert_eq!(r_same_points.x(), p1.x);
+        assert_eq!(r_same_points.y(), p1.y);
+        assert_eq!(r_same_points.width(), 0);
+        assert_eq!(r_same_points.height(), 0);
+    }
+
+    #[test]
+    fn rect_int_translate() {
+        let r = RectInt::from_coords(10, 20, 30, 40);
+        let translated = r.translate(5, -5);
+        assert_eq!(translated.x(), 15);
+        assert_eq!(translated.y(), 15);
+        assert_eq!(translated.width(), 30);
+        assert_eq!(translated.height(), 40);
+
+        // Test saturating_add
+        let r_max = RectInt::from_coords(i32::MAX - 5, i32::MAX - 5, 10, 10);
+        let translated_max = r_max.translate(10, 10);
+        assert_eq!(translated_max.x(), i32::MAX);
+        assert_eq!(translated_max.y(), i32::MAX);
+
+        let r_min = RectInt::from_coords(i32::MIN + 5, i32::MIN + 5, 10, 10);
+        let translated_min = r_min.translate(-10, -10);
+        assert_eq!(translated_min.x(), i32::MIN);
+        assert_eq!(translated_min.y(), i32::MIN);
+    }
+
+    #[test]
+    fn rect_int_inflate() {
+        let r = RectInt::from_coords(10, 20, 30, 40);
+
+        // Positive inflation
+        let inflated_positive = r.inflate(5, 10); // dw=5, dh=10
+        assert_eq!(inflated_positive.x(), 10 - 5);     // x - dw
+        assert_eq!(inflated_positive.y(), 20 - 10);    // y - dh
+        assert_eq!(inflated_positive.width(), 30 + 2*5); // width + 2*dw
+        assert_eq!(inflated_positive.height(), 40 + 2*10);// height + 2*dh
+
+        // Negative inflation (shrinking)
+        let inflated_negative = r.inflate(-5, -10);
+        assert_eq!(inflated_negative.x(), 10 - (-5));
+        assert_eq!(inflated_negative.y(), 20 - (-10));
+        assert_eq!(inflated_negative.width(), 30 + 2*(-5));
+        assert_eq!(inflated_negative.height(), 40 + 2*(-10));
+
+        // Inflation resulting in zero width/height
+        let inflated_to_zero_width = r.inflate(-15, 5); // width becomes 30 - 30 = 0
+        assert_eq!(inflated_to_zero_width.width(), 0);
+        assert_eq!(inflated_to_zero_width.x(), 10 - (-15));
+
+        let inflated_to_zero_height = r.inflate(5, -20); // height becomes 40 - 40 = 0
+        assert_eq!(inflated_to_zero_height.height(), 0);
+        assert_eq!(inflated_to_zero_height.y(), 20 - (-20));
+
+        // Inflation that would result in negative width/height (should be clamped to 0)
+        let inflated_past_zero = r.inflate(-20, -25); // width would be 30-40 = -10, height 40-50 = -10
+        assert_eq!(inflated_past_zero.width(), 0);
+        assert_eq!(inflated_past_zero.height(), 0);
+        assert_eq!(inflated_past_zero.x(), 10 - (-20));
+        assert_eq!(inflated_past_zero.y(), 20 - (-25));
+
+        // Test saturation at origin shift
+        let r_at_min = RectInt::from_coords(i32::MIN, i32::MIN, 100, 100);
+        let inflated_at_min = r_at_min.inflate(10, 10); // x = MIN - 10 (saturates to MIN)
+        assert_eq!(inflated_at_min.x(), i32::MIN);
+        assert_eq!(inflated_at_min.y(), i32::MIN);
+        assert_eq!(inflated_at_min.width(), 100 + 2*10);
+        assert_eq!(inflated_at_min.height(), 100 + 2*10);
+
+        let r_near_max_size = RectInt::from_coords(0, 0, u32::MAX - 10, u32::MAX - 10);
+        let inflated_max_size = r_near_max_size.inflate(10, 10); // width/height would exceed u32::MAX if not for i64 intermediate
+        assert_eq!(inflated_max_size.width(), u32::MAX); // width = MAX-10 + 20 -> MAX+10, clamped to MAX
+        assert_eq!(inflated_max_size.height(), u32::MAX); // height = MAX-10 + 20 -> MAX+10, clamped to MAX
     }
 
     #[test]
