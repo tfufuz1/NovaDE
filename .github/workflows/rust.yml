@@ -12,13 +12,13 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-
+ 
     steps:
     - uses: actions/checkout@v4
-    - name: Install Rust 1.81.0
+    - name: Install Rust 1.80.1
       uses: actions-rs/toolchain@v1
       with:
-        toolchain: 1.81.0
+        toolchain: 1.80.1
         override: true
     - name: Build
       run: cargo build --verbose
