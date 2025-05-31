@@ -45,6 +45,7 @@ use crate::input::input_dispatcher::InputDispatcher;
 use crate::input::keyboard_layout::KeyboardLayoutManager;
 use crate::renderer::wgpu_renderer::NovaWgpuRenderer;
 use crate::compositor::renderer_interface::abstraction::FrameRenderer; // Added FrameRenderer import
+use smithay::wayland::foreign_toplevel::ForeignToplevelManagerState;
 
 mod input_handlers; // Added module declaration
 mod output_handlers; // Added module declaration for output handlers
@@ -130,6 +131,7 @@ pub struct DesktopState {
     // pub wgpu_renderer: Option<Arc<Mutex<NovaWgpuRenderer>>>, // Removed specific WGPU field
     // Adding concrete WGPU renderer for commit path as a temporary solution
     pub wgpu_renderer_concrete: Option<Arc<Mutex<NovaWgpuRenderer>>>,
+    pub foreign_toplevel_state: ForeignToplevelManagerState,
 }
 
 impl DesktopState {
@@ -188,6 +190,7 @@ impl DesktopState {
         let dmabuf_state = DmabufState::new();
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let screencopy_state = ScreencopyState::new::<Self>(&display_handle, None); // Initialize ScreencopyState
+        let foreign_toplevel_state = ForeignToplevelManagerState::new();
 
         Self {
             display_handle,
@@ -230,6 +233,7 @@ impl DesktopState {
             active_input_surface: None,
             keyboard_data_map,
             touch_focus_per_slot: HashMap::new(),
+            foreign_toplevel_state,
         }
     }
 }

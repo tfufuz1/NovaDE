@@ -33,3 +33,8 @@ freetype-rs = "0.26.0" # Downgraded to align with iced dependency
 svg = "0.18.0"
 resvg = "0.26.1"
 usvg = "0.26.1"
+
+# Wayland client dependencies
+wayland-client = "0.31.1"
+wayland-protocols = { version = "0.31.0", features = ["unstable_protocols", "staging_protocols", "client"] }
+wayland-backend = "0.3.2"

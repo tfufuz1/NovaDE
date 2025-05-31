@@ -50,12 +50,14 @@ impl GlobalDispatch<WlSubcompositor, ()> for DesktopState {
 
 // --- Function to ensure/log global creation ---
 use crate::compositor::core::errors::CompositorCoreError;
+use anyhow::Context;
+use smithay::wayland::foreign_toplevel::ForeignToplevelManagerGlobal;
 // If other globals like XDG Shell were being created here, their modules would be imported.
 // e.g., use crate::compositor::xdg_shell;
 
 pub fn create_all_wayland_globals(
-    _desktop_state: &mut DesktopState, // Marked as unused for now, but could be used for complex setups
-    _display_handle: &DisplayHandle,   // Marked as unused for now
+    desktop_state: &mut DesktopState,
+    display_handle: &DisplayHandle,
 ) -> Result<(), CompositorCoreError> {
     // In Smithay 0.10.0, WlCompositor (and WlSubcompositor) and WlShm globals
     // are typically registered with the Wayland display when CompositorState::new::<Self>()
@@ -123,16 +125,22 @@ pub fn create_all_wayland_globals(
         // Format { code: DrmFourcc::Xrgb8888, modifier: DrmFormatModifier::Linear },
     ];
     
-    let _dmabuf_global = _desktop_state.dmabuf_state.create_global_with_default_feedback::<DesktopState>(
-         _display_handle, 
+    let _dmabuf_global = desktop_state.dmabuf_state.create_global_with_default_feedback::<DesktopState>(
+         display_handle,
          &preferred_dmabuf_formats, // Pass the defined preferred formats
-         Some(tracing::Span::current()) 
+         Some(tracing::Span::current())
     );
 
     tracing::info!(
         "DMABUF global (zwp_linux_dmabuf_v1) registered, advertising preferred formats: {:?}",
         preferred_dmabuf_formats
     );
+
+    // Create zwlr_foreign_toplevel_manager_v1 global
+    ForeignToplevelManagerGlobal::new(display_handle, &mut desktop_state.foreign_toplevel_state)
+        .context("Failed to create zwlr_foreign_toplevel_manager_v1 global")
+        .map_err(|e| CompositorCoreError::GlobalCreationError(e.to_string()))?; // Convert anyhow::Error to your error type
+    tracing::info!("Initialized zwlr_foreign_toplevel_manager_v1 global.");
     
     // TODO: Add creation of other essential globals here as they are implemented, e.g.:
     // - Data Device Manager (wl_data_device_manager)

@@ -9,5 +9,5 @@ novade-domain = { path = "../novade-domain" }
 async-trait = "0.1.68"
 tokio = { version = "1", features = ["full"] }
 wayland-server = "0.31.0"
-wayland-protocols = "0.31.0"
-smithay = "0.6.0"
+wayland-protocols = { version = "0.31.0", features = ["unstable_protocols"] }
+smithay = { version = "0.6.0", features = ["desktop"] } # Assuming "desktop" enables foreign_toplevel

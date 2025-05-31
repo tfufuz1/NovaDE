@@ -1,6 +1,7 @@
 use adw::prelude::*;
 use adw::{Application, ApplicationWindow, Flap, HeaderBar, MessageDialog, Toast, ToastOverlay};
 use adw::Breakpoint;
+use gtk4_layer_shell::LayerShell;
 use gtk::{Box as GtkBox, CssProvider, Label, Orientation, StyleContext, Align, Button, Image as GtkImage};
 use gtk::gdk::Display;
 use gio;
@@ -33,6 +34,8 @@ mod dbus_utils;
 // Declare settings_ui module
 mod settings_ui;
 use settings_ui::NovaSettingsWindow;
+
+mod wayland_integration;
 
 const APP_ID: &str = "org.novade.UIShellTest";
 static CSS_LOAD_SUCCESSFUL: AtomicBool = AtomicBool::new(false);
@@ -126,6 +129,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     // app.run() is below. We don't need to change it.
+
+    // Initialize Wayland Toplevel Integration
+    match wayland_integration::WaylandToplevelIntegration::new_and_start_thread() {
+        Ok(_integration_handle) => { // Store the handle if needed (e.g. to join thread on app exit)
+            tracing::info!("Wayland Toplevel Integration initialized and event loop started.");
+            // The Arc<Mutex<Vec<ToplevelInfo>>> is in integration_handle.toplevels_data_access
+            // The UI would need to periodically check this or use a glib channel for updates.
+            // For this subtask, we are just starting it and logging.
+            // To prevent the handle from being dropped immediately if not stored:
+            // std::mem::forget(integration_handle); // Or store it in the App state.
+            // For now, let it be dropped as the thread is detached (thread::spawn).
+        }
+        Err(e) => {
+            tracing::error!("Failed to initialize Wayland Toplevel Integration: {:?}", e);
+            // Decide if this is fatal. For now, just log and continue.
+        }
+    }
+
     app.run();
     Ok(())
 }
@@ -477,7 +498,7 @@ fn build_adw_ui(
     let sidebar_box = GtkBox::new(Orientation::Vertical, 10);
     // ... (sidebar content setup remains the same) ...
     sidebar_box.add_css_class("sidebar-box");
-    sidebar_box.set_width_request(220);
+    // sidebar_box.set_width_request(220); // Width might be better controlled by flap itself or content
     let sidebar_label = Label::new(Some(&gettext("Sidebar Controls"))); 
     sidebar_label.set_halign(Align::Center);
     sidebar_box.append(&sidebar_label);
@@ -531,7 +552,7 @@ fn build_adw_ui(
         .build();
 
     // Stress Test Button
-    main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
+    // main_content_box.append(&gtk::Separator::new(Orientation::Horizontal)); // Visually busy, consider removing some separators
     let stress_test_label = Label::new(Some(&gettext("UI Responsiveness Stress Test:")));
     stress_test_label.set_halign(Align::Center);
     stress_test_label.set_margin_top(10);
@@ -671,6 +692,44 @@ fn build_adw_ui(
     });
 
     window.add_breakpoint(breakpoint); // Breakpoint still applies to the window
+
+    // Initialize gtk4-layer-shell for the main window
+    tracing::info!("Initializing layer shell for the main application window...");
+    gtk4_layer_shell::LayerShell::init_layer_shell(&window);
+
+    // Set the layer to Bottom (typical for a panel/taskbar)
+    // Other options: Layer::Top, Layer::Overlay, Layer::Background
+    gtk4_layer_shell::LayerShell::set_layer(&window, gtk4_layer_shell::Layer::Bottom);
+    tracing::info!("Layer shell layer set to Bottom.");
+
+    // Set anchors: Stick to left, right, and bottom. Not top.
+    gtk4_layer_shell::LayerShell::set_anchor(&window, gtk4_layer_shell::Edge::Left, true);
+    gtk4_layer_shell::LayerShell::set_anchor(&window, gtk4_layer_shell::Edge::Right, true);
+    gtk4_layer_shell::LayerShell::set_anchor(&window, gtk4_layer_shell::Edge::Bottom, true);
+    gtk4_layer_shell::LayerShell::set_anchor(&window, gtk4_layer_shell::Edge::Top, false);
+    tracing::info!("Layer shell anchors set (Left, Right, Bottom: true; Top: false).");
+
+    // Enable auto exclusive zone to reserve space (e.g., for a panel)
+    // The window's height will determine the zone size if not set explicitly.
+    // If the taskbar (bottom bar of ToolbarView) has a fixed height,
+    // that should ideally be the exclusive zone.
+    // For now, let's set an explicit zone of 48px as a common taskbar height.
+    // The ApplicationWindow itself will still try to take default_height (900px),
+    // but the layer shell manager might override or clamp this.
+    // We might need to adjust window.set_default_height() if we want the window itself
+    // to be only 48px high.
+    // window.set_default_height(48); // If the window itself should be the panel height
+    gtk4_layer_shell::LayerShell::auto_exclusive_zone_enabled(&window); // Let layer shell manage it based on window size
+    // OR, for explicit size:
+    // gtk4_layer_shell::LayerShell::set_exclusive_zone(&window, 48);
+    // Using auto_exclusive_zone_enabled is often simpler if the window's requested height is correct for the panel.
+    // If the ToolbarView's bottom bar (taskbar) is, say, 48px, and the rest of the window is transparent
+    // or not there, this works. But ApplicationWindow usually has a background.
+    // Let's assume the taskbar's height is what we want for the exclusive zone.
+    // A more robust way would be to get the taskbar's allocated height after realization
+    // and set the exclusive zone then, but for init, a fixed value is common.
+    gtk4_layer_shell::LayerShell::set_exclusive_zone(&window, 48); // Explicitly request 48px for the zone
+    tracing::info!("Layer shell exclusive zone set to 48px (or auto-enabled).");
 
     // Simulated critical UI error (kept for illustration, as before)
     if false { 

@@ -13,10 +13,15 @@ use smithay::{
             XdgSurfaceConfigure,
             ResizeEdge as XdgResizeEdge, // Explicit import
         },
+        // Ensure ToplevelState is imported for the helper function.
+        // It's already aliased as XdgToplevelStateSmithay in the file.
+        // If not, we'd add:
+        // shell::xdg::ToplevelState as SmithayToplevelState,
     },
     input::SeatHandler, // SeatHandler might not be directly needed in XdgShellHandler trait methods
 };
 use std::sync::Arc;
+use smithay::wayland::shell::xdg::ToplevelState as SmithayXdgToplevelState;
 
 use crate::compositor::{
     core::state::DesktopState, // Changed from NovadeCompositorState
@@ -45,6 +50,23 @@ fn find_managed_window_by_wl_surface(desktop_state: &DesktopState, surface: &WlS
         .cloned()
 }
 
+// Helper function to convert ManagedWindow's state to Smithay's XDG ToplevelState
+fn managed_to_xdg_toplevel_state(win_state: &crate::compositor::shell::xdg_shell::types::WindowState) -> SmithayXdgToplevelState {
+    let mut xdg_state = SmithayXdgToplevelState::empty();
+    if win_state.maximized { xdg_state.set(SmithayXdgToplevelState::MAXIMIZED, true); }
+    if win_state.fullscreen { xdg_state.set(SmithayXdgToplevelState::FULLSCREEN, true); }
+    // Note: Smithay's XdgToplevelState does not have a 'MINIMIZED' state.
+    // Minimized usually means unmapped. 'ACTIVATED' and 'SUSPENDED' are present.
+    // 'SUSPENDED' could be a potential mapping for minimized if the window is not unmapped,
+    // or we rely on the unmapped state to signal this implicitly to foreign toplevel consumers.
+    // For now, only map activated. If a window is minimized, it will likely be unmapped,
+    // and `remove_toplevel` would be called.
+    if win_state.activated { xdg_state.set(SmithayXdgToplevelState::ACTIVATED, true); }
+    // To represent 'minimized' or 'hidden', one might consider if the window is mapped or not
+    // in conjunction with its other states, or use a custom protocol extension if needed by the taskbar.
+    // For zwlr_foreign_toplevel_manager_v1, unmapping is the primary way to indicate a window is gone/hidden.
+    xdg_state
+}
 
 impl XdgShellHandler for DesktopState {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState {
@@ -138,6 +160,8 @@ impl XdgShellHandler for DesktopState {
                 state_guard.is_mapped = true;
             }
             self.space.map_window(window_arc.clone(), window_arc.geometry().loc, true);
+            self.foreign_toplevel_state.new_toplevel(window_arc.clone());
+            tracing::info!("Notified foreign_toplevel_manager about new toplevel: {:?}", window_arc.id);
             tracing::info!("XDG Toplevel {:?} mapped to space at {:?}", window_arc.id, window_arc.geometry().loc);
             self.space.damage_all_outputs();
         } else {
@@ -154,6 +178,8 @@ impl XdgShellHandler for DesktopState {
                 state_guard.is_mapped = false;
             }
             self.space.unmap_window(&window_arc);
+            self.foreign_toplevel_state.remove_toplevel(&window_arc);
+            tracing::info!("Notified foreign_toplevel_manager about removed toplevel: {:?}", window_arc.id);
             tracing::info!("XDG Toplevel {:?} unmapped from space.", window_arc.id);
             self.space.damage_all_outputs();
         } else {
@@ -192,6 +218,8 @@ impl XdgShellHandler for DesktopState {
             let mut state_guard = window_arc.state.write().unwrap();
             state_guard.title = Some(title.clone());
             drop(state_guard);
+            self.foreign_toplevel_state.update_title(&window_arc, title.clone());
+            tracing::debug!("Notified foreign_toplevel_manager about title change for {:?}", window_arc.id);
             tracing::info!("Window {:?} requested title change to: {}", window_arc.id, title);
         }
     }
@@ -201,6 +229,8 @@ impl XdgShellHandler for DesktopState {
             let mut state_guard = window_arc.state.write().unwrap();
             state_guard.app_id = Some(app_id.clone());
             drop(state_guard);
+            self.foreign_toplevel_state.update_app_id(&window_arc, app_id.clone());
+            tracing::debug!("Notified foreign_toplevel_manager about app_id change for {:?}", window_arc.id);
             tracing::info!("Window {:?} requested app_id change to: {}", window_arc.id, app_id);
         }
     }
@@ -244,7 +274,12 @@ impl XdgShellHandler for DesktopState {
             }
             win_state_guard.maximized = true;
             win_state_guard.fullscreen = false; // Ensure not fullscreen
+            let current_win_state_clone = win_state_guard.clone(); // Clone for the helper
             drop(win_state_guard);
+
+            let new_xdg_state = managed_to_xdg_toplevel_state(&current_win_state_clone);
+            self.foreign_toplevel_state.update_state(&window_arc, new_xdg_state);
+            tracing::debug!("Notified foreign_toplevel_manager about state change for {:?}: {:?}", window_arc.id, new_xdg_state);
 
             let maximized_geometry = self.space.outputs()
                 .next()
@@ -280,6 +315,12 @@ impl XdgShellHandler for DesktopState {
                 tracing::warn!("No saved geometry found for unmaximize, using current size.");
                 (None, Some(win_state_guard.size)) // Keep current position, restore to current size (or a default)
             };
+            let current_win_state_clone = win_state_guard.clone();
+            drop(win_state_guard);
+
+            let new_xdg_state = managed_to_xdg_toplevel_state(&current_win_state_clone);
+            self.foreign_toplevel_state.update_state(&window_arc, new_xdg_state);
+            tracing::debug!("Notified foreign_toplevel_manager about state change for {:?}: {:?}", window_arc.id, new_xdg_state);
 
             surface.with_pending_state(|xdg_state| {
                 xdg_state.states.set(XdgToplevelState::Maximized, false);
@@ -299,6 +340,17 @@ impl XdgShellHandler for DesktopState {
             win_state_guard.minimized = true;
             // Client is expected to unmap itself. Compositor might unmap from space if client misbehaves.
             // No configure is sent for minimized state typically.
+            let current_win_state_clone = win_state_guard.clone();
+            drop(win_state_guard);
+
+            // Even if minimized means unmapped, we might want to update the state for foreign toplevel
+            // if it has a concept of "hidden" or "suspended" that maps to minimized.
+            // For now, our helper doesn't map minimized to anything in XdgToplevelState.
+            // If the window unmaps, remove_toplevel will be called. If it stays mapped but "minimized",
+            // this state update might be relevant if XdgToplevelState had a minimized/hidden flag.
+            let new_xdg_state = managed_to_xdg_toplevel_state(&current_win_state_clone);
+            self.foreign_toplevel_state.update_state(&window_arc, new_xdg_state);
+            tracing::debug!("Notified foreign_toplevel_manager about state change (minimized) for {:?}: {:?}", window_arc.id, new_xdg_state);
             tracing::debug!("Minimized request for {:?}. Client should unmap.", surface.wl_surface().id());
         }
     }
@@ -313,7 +365,12 @@ impl XdgShellHandler for DesktopState {
             }
             win_state_guard.fullscreen = true;
             win_state_guard.maximized = false;
+            let current_win_state_clone = win_state_guard.clone();
             drop(win_state_guard);
+
+            let new_xdg_state = managed_to_xdg_toplevel_state(&current_win_state_clone);
+            self.foreign_toplevel_state.update_state(&window_arc, new_xdg_state);
+            tracing::debug!("Notified foreign_toplevel_manager about state change for {:?}: {:?}", window_arc.id, new_xdg_state);
 
             let target_output = output_opt.or_else(|| self.space.outputs().next());
             let fullscreen_geometry = target_output.and_then(|o| self.space.output_geometry(o));
@@ -348,7 +405,12 @@ impl XdgShellHandler for DesktopState {
             if let Some(saved_geom) = win_state_guard.saved_pre_action_geometry {
                  tracing::debug!("Restored size for {:?} to {:?}. Position would be {:?}", window_arc.id, saved_geom.size, saved_geom.loc);
             }
+            let current_win_state_clone = win_state_guard.clone();
             drop(win_state_guard);
+
+            let new_xdg_state = managed_to_xdg_toplevel_state(&current_win_state_clone);
+            self.foreign_toplevel_state.update_state(&window_arc, new_xdg_state);
+            tracing::debug!("Notified foreign_toplevel_manager about state change for {:?}: {:?}", window_arc.id, new_xdg_state);
 
             surface.with_pending_state(|xdg_state| {
                 xdg_state.states.unset(XdgToplevelStateSmithay::Fullscreen);
@@ -365,6 +427,8 @@ impl XdgShellHandler for DesktopState {
         let wl_surface = surface.wl_surface(); // Use wl_surface for clarity
         tracing::info!(surface_id = ?wl_surface.id(), "XDG Toplevel destroyed by client");
         if let Some(window_arc) = find_managed_window_by_wl_surface(self, wl_surface) {
+            self.foreign_toplevel_state.remove_toplevel(&window_arc); // Notify before removing from space/map
+            tracing::info!("Notified foreign_toplevel_manager about destroyed toplevel: {:?}", window_arc.id);
             self.space.unmap_window(&window_arc);
             self.windows.remove(&window_arc.domain_id());
             tracing::info!("ManagedWindow {:?} (domain: {:?}) removed due to toplevel destruction.", window_arc.id, window_arc.domain_id());
@@ -392,7 +456,13 @@ impl XdgShellHandler for DesktopState {
             tracing::info!("Window {:?} requested set_minimized", window_arc.id);
             let mut win_state_guard = window_arc.state.write().unwrap();
             win_state_guard.minimized = true;
+            let current_win_state_clone = win_state_guard.clone();
             drop(win_state_guard);
+
+            let new_xdg_state = managed_to_xdg_toplevel_state(&current_win_state_clone);
+            self.foreign_toplevel_state.update_state(&window_arc, new_xdg_state);
+            tracing::debug!("Notified foreign_toplevel_manager about state change (set_minimized) for {:?}: {:?}", window_arc.id, new_xdg_state);
+
             self.space.unmap_window(&window_arc);
             tracing::info!("Window {:?} unmapped from space due to minimization request.", window_arc.id);
             self.space.damage_all_outputs();

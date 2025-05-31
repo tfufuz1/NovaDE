@@ -1,7 +1,12 @@
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::wayland::output::{OutputHandler, OutputManagerState, OutputData};
 // Adjust path to where DesktopState is defined, assuming it's in a sibling 'state' module
-use super::state::DesktopState; 
+use super::state::DesktopState;
+use smithay::wayland::compositor::{CompositorHandler, CompositorState, SurfaceData as SmithayCoreSurfaceData, SurfaceAttributes};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use crate::compositor::surface_management::SurfaceData; // Your existing SurfaceData
+use std::sync::{Arc, Mutex};
+use smithay::wayland::foreign_toplevel::{ForeignToplevelHandler, ForeignToplevelManagerState};
 
 impl OutputHandler for DesktopState {
     fn output_state(&mut self) -> &mut OutputManagerState {
@@ -152,5 +157,92 @@ impl DmabufHandler for DesktopState {
         notifier.successful();
         
         Ok(())
+    }
+}
+
+impl CompositorHandler for DesktopState {
+    fn compositor_state(&mut self) -> &mut CompositorState {
+        &mut self.compositor_state
+    }
+
+    fn commit(&mut self, surface: &WlSurface) {
+        // Call Smithay's processing for buffer attachment, role checks etc.
+        // This will update the SurfaceAttributes in WlSurface::data_map if a buffer is attached.
+        if let Err(e) = smithay::wayland::compositor::on_commit_buffer_handler(surface) {
+            tracing::warn!(surface_id = ?surface.id(), "Error in on_commit_buffer_handler: {}", e);
+            // Potentially send a protocol error to the client if appropriate
+        }
+
+        // Ensure our SurfaceData is present and update it.
+        let surface_data_exists = surface.data_map().has::<Arc<Mutex<SurfaceData>>>();
+
+        if !surface_data_exists {
+            // If it's the first commit and our data isn't there, create and insert it.
+            // This might also be done when the wl_surface is first created via wl_compositor global,
+            // but doing it on first commit is also a common pattern.
+            let new_surface_data = Arc::new(Mutex::new(SurfaceData::new(
+                format!("surface-{}", surface.id().protocol_id()) // Example ID
+            )));
+            surface.data_map().insert_if_missing_threadsafe(|| new_surface_data);
+            tracing::debug!(surface_id = ?surface.id(), "New SurfaceData created and associated on commit.");
+        }
+
+        // Retrieve our SurfaceData (it should exist now)
+        let surface_data_arc_mutex = surface.data_map().get::<Arc<Mutex<SurfaceData>>>().cloned();
+
+        if let Some(arc_mutex) = surface_data_arc_mutex {
+            let mut surface_data_guard = arc_mutex.lock().unwrap();
+
+            // Check for an attached buffer using Smithay's core surface data
+            let smithay_core_surface_data = surface.data_map().get::<SmithayCoreSurfaceData>().unwrap(); // Smithay ensures this exists
+            let surface_attributes = smithay_core_surface_data.current_state(); // Get SurfaceAttributes from current_state
+
+            if let Some(wl_buffer) = surface_attributes.buffer.as_ref() {
+                // A buffer is attached, update our SurfaceData.
+                // The texture_handle would be created/updated by the renderer when it processes this commit.
+                // For now, we can update other buffer-related info if necessary.
+                // Example: if SurfaceData tracks buffer size or damage.
+                // This part depends on how much SurfaceData duplicates SmithayCoreSurfaceData vs extends it.
+                // For now, mostly log. The renderer will handle texture creation from this buffer.
+                tracing::debug!(surface_id = ?surface.id(), buffer_id = ?wl_buffer.id(), "Surface committed with a buffer.");
+
+                // If your SurfaceData needs to store buffer dimensions or other attributes from SmithayCoreSurfaceData:
+                // surface_data_guard.current_buffer_info = Some(AttachedBufferInfo {
+                //     buffer: wl_buffer.clone(),
+                //     dimensions: surface_attributes.buffer_dimensions.unwrap_or_default(),
+                //     scale: surface_attributes.buffer_scale,
+                //     transform: surface_attributes.buffer_transform,
+                // });
+            } else {
+                // No buffer attached, or buffer was detached.
+                // Clear relevant parts of your SurfaceData, e.g., texture handle.
+                surface_data_guard.current_buffer_info = None;
+                surface_data_guard.texture_handle = None;
+                tracing::debug!(surface_id = ?surface.id(), "Surface committed without a buffer (or buffer detached).");
+            }
+
+            // Handle damage. Smithay's on_commit_buffer_handler usually clears pending damage and moves it to current.
+            // We might need to accumulate it in our SurfaceData if the renderer needs it in a specific format.
+            // For example:
+            // surface_data_guard.damage_buffer_coords.clear();
+            // surface_data_guard.damage_buffer_coords.extend_from_slice(&surface_attributes.damage_buffer);
+
+        } else {
+            tracing::error!(surface_id = ?surface.id(), "SurfaceData Arc<Mutex<_>> not found after attempting to ensure its presence!");
+        }
+
+        // Further processing for XDG surfaces or other roles, often done by calling methods on ManagedWindow
+        // which would then access this SurfaceData.
+        // Example:
+        // if let Some(managed_window_arc) = find_managed_window_by_wl_surface(self, surface) {
+        //     managed_window_arc.on_commit(); // Let ManagedWindow update its internal state from WlSurface
+        // }
+    }
+    // Add other CompositorHandler methods if needed, e.g., new_surface, surface_destroyed
+}
+
+impl ForeignToplevelHandler for DesktopState {
+    fn foreign_toplevel_state(&mut self) -> &mut ForeignToplevelManagerState {
+        &mut self.foreign_toplevel_state
     }
 }
