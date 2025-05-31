@@ -2,33 +2,9 @@
 name = "novade-domain"
 version = "0.1.0"
 edition = "2021"
-authors = ["NovaDE Team <nova-de@example.com>"]
-license = "MIT OR Apache-2.0"
-publish = false
 
 [dependencies]
+novade-core = { path = "../novade-core" }
+async-trait = "0.1.68"
 serde = { version = "1.0", features = ["derive"] }
-thiserror = "1.0"
-tokio = { version = "1", features = ["sync"] } # For broadcast channel
-async-trait = "0.1" # For async traits
-uuid = { version = "1.4", features = ["v4", "serde"] } # Example if using UUIDs for IDs
-log = "0.4" # For logging macros
-futures = "0.3" # For futures::executor::block_on
-novade-core = { path = "../novade-core" } # Added
-chrono = { version = "0.4", features = ["serde"] } # Added
-regex = "1" # Added
-lazy_static = "1.4" # Added
-toml = "0.8" # Added for config provider example
-anyhow = "1.0" # Added
-serde_json = { version = "1.0", features = ["raw_value"] } # Added
-rand = "0.8" # Added
-zbus = { version = "3", default-features = false, features = ["tokio"] } # Added for D-Bus
-futures-util = "0.3" # Added for stream processing
-base64 = "0.21" # Added for AI Interaction attachments
-dirs = "5.0" # For default config/data paths
-
-
-[dev-dependencies]
-# Add any development dependencies here, e.g., for testing
-# tokio = { version = "1", features = ["rt-multi-thread", "macros"] } # For testing async code
-# tracing-subscriber = { version = "0.3", features = ["env-filter"] } # For logging in tests
+tokio = { version = "1", features = ["full"] }
