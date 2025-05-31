@@ -30,6 +30,6 @@ gtk4-layer-shell = "*"
 dirs = "5.0.1"
 notify = "5.1.0"
 freetype-rs = "0.26.0" # Downgraded to align with iced dependency
-svg = "0.26.1"
+svg = "0.18.0"
 resvg = "0.26.1"
 usvg = "0.26.1"
