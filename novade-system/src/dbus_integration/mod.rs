@@ -16,13 +16,13 @@ pub enum DBusIntegrationError {
 
     #[error("Failed to create D-Bus proxy: {source}")]
     ProxyCreationFailed{ #[source] source: zbus::Error },
-    
+
     #[error("Failed to build D-Bus signal receiver: {source}")]
     SignalReceiverBuildFailed{ #[source] source: zbus::Error },
 
     #[error("D-Bus signal stream ended unexpectedly")]
     SignalStreamEnded,
-    
+
     #[error("Failed to deserialize D-Bus signal arguments: {0}")]
     SignalDeserializationFailed(#[from] zbus::zvariant::Error),
 
@@ -62,7 +62,7 @@ pub async fn connect_and_list_names() -> Result<()> {
         .await
         .map_err(|e| DBusIntegrationError::MethodCallFailed{ source: e })?
         .body()?;
-        
+
     let names: Vec<String> = names_body
         .try_into()
         .map_err(DBusIntegrationError::BodyDeserializationFailed)?;
@@ -127,7 +127,7 @@ pub async fn listen_for_name_owner_changed(connection: &Connection) -> Result<()
         eprintln!("Signal stream ended unexpectedly.");
         return Err(DBusIntegrationError::SignalStreamEnded);
     }
-    
+
     Ok(())
 }
 

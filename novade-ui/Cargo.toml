@@ -30,10 +30,10 @@ parking_lot = "0.12.1"
 futures = "0.3.28"
 futures-util = { version = "0.3" } # Added for StreamExt
 anyhow = "1.0.71"
-gtk4 = { version = "0.8.2", features = ["closures"] }
+gtk4 = "0.8.2"
 adw = "0.6.1"
 gio = "0.19.5"
-glib = { version = "0.19.5", features = ["properties"] }
+glib = "0.19.5"
 gtk4-layer-shell = "*"
 dirs = "5.0.1"
 notify = "5.1.0"
@@ -43,10 +43,7 @@ svg = "0.13.1"
 resvg = "0.35.0"
 usvg = "0.35.0"
 tiny-skia = "0.10.0"
-
-zbus = { version = "3.14", default-features = false, features = ["tokio"] } # Check latest zbus version
-ashpd = { version = "0.4.0", features = ["gtk4"] } # Check latest ashpd version, enable gtk4 feature for parent window
-
+zbus = "3" # Added for D-Bus communication
 
 [build-dependencies]
 glib-build-tools = "0.19.0" # Or the version compatible with your glib/gio
@@ -54,3 +51,10 @@ glib-build-tools = "0.19.0" # Or the version compatible with your glib/gio
 [[bin]]
 name = "novade-ui-shelltest"
 path = "src/main.rs"
+
+[dev-dependencies]
+mockall = "0.11" # Or latest compatible version
+# tokio is already a main dependency with "full" features, so it's available for tests.
+# zbus is already a main dependency.
+# tracing-subscriber might be useful for seeing logs during tests:
+# tracing-subscriber = { version = "0.3", features = ["env-filter"] }

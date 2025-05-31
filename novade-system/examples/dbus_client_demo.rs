@@ -17,7 +17,7 @@ async fn main() {
         Ok(_) => println!("Minimal logging initialized."),
         Err(e) => eprintln!("Failed to initialize logging: {}", e),
     }
-    
+
     println!("\n--- Testing connect_and_list_names ---");
     match dbus_integration::connect_and_list_names().await {
         Ok(_) => println!("connect_and_list_names executed successfully."),
@@ -57,6 +57,6 @@ async fn main() {
             eprintln!("Skipping listen_for_name_owner_changed test.");
         }
     }
-    
+
     println!("\n--- D-Bus Integration Demo Finished ---");
 }

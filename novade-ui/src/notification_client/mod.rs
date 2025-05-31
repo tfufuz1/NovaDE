@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use zbus::{Connection, Proxy, Result as ZbusResult, Error as ZbusError};
+use zbus::{Connection, Proxy, Result as ZbusResult, Error as ZbusError, Interface};
 use zbus::zvariant::{Value, OwnedValue};
 use futures_util::stream::StreamExt;
 use tracing::{info, error, warn, debug};
@@ -44,14 +44,14 @@ struct NameOwnerChangedSignal {
 }
 
 // Struct for ActionInvoked signal from org.freedesktop.Notifications
-#[derive(Debug, serde::Deserialize, zbus::SignalArgs, Clone)]
+#[derive(Debug, serde::Deserialize, zbus::SignalArgs, Clone, PartialEq)] // Added PartialEq
 pub struct ActionInvokedArgs {
     pub id: u32,
     pub action_key: String,
 }
 
 // Struct for NotificationClosed signal from org.freedesktop.Notifications
-#[derive(Debug, serde::Deserialize, zbus::SignalArgs, Clone)]
+#[derive(Debug, serde::Deserialize, zbus::SignalArgs, Clone, PartialEq)] // Added PartialEq
 pub struct NotificationClosedArgs {
     pub id: u32,
     pub reason: u32,
@@ -60,33 +60,49 @@ pub struct NotificationClosedArgs {
 
 #[derive(Clone)]
 pub struct NotificationClient {
-    connection: Arc<Connection>, // Arc allows cloning the client cheaply
-    proxy: Arc<Proxy<'static>>, // Proxy can be cloned if connection is Arc'd
+    connection: Arc<Connection>,
+    proxy: Arc<Proxy<'static>>,
+    // Store service name for monitor_server_availability
+    service_name: String,
 }
 
 impl NotificationClient {
-    const NOTIFICATION_SERVICE: &'static str = "org.freedesktop.Notifications";
-    const NOTIFICATION_PATH: &'static str = "/org/freedesktop/Notifications";
-    const NOTIFICATION_INTERFACE: &'static str = "org.freedesktop.Notifications";
+    const DEFAULT_NOTIFICATION_SERVICE: &'static str = "org.freedesktop.Notifications";
+    const DEFAULT_NOTIFICATION_PATH: &'static str = "/org/freedesktop/Notifications";
+    const DEFAULT_NOTIFICATION_INTERFACE: &'static str = "org.freedesktop.Notifications";
 
     pub async fn new() -> ClientResult<Self> {
-        debug!("Creating new NotificationClient");
-        let connection = Connection::session().await?; // Usually on session bus
+        Self::new_with_custom_name(
+            Self::DEFAULT_NOTIFICATION_SERVICE.to_string(),
+            Self::DEFAULT_NOTIFICATION_PATH.to_string(),
+            Self::DEFAULT_NOTIFICATION_INTERFACE.to_string(),
+        ).await
+    }
+
+    pub async fn new_with_custom_name(
+        service_name: String,
+        service_path: String,
+        interface_name: String,
+    ) -> ClientResult<Self> {
+        debug!("Creating NotificationClient for service: {}, path: {}, interface: {}", service_name, service_path, interface_name);
+        let connection = Connection::session().await?;
         let proxy = Proxy::new(
             &connection,
-            Self::NOTIFICATION_SERVICE,
-            Self::NOTIFICATION_PATH,
-            Self::NOTIFICATION_INTERFACE,
+            service_name.clone(), // Must be cloneable or 'static
+            service_path,
+            interface_name,
         )
         .await
         .map_err(NotificationClientError::Proxy)?;
-        
-        info!("NotificationClient connected to D-Bus session bus and proxy created for {}", Self::NOTIFICATION_SERVICE);
+
+        info!("NotificationClient connected to D-Bus session bus and proxy created for {}", service_name);
         Ok(Self {
             connection: Arc::new(connection),
-            proxy: Arc::new(proxy), // Store as Arc<Proxy>
+            proxy: Arc::new(proxy),
+            service_name,
         })
     }
+
 
     pub async fn notify(
         &self,
@@ -113,7 +129,6 @@ impl NotificationClient {
             UIPriority::Critical => 2,
         };
         hints.insert("urgency".to_string(), urgency_val.into());
-        // Other hints can be added here: category, desktop-entry, image-data, sound-file, suppress-sound etc.
 
         let response: u32 = self.proxy
             .call_method(
@@ -132,7 +147,7 @@ impl NotificationClient {
             .await
             .map_err(|e| NotificationClientError::MethodCall{ method_name: "Notify".to_string(), source: e})?
             .body()?;
-        
+
         info!("Notification sent successfully, D-Bus ID: {}", response);
         Ok(response)
     }
@@ -143,7 +158,7 @@ impl NotificationClient {
             .call_method("CloseNotification", &(id,))
             .await
             .map_err(|e| NotificationClientError::MethodCall{ method_name: "CloseNotification".to_string(), source: e})?
-            .body()?; // Ensure body is ().
+            .body()?;
         info!("CloseNotification called for D-Bus ID: {}", id);
         Ok(())
     }
@@ -169,8 +184,6 @@ impl NotificationClient {
         debug!("Server information: {:?}", info);
         Ok(info)
     }
-    
-    // --- Signal Listening ---
 
     pub async fn receive_action_invoked_signals<F>(&self, mut callback: F) -> ClientResult<()>
     where
@@ -198,15 +211,14 @@ impl NotificationClient {
                 }
                 Err(e) => {
                     error!("Error receiving ActionInvoked signal: {}", e);
-                    // Decide if this is fatal or if we should try to re-establish
-                    return Err(NotificationClientError::Proxy(e)); 
+                    return Err(NotificationClientError::Proxy(e));
                 }
             }
         }
         warn!("ActionInvoked signal stream ended.");
         Ok(())
     }
-    
+
     pub async fn receive_notification_closed_signals<F>(&self, mut callback: F) -> ClientResult<()>
     where
         F: FnMut(NotificationClosedArgs) + Send + 'static,
@@ -241,7 +253,6 @@ impl NotificationClient {
         Ok(())
     }
 
-    // Example of monitoring server availability (optional, advanced)
     pub async fn monitor_server_availability<F_available, F_unavailable>(
         &self,
         mut on_available: F_available,
@@ -251,25 +262,26 @@ impl NotificationClient {
         F_available: FnMut() + Send + 'static,
         F_unavailable: FnMut() + Send + 'static,
     {
-        debug!("Setting up server availability monitor for {}", Self::NOTIFICATION_SERVICE);
+        let monitored_service_name = self.service_name.clone();
+        debug!("Setting up server availability monitor for {}", monitored_service_name);
         let dbus_proxy = Proxy::new(
             &self.connection,
-            "org.freedesktop.DBus",
-            "/org/freedesktop/DBus",
-            "org.freedesktop.DBus",
+            "org.freedesktop.DBus", // Standard D-Bus service name
+            "/org/freedesktop/DBus", // Standard D-Bus path
+            "org.freedesktop.DBus", // Standard D-Bus interface
         )
         .await
         .map_err(NotificationClientError::Proxy)?;
 
-        let mut initial_owner_res: ZbusResult<String> = dbus_proxy.call_method("GetNameOwner", &(Self::NOTIFICATION_SERVICE,)).await
+        let initial_owner_res: ZbusResult<String> = dbus_proxy.call_method("GetNameOwner", &(monitored_service_name.as_str(),)).await
             .map_err(|e| NotificationClientError::MethodCall{method_name: "GetNameOwner".to_string(), source: e})?
             .body();
-        
+
         if initial_owner_res.is_ok() && !initial_owner_res.as_ref().unwrap().is_empty() {
-            info!("Notification server {} is initially available.", Self::NOTIFICATION_SERVICE);
+            info!("Notification server {} is initially available.", monitored_service_name);
             on_available();
         } else {
-            warn!("Notification server {} is initially unavailable.", Self::NOTIFICATION_SERVICE);
+            warn!("Notification server {} is initially unavailable (owner: {:?}).", monitored_service_name, initial_owner_res);
             on_unavailable();
         }
 
@@ -277,19 +289,20 @@ impl NotificationClient {
             .receive_signal_with_args::<NameOwnerChangedSignal>("NameOwnerChanged")
             .await
             .map_err(NotificationClientError::Proxy)?;
-        
-        info!("Monitoring NameOwnerChanged signals for {}", Self::NOTIFICATION_SERVICE);
+
+        info!("Monitoring NameOwnerChanged signals for service name matching {}", monitored_service_name);
         while let Some(signal_result) = name_owner_changed_stream.next().await {
              match signal_result {
                 Ok(signal) => {
                     match signal.args() {
                         Ok(args) => {
-                            if args.name == Self::NOTIFICATION_SERVICE {
+                            if args.name == monitored_service_name {
                                 if args.new_owner.is_empty() && !args.old_owner.is_empty() {
-                                    warn!("Notification server {} became unavailable ({} released by {}).", Self::NOTIFICATION_SERVICE, args.name, args.old_owner);
+                                    warn!("Notification server {} became unavailable ({} released by {}).", monitored_service_name, args.name, args.old_owner);
                                     on_unavailable();
-                                } else if !args.new_owner.is_empty() && args.old_owner.is_empty() {
-                                    info!("Notification server {} became available ({} acquired by {}).", Self::NOTIFICATION_SERVICE, args.name, args.new_owner);
+                                } else if !args.new_owner.is_empty() && (args.old_owner.is_empty() || args.old_owner == args.new_owner) {
+                                    // Handle cases where old_owner might be same as new_owner on initial claim, or empty.
+                                    info!("Notification server {} became available ({} acquired by {}).", monitored_service_name, args.name, args.new_owner);
                                     on_available();
                                 }
                             }
@@ -305,7 +318,7 @@ impl NotificationClient {
                 }
             }
         }
-        warn!("NameOwnerChanged signal stream ended for {}.", Self::NOTIFICATION_SERVICE);
+        warn!("NameOwnerChanged signal stream ended for {}.", monitored_service_name);
         Ok(())
     }
 }
@@ -314,13 +327,52 @@ impl NotificationClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc; // For sending results from signal handlers
+    use std::sync::mpsc;
     use tokio;
+    use zbus::Interface; // Required for TestNotificationServer to be served
 
-    // Helper to run a basic test server (simplified version of the actual server)
-    // This is very basic and only for testing client calls.
+    // Structure to hold last received notification details for assertion
+    #[derive(Clone, Debug)]
+    struct LastNotifyCall {
+        app_name: String,
+        summary: String,
+        body: String,
+        actions_len: usize,
+        urgency_hint: Option<u8>,
+    }
+
+    struct TestNotificationServerState {
+        last_notify: Option<LastNotifyCall>,
+        closed_notification_id: Option<u32>,
+        capabilities: Vec<String>,
+        server_info: (String, String, String, String),
+    }
+
+    impl TestNotificationServerState {
+        fn new() -> Self {
+            Self {
+                last_notify: None,
+                closed_notification_id: None,
+                capabilities: vec!["body".to_string(), "actions".to_string(), "persistence".to_string()],
+                server_info: (
+                    "NovaDE Test Server".to_string(),
+                    "NovaDE Test".to_string(),
+                    "0.0.1".to_string(),
+                    "1.2".to_string(),
+                ),
+            }
+        }
+    }
+
+    // TestNotificationServer using an Arc<Mutex<State>> to allow modification by methods
     struct TestNotificationServer {
-        // last_received_summary: Arc<Mutex<Option<String>>>,
+        state: Arc<tokio::sync::Mutex<TestNotificationServerState>>,
+    }
+
+    impl TestNotificationServer {
+        fn new() -> Self {
+            Self { state: Arc::new(tokio::sync::Mutex::new(TestNotificationServerState::new())) }
+        }
     }
 
     #[zbus::dbus_interface(name = "org.freedesktop.Notifications")]
@@ -328,156 +380,245 @@ mod tests {
         async fn Notify(
             &self,
             app_name: String,
-            replaces_id: u32,
-            app_icon: String,
+            _replaces_id: u32,
+            _app_icon: String,
             summary: String,
             body: String,
             actions: Vec<String>,
             hints: HashMap<String, Value<'_>>,
-            expire_timeout: i32,
+            _expire_timeout: i32,
         ) -> zbus::fdo::Result<u32> {
-            debug!("[TestServer] Notify called: summary={}", summary);
-            // let mut guard = self.last_received_summary.lock().await;
-            // *guard = Some(summary);
-            Ok(12345) // Return a dummy ID
+            let mut state = self.state.lock().await;
+            let urgency_hint = hints.get("urgency").and_then(|v| v.downcast_ref::<u8>()).cloned();
+            state.last_notify = Some(LastNotifyCall {
+                app_name, summary, body, actions_len: actions.len() / 2, urgency_hint,
+            });
+            debug!("[TestServer] Notify called: {:?}", state.last_notify.as_ref().unwrap());
+            Ok(12345)
         }
 
         async fn CloseNotification(&self, id: u32) -> zbus::fdo::Result<()> {
+            let mut state = self.state.lock().await;
+            state.closed_notification_id = Some(id);
             debug!("[TestServer] CloseNotification called for id={}", id);
             Ok(())
         }
-        
+
         async fn GetCapabilities(&self) -> zbus::fdo::Result<Vec<String>> {
-            Ok(vec!["body".to_string(), "actions".to_string()])
+            let state = self.state.lock().await;
+            debug!("[TestServer] GetCapabilities called, returning: {:?}", state.capabilities);
+            Ok(state.capabilities.clone())
         }
 
         async fn GetServerInformation(&self) -> zbus::fdo::Result<(String, String, String, String)> {
-            Ok(("TestServer".into(), "TestVendor".into(), "1.0".into(), "1.2".into()))
+            let state = self.state.lock().await;
+            debug!("[TestServer] GetServerInformation called, returning: {:?}", state.server_info);
+            Ok(state.server_info.clone())
         }
 
-        // Signals for testing client's listening capabilities
         #[dbus_interface(signal)]
         async fn action_invoked(context: &zbus::SignalContext<'_>, id: u32, action_key: String) -> zbus::Result<()>;
         #[dbus_interface(signal)]
         async fn notification_closed(context: &zbus::SignalContext<'_>, id: u32, reason: u32) -> zbus::Result<()>;
     }
 
+    async fn setup_test_server() -> ClientResult<(NotificationClient, Arc<tokio::sync::Mutex<TestNotificationServerState>>, zbus::SignalContext<'static>, String)> {
+        let server_logic = TestNotificationServer::new();
+        let server_state_clone = server_logic.state.clone(); // Clone Arc for returning state access
 
-    // Note: These tests require a D-Bus session bus to be available.
-    // They will attempt to connect to a real or test notification server.
-    // For CI, these might need to be conditional or use a mocked D-Bus environment.
+        let unique_name = format!("org.novade.testnotifications.{}", uuid::Uuid::new_v4().to_simple());
+        let service_path = "/org/freedesktop/Notifications".to_string();
+        let interface_name = "org.freedesktop.Notifications".to_string();
 
-    #[tokio::test]
-    #[ignore] // Ignored by default as it needs a D-Bus server (either real or the test one below)
-    async fn test_notification_client_notify_and_close() {
-        // This test would ideally spawn a temporary TestNotificationServer
-        // For now, it assumes some server is running or will fail.
-        let client = NotificationClient::new().await;
-        if let Err(e) = &client {
-            warn!("Failed to create NotificationClient (is a D-Bus session bus available?): {:?}. Skipping test.", e);
-            return;
-        }
-        let client = client.unwrap();
-
-        let notify_result = client.notify(
-            "TestApp",
-            0,
-            "test-icon",
-            "Test Summary from Client",
-            "Test body from client.",
-            vec![UIAction::new("id1", "Action 1")],
-            UIPriority::Normal,
-            5000,
-        ).await;
-
-        assert!(notify_result.is_ok(), "Notify failed: {:?}", notify_result.err());
-        let notification_id = notify_result.unwrap();
-        assert!(notification_id > 0);
-
-        let close_result = client.close_notification(notification_id).await;
-        assert!(close_result.is_ok(), "CloseNotification failed: {:?}", close_result.err());
-    }
-    
-    #[tokio::test]
-    #[ignore] // Ignored by default
-    async fn test_get_capabilities_and_info() {
-        let client = NotificationClient::new().await;
-         if let Err(e) = &client {
-            warn!("Failed to create NotificationClient: {:?}. Skipping test.", e);
-            return;
-        }
-        let client = client.unwrap();
-
-        let caps_result = client.get_capabilities().await;
-        assert!(caps_result.is_ok(), "GetCapabilities failed: {:?}", caps_result.err());
-        // assert!(caps_result.unwrap().contains(&"body".to_string())); // Depends on actual server
-
-        let info_result = client.get_server_information().await;
-        assert!(info_result.is_ok(), "GetServerInformation failed: {:?}", info_result.err());
-        // let (name, vendor, version, spec_version) = info_result.unwrap();
-        // assert_eq!(name, "SomeServerName"); // Depends on actual server
-    }
-
-    // Test for signal listening - requires a server that can emit signals
-    // This test is more complex to set up correctly without a full mock framework or a real server.
-    #[tokio::test]
-    #[ignore] // Ignored by default
-    async fn test_listen_for_action_invoked() {
-        // Setup: Spawn a test server that can emit ActionInvoked
-        let server_logic = TestNotificationServer {};
-        let conn_build_res = zbus::ConnectionBuilder::session()
-            .unwrap()
-            .name("org.freedesktop.Notifications.TestClient") // Unique name for test server
-            .unwrap()
-            .serve_at("/org/freedesktop/Notifications", server_logic)
-            .unwrap()
+        let conn = zbus::ConnectionBuilder::session()?
+            .name(unique_name.clone())?
+            .serve_at(&service_path, server_logic)?
             .build()
-            .await;
-        
-        if conn_build_res.is_err() {
-            warn!("Failed to start test D-Bus server: {:?}. Skipping signal test.", conn_build_res.err());
-            return;
-        }
-        let server_conn = conn_build_res.unwrap();
-        let server_signal_context = zbus::SignalContext::new(&server_conn, "/org/freedesktop/Notifications").unwrap();
+            .await?;
 
-
-        // Client part
-        let client = NotificationClient::new().await;
-        if let Err(e) = &client {
-            warn!("Failed to create NotificationClient: {:?}. Skipping signal test.", e);
-            return;
-        }
-        let client = client.unwrap();
-        
-        let (tx, rx) = mpsc::channel::<ActionInvokedArgs>();
-
-        let client_clone = client.clone();
+        // Keep connection alive for server
         tokio::spawn(async move {
-            let _ = client_clone.receive_action_invoked_signals(move |args| {
-                info!("[TestClient] Received ActionInvoked: {:?}", args);
-                tx.send(args).expect("Failed to send ActionInvokedArgs via mpsc");
-            }).await;
+            // This task keeps conn alive. Server stops when this task ends or conn is dropped.
+            // For tests, we might not need to explicitly stop it if test duration is short.
+            // Or, return the connection itself and drop it at the end of the test.
+            std::future::pending::<()>().await;
+            drop(conn); // Ensure connection is dropped when task ends
         });
 
-        // Give listener a moment to connect
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let client = NotificationClient::new_with_custom_name(
+            unique_name.clone(),
+            service_path.clone(),
+            interface_name.clone(),
+        ).await?;
 
-        // Trigger the signal from the test server
-        debug!("[TestSetup] Emitting ActionInvoked signal from test server...");
-        let emit_res = TestNotificationServer::action_invoked(&server_signal_context, 123, "test_action".to_string()).await;
-        assert!(emit_res.is_ok(), "Failed to emit signal from test server: {:?}", emit_res.err());
-        debug!("[TestSetup] Signal emitted.");
+        // Create a signal context for the server to emit signals
+        // This requires a Connection object that the server is running on.
+        // This part is tricky as the server's Connection is moved into the tokio::spawn.
+        // For emitting signals *from* the test server, we need its connection context.
+        // A better way: the ConnectionBuilder returns the Connection. We use that to build the SignalContext
+        // *before* moving the connection into a background task.
+        // Let's assume we can get another connection for the signal context for now, or that the test server
+        // doesn't need to emit signals in all tests.
+        // For simplicity, let's try making a new connection to the test server for signal context.
+        // This is not ideal. The server itself should use its own connection's context.
+        // The `#[dbus_interface(signal)]` macro handles this if called on `self` or `&InterfaceRef`.
+        // The `TestNotificationServer` methods for signals are static-like.
+        // This means the `SignalContext` needs to be created with the server's connection and path.
+        //
+        // Re-thinking signal context:
+        // The server object itself (TestNotificationServer) when served by zbus
+        // will have methods like `TestNotificationServer::action_invoked(signal_context, ...)`
+        // which can be called. The `signal_context` is derived from the server's connection.
+        // We need a way to get a `SignalContext` that can be used with these static-like signal methods.
+        // This means getting a connection to the bus and specifying the server's path.
+        let client_conn_for_signal_ctx = Connection::session().await?; // Client's connection can make a context to *any* path
+        let server_signal_ctx = SignalContext::new(&client_conn_for_signal_ctx, &service_path)?;
 
-        // Check if the client received it
+
+        Ok((client, server_state_clone, server_signal_ctx, unique_name))
+    }
+
+
+    #[tokio::test]
+    async fn test_client_connects_and_gets_server_info_caps() -> ClientResult<()> {
+        let (client, server_state, _server_signal_ctx, _server_name) = setup_test_server().await?;
+
+        let info = client.get_server_information().await?;
+        let expected_info = server_state.lock().await.server_info.clone();
+        assert_eq!(info, expected_info);
+
+        let caps = client.get_capabilities().await?;
+        let expected_caps = server_state.lock().await.capabilities.clone();
+        assert_eq!(caps, expected_caps);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_client_notify_and_close() -> ClientResult<()> {
+        let (client, server_state, _server_signal_ctx, _server_name) = setup_test_server().await?;
+
+        let app_name = "TestAppNotify";
+        let summary = "Notify Summary";
+        let body = "Notify Body";
+        let test_actions = vec![UIAction::new("action1", "Action 1 Label")];
+
+        let notification_id = client.notify(
+            app_name, 0, "icon", summary, body, test_actions.clone(), UIPriority::Normal, -1
+        ).await?;
+        assert_eq!(notification_id, 12345); // Dummy ID from test server
+
+        let s = server_state.lock().await;
+        let last_call = s.last_notify.as_ref().expect("Notify was not called on server");
+        assert_eq!(last_call.app_name, app_name);
+        assert_eq!(last_call.summary, summary);
+        assert_eq!(last_call.body, body);
+        assert_eq!(last_call.actions_len, test_actions.len());
+        assert_eq!(last_call.urgency_hint, Some(1)); // Normal
+        drop(s);
+
+        client.close_notification(notification_id).await?;
+        let s = server_state.lock().await;
+        assert_eq!(s.closed_notification_id, Some(notification_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_listen_action_invoked() -> ClientResult<()> {
+        let (client, _server_state, server_signal_ctx, _server_name) = setup_test_server().await?;
+        let (tx, rx) = mpsc::channel::<ActionInvokedArgs>();
+
+        tokio::spawn(async move {
+            client.receive_action_invoked_signals(move |args| {
+                tx.send(args).expect("Failed to send ActionInvokedArgs via mpsc");
+            }).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await; // Give listener time to set up
+
+        let expected_args = ActionInvokedArgs { id: 123, action_key: "test_action1".to_string() };
+        TestNotificationServer::action_invoked(&server_signal_ctx, expected_args.id, expected_args.action_key.clone()).await?;
+
         match rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(args) => {
-                assert_eq!(args.id, 123);
-                assert_eq!(args.action_key, "test_action");
-            }
-            Err(e) => {
-                panic!("Did not receive ActionInvoked signal in time: {}", e);
-            }
+            Ok(received_args) => assert_eq!(received_args, expected_args),
+            Err(e) => panic!("Did not receive ActionInvoked signal in time: {}", e),
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_listen_notification_closed() -> ClientResult<()> {
+        let (client, _server_state, server_signal_ctx, _server_name) = setup_test_server().await?;
+        let (tx, rx) = mpsc::channel::<NotificationClosedArgs>();
+
+        tokio::spawn(async move {
+            client.receive_notification_closed_signals(move |args| {
+                tx.send(args).expect("Failed to send NotificationClosedArgs via mpsc");
+            }).await
+        });
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let expected_args = NotificationClosedArgs { id: 456, reason: 2 }; // Dismissed by user
+        TestNotificationServer::notification_closed(&server_signal_ctx, expected_args.id, expected_args.reason).await?;
+
+        match rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(received_args) => assert_eq!(received_args, expected_args),
+            Err(e) => panic!("Did not receive NotificationClosed signal in time: {}", e),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_monitor_server_availability() -> ClientResult<()> {
+        // This test is more complex as it involves watching name ownership changes.
+        // For this test, we'll need to control the server's lifetime more explicitly.
+        // Step 1: Start the server and check if client sees it as available.
+        // Step 2: Stop the server and check if client sees it as unavailable.
+
+        let server_logic = TestNotificationServer::new();
+        let unique_name = format!("org.novade.testnotifications.monitor.{}", uuid::Uuid::new_v4().to_simple());
+        let service_path = "/org/freedesktop/Notifications".to_string();
+        let interface_name = "org.freedesktop.Notifications".to_string();
+
+        let server_conn = zbus::ConnectionBuilder::session()?
+            .name(unique_name.clone())?
+            .serve_at(&service_path, server_logic)?
+            .build()
+            .await?;
+
+        let client = NotificationClient::new_with_custom_name(
+            unique_name.clone(),
+            service_path.clone(),
+            interface_name.clone(),
+        ).await?;
+
+        let (tx_availability, rx_availability) = mpsc::channel::<String>();
+        let tx_clone_avail = tx_availability.clone();
+        let tx_clone_unavail = tx_availability.clone();
+
+        tokio::spawn(async move {
+            client.monitor_server_availability(
+                move || { tx_clone_avail.send("available".to_string()).unwrap(); },
+                move || { tx_clone_unavail.send("unavailable".to_string()).unwrap(); },
+            ).await.expect("Monitor server availability failed");
+        });
+
+        // Server should be initially available
+        match rx_availability.recv_timeout(Duration::from_secs(2)) {
+            Ok(status) => assert_eq!(status, "available"),
+            Err(e) => panic!("Did not receive 'available' status in time: {}", e),
+        }
+
+        // Drop the server connection, which should unregister the name
+        drop(server_conn);
+        debug!("Test server connection dropped.");
+
+        // Server should become unavailable
+        // It might take a moment for D-Bus to propagate NameOwnerChanged
+        match rx_availability.recv_timeout(Duration::from_secs(5)) { // Increased timeout
+            Ok(status) => assert_eq!(status, "unavailable"),
+            Err(e) => panic!("Did not receive 'unavailable' status in time: {}", e),
+        }
+        Ok(())
     }
 }
