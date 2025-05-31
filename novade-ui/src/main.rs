@@ -34,6 +34,13 @@ mod dbus_utils;
 mod settings_ui;
 use settings_ui::NovaSettingsWindow;
 
+// --- Notification Client Test Imports ---
+use novade_ui::notification_client::NotificationClient;
+use novade_ui::widgets::NotificationPopupWidget;
+use std::collections::HashMap; // For hints
+use zbus::zvariant::Value as ZbusValue; // For hints, aliased to avoid conflict if gtk::Value is used
+// --- End Notification Client Test Imports ---
+
 const APP_ID: &str = "org.novade.UIShellTest";
 static CSS_LOAD_SUCCESSFUL: AtomicBool = AtomicBool::new(false);
 
@@ -403,6 +410,54 @@ fn build_adw_ui(
     // For now, this is a placeholder for where the button is added.
     // The actual connect_clicked will be done after `window` is available.
     main_content_box.append(&open_file_portal_button);
+
+    // --- Test Notification Client Button ---
+    main_content_box.append(&gtk::Separator::new(Orientation::Horizontal));
+    let client_test_title_label = Label::new(Some(&gettext("Notification Client Test:")));
+    client_test_title_label.set_halign(Align::Center);
+    client_test_title_label.set_margin_top(10);
+    main_content_box.append(&client_test_title_label);
+
+    let send_client_notification_button = Button::with_label(&gettext("Send Test Notification (Client & UI Placeholder)"));
+    send_client_notification_button.set_halign(Align::Center);
+    send_client_notification_button.connect_clicked(move |_| {
+        glib::spawn_future_local(async move {
+            tracing::info!("'Send Test Notification (Client & UI Placeholder)' button clicked.");
+            match NotificationClient::new().await {
+                Ok(client) => {
+                    let app_name = "NovaDE UI Test Client";
+                    let replaces_id = 0;
+                    let app_icon = "dialog-information-symbolic";
+                    let summary = "Client Test Notification!";
+                    let body = "This is a test notification sent from novade-ui using NotificationClient.";
+                    let actions = Vec::new();
+                    let mut hints = HashMap::new();
+                    // Example: hints.insert("urgency", ZbusValue::U8(1));
+                    let expire_timeout = 5000;
+
+                    match client.send_notification(app_name, replaces_id, app_icon, summary, body, actions, hints, expire_timeout).await {
+                        Ok(id) => {
+                            tracing::info!("[novade-ui Test] Notification sent successfully via client! ID: {}", id);
+
+                            // UI Interaction Part: Instantiate popup widget and call set_content
+                            // This will print to console as per NotificationPopupWidget's current implementation.
+                            let popup_widget = NotificationPopupWidget::new();
+                            popup_widget.set_content(id, app_name, summary, body);
+                            tracing::info!("[novade-ui Test] Called NotificationPopupWidget.set_content().");
+                        }
+                        Err(e) => {
+                            tracing::error!("[novade-ui Test] Failed to send notification via client: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("[novade-ui Test] Failed to create NotificationClient: {}", e);
+                }
+            }
+        });
+    });
+    main_content_box.append(&send_client_notification_button);
+    // --- End Test Notification Client Button ---
 
 
     // Separator after XDG Portal test

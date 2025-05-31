@@ -21,6 +21,13 @@ use tokio::sync::{Mutex as TokioMutex, mpsc as tokio_mpsc};
 use anyhow::Context as AnyhowContext;
 // --- MCP Related Imports END ---
 
+// --- D-Bus Notification Server Imports START ---
+use novade_system::dbus_interfaces::NotificationsDBusService;
+use novade_domain::notification_service::{DefaultNotificationManager, NotificationManager as DomainNotificationManagerTrait}; // Alias trait
+use zbus::ConnectionBuilder;
+// Arc and Mutex are already imported via MCP section (std::sync::Arc, tokio::sync::Mutex as TokioMutex)
+// --- D-Bus Notification Server Imports END ---
+
 // --- Domain Service Imports ---
 use novade_domain::cpu_usage_service::{DefaultCpuUsageService, ICpuUsageService as DomainICpuUsageService};
 // --- Domain Service Imports END ---
@@ -152,6 +159,41 @@ fn main() {
             Arc::clone(&mcp_service_arc),
             Some(cpu_server_id_for_service) 
         ));
+
+        // --- D-Bus Notification Server Initialization START ---
+        tokio::spawn(async {
+            tracing::info!("Initializing D-Bus Notification Server (background task)...");
+            let domain_notification_manager = Arc::new(TokioMutex::new(DefaultNotificationManager::new()));
+            let notifications_dbus_service = NotificationsDBusService::new(domain_notification_manager);
+
+            match ConnectionBuilder::session()
+                .name("org.freedesktop.Notifications")
+                .expect("Failed to acquire D-Bus service name 'org.freedesktop.Notifications'")
+                .serve_at("/org/freedesktop/Notifications", notifications_dbus_service)
+                .expect("Failed to serve D-Bus interface at '/org/freedesktop/Notifications'")
+                .build()
+                .await
+            {
+                Ok(_conn) => {
+                    // The connection object `_conn` must be kept alive for the service to run.
+                    // Since it's created and awaited within this spawned task, if build() returns Ok,
+                    // the service is running. If this task were to complete, _conn would be dropped.
+                    // For a continuously running service, this task should ideally never complete normally.
+                    // zbus::Error::NameTaken would be caught by expect.
+                    // If build().await returns, it might mean the connection was lost or another issue.
+                    tracing::info!("D-Bus Notification Server started and connection built. It will run as long as this task is alive.");
+                    // To keep it alive indefinitely if build().await is not blocking forever (it should be for server):
+                    // std::future::pending::<()>().await; // This would keep the task alive forever after setup
+                    // However, zbus's build().await for a server connection should itself be a future that completes only on error/shutdown.
+                }
+                Err(e) => {
+                    tracing::error!("D-Bus Notification Server failed to build or run: {}", e);
+                }
+            }
+            tracing::warn!("D-Bus Notification Server task finished. This may indicate an issue if unexpected.");
+        });
+        tracing::info!("D-Bus Notification Server spawned as a background task.");
+        // --- D-Bus Notification Server Initialization END ---
         
         tracing::info!("MCP services (async block) setup complete.");
         (
