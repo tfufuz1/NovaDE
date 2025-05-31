@@ -11,3 +11,4 @@ tokio = { version = "1", features = ["full"] }
 wayland-server = "0.31.0"
 wayland-protocols = "0.31.0"
 smithay = "0.6.0"
+zbus = "3"
