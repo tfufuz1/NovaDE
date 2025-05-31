@@ -98,7 +98,7 @@ pub use window_management_policy::{
     types::{
         TilingMode, GapSettings, WindowSnappingPolicy, WindowGroupingPolicy, 
         NewWindowPlacementStrategy, FocusStealingPreventionLevel, FocusPolicy, 
-        WindowPolicyOverrides, WorkspaceWindowLayout, WindowLayoutInfo
+        WindowPolicyOverrides, WorkspaceWindowLayout, WindowLayoutInfo, WindowPlacementInfo
     },
 };
 
@@ -252,7 +252,7 @@ pub async fn initialize_domain_layer(
     tracing::info!("WorkspaceManager initialized.");
 
     let window_management_policy_service = Arc::new(
-        window_management_policy::DefaultWindowManagementPolicyService::new(settings_service.clone())
+        window_management_policy::DefaultWindowManagementPolicyService::new() // Updated constructor call
     );
     tracing::info!("WindowManagementPolicyService initialized.");
 

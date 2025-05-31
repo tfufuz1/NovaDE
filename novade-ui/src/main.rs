@@ -4,9 +4,11 @@ use adw::Breakpoint;
 use gtk4_layer_shell::LayerShell;
 use gtk::{Box as GtkBox, CssProvider, Label, Orientation, StyleContext, Align, Button, Image as GtkImage};
 use gtk::gdk::Display;
-use gio;
-use glib; // Required for glib::clone!
+use gio::{self, ListStore}; // Added ListStore
+use glib::{self, ControlFlow}; // Required for glib::clone! and ControlFlow
 use tracing;
+use crate::toplevel_gobject::ToplevelListItemGObject;
+use crate::wayland_integration::toplevels::ToplevelUpdate;
 use std::path::Path;
 use std::error::Error;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,6 +38,7 @@ mod settings_ui;
 use settings_ui::NovaSettingsWindow;
 
 mod wayland_integration;
+mod toplevel_gobject; // Added module declaration
 
 const APP_ID: &str = "org.novade.UIShellTest";
 static CSS_LOAD_SUCCESSFUL: AtomicBool = AtomicBool::new(false);
@@ -96,19 +99,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // A common way is to pass it into the closure and then move it into the spawned future.
     // Or, if `build_adw_ui` is only called once, we can make it `Option<Receiver>` and `take()` it.
 
+    // Initialize Wayland Toplevel Integration and GObject ListStore
+    let toplevel_list_store = ListStore::new(ToplevelListItemGObject::static_type());
+    let toplevel_update_receiver =
+        match wayland_integration::WaylandToplevelIntegration::new_and_start_thread() {
+            Ok((_integration_handle, rx)) => { // Store the handle if needed
+                tracing::info!("Wayland Toplevel Integration initialized and event loop started.");
+                // std::mem::forget(_integration_handle); // Or store it in AppState or similar
+                Some(rx)
+            }
+            Err(e) => {
+                tracing::error!("Failed to initialize Wayland Toplevel Integration: {:?}", e);
+                None
+            }
+        };
+
     app.connect_activate(move |app_instance| {
-        // Take the receiver. This closure is called once.
-        // If connect_activate could be called multiple times for an app instance (it's not typical),
-        // this would need a more robust way to handle receiver ownership, e.g. Rc<RefCell<Option<Receiver>>>
-        // or ensure build_adw_ui is idempotent regarding the receiver.
-        // For simplicity, assume it's fine to move `domain_event_receiver` here.
-        // Actually, domain_event_receiver might not be Send, so it must stay on the main thread.
-        // glib::spawn_future_local will keep it on the main thread.
-        // We pass the receiver by moving it into this closure, then into build_adw_ui.
-        build_adw_ui(app_instance, domain_event_receiver, domain_event_sender.clone());
-        // Clear the receiver from this scope to ensure it's used only once if needed,
-        // but since we moved it, it's fine.
-        // domain_event_receiver = tokio::sync::mpsc::channel(1).1; // Effectively drop and replace if needed for multiple calls
+        // Pass domain_event_receiver, sender, toplevel_list_store, and toplevel_update_receiver
+        build_adw_ui(
+            app_instance,
+            domain_event_receiver,
+            domain_event_sender.clone(),
+            toplevel_list_store.clone(), // Clone ListStore for the UI build
+            toplevel_update_receiver.take(), // Take the Option<Receiver>
+        );
     });
     
     // Note: The original `domain_event_receiver` is moved into the closure above.
@@ -129,23 +143,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     // app.run() is below. We don't need to change it.
-
-    // Initialize Wayland Toplevel Integration
-    match wayland_integration::WaylandToplevelIntegration::new_and_start_thread() {
-        Ok(_integration_handle) => { // Store the handle if needed (e.g. to join thread on app exit)
-            tracing::info!("Wayland Toplevel Integration initialized and event loop started.");
-            // The Arc<Mutex<Vec<ToplevelInfo>>> is in integration_handle.toplevels_data_access
-            // The UI would need to periodically check this or use a glib channel for updates.
-            // For this subtask, we are just starting it and logging.
-            // To prevent the handle from being dropped immediately if not stored:
-            // std::mem::forget(integration_handle); // Or store it in the App state.
-            // For now, let it be dropped as the thread is detached (thread::spawn).
-        }
-        Err(e) => {
-            tracing::error!("Failed to initialize Wayland Toplevel Integration: {:?}", e);
-            // Decide if this is fatal. For now, just log and continue.
-        }
-    }
 
     app.run();
     Ok(())
@@ -183,9 +180,60 @@ fn load_css() -> Result<String, Box<dyn Error>> {
 
 fn build_adw_ui(
     app: &Application,
-    mut domain_event_receiver: mpsc::Receiver<DomainEvent>, // Take ownership of the receiver
-    domain_event_sender: mpsc::Sender<DomainEvent> // Clone of sender for simulation buttons
+    mut domain_event_receiver: mpsc::Receiver<DomainEvent>,
+    domain_event_sender: mpsc::Sender<DomainEvent>,
+    toplevel_list_store: ListStore<ToplevelListItemGObject>,
+    toplevel_update_receiver: Option<glib::Receiver<ToplevelUpdate>>,
 ) {
+    if let Some(receiver) = toplevel_update_receiver {
+        let list_store_clone = toplevel_list_store.clone();
+        receiver.attach(None, move |update| {
+            match update {
+                ToplevelUpdate::Snapshot(snapshot) => {
+                    tracing::info!("Received toplevel snapshot with {} items.", snapshot.len());
+                    list_store_clone.clear();
+                    for info in snapshot {
+                        list_store_clone.append(&ToplevelListItemGObject::new(&info));
+                    }
+                }
+                ToplevelUpdate::Added(info) => {
+                    tracing::info!("Received toplevel added: id={}", info.wayland_id);
+                    list_store_clone.append(&ToplevelListItemGObject::new(&info));
+                }
+                ToplevelUpdate::Removed { wayland_id } => {
+                    tracing::info!("Received toplevel removed: id={}", wayland_id);
+                    let mut i = 0;
+                    while i < list_store_clone.n_items() {
+                        if let Some(item) = list_store_clone.item(i)
+                            .and_then(|obj| obj.downcast::<ToplevelListItemGObject>().ok()) {
+                            if item.wayland_id() == wayland_id {
+                                list_store_clone.remove(i);
+                                break;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+                ToplevelUpdate::Updated(info) => {
+                    tracing::info!("Received toplevel updated: id={}", info.wayland_id);
+                    let mut i = 0;
+                    while i < list_store_clone.n_items() {
+                        if let Some(item) = list_store_clone.item(i)
+                            .and_then(|obj| obj.downcast::<ToplevelListItemGObject>().ok()) {
+                            if item.wayland_id() == info.wayland_id {
+                                item.update_from_info(&info);
+                                break;
+                            }
+                        }
+                        i += 1;
+                    }
+                }
+            }
+            ControlFlow::Continue
+        });
+    }
+
+
     let toast_overlay = ToastOverlay::new();
     let flap = Flap::new();
     toast_overlay.set_child(Some(&flap));
@@ -538,8 +586,8 @@ fn build_adw_ui(
     toolbar_view.set_content(Some(&toast_overlay));
 
     // Create and add SimpleTaskbar as bottom bar
-    let taskbar = SimpleTaskbar::new();
-    taskbar.set_clock_text("00:00:00"); // Set initial static text
+    let taskbar = SimpleTaskbar::new(toplevel_list_store.clone()); // Pass the ListStore
+    // taskbar.set_clock_text("00:00:00"); // Clock is now managed internally by SimpleTaskbar
     toolbar_view.add_bottom_bar(&taskbar);
 
 

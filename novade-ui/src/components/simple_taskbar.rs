@@ -1,135 +1,201 @@
 use gtk::glib;
-use gtk::subclass::prelude::*;
-use gtk::{prelude::*, CompositeTemplate};
-use adw::ButtonContent; // Import AdwButtonContent if used in template
+use gtk::{prelude::*, Box as GtkBox, Label, Button, Entry};
+use gio::{ListStore, prelude::ListStoreExtManual};
+use crate::toplevel_gobject::ToplevelListItemGObject;
+use crate::components::workspace_switcher::WorkspaceSwitcher; // Import WorkspaceSwitcher
+use chrono::Local;
+use adw::MessageDialog;
 
 // Define the GObject wrapper for our widget.
 glib::wrapper! {
     pub struct SimpleTaskbar(ObjectSubclass<SimpleTaskbarPriv>)
-        @extends gtk::ConstraintLayout, gtk::Widget, // Changed from gtk::Box
-        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget; // Removed gtk::Orientable
+        @extends gtk::Box, gtk::Widget, // SimpleTaskbar IS a GtkBox
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Orientable;
 }
 
-// Implementation of SimpleTaskbar.
-impl SimpleTaskbar {
-    pub fn new() -> Self {
-        glib::Object::new()
-    }
-
-    // Example: Method to update the clock label (though not a real clock yet)
-    pub fn set_clock_text(&self, text: &str) {
-        self.imp().clock_label.set_text(text);
-    }
-
-    // In a real taskbar, you'd have methods to add/remove task items
-    // e.g., add_task_item(&self, app_id: &str, window_title: &str)
-}
-
-// Define the "private" implementation details of our GObject.
-#[derive(CompositeTemplate, Default)]
-#[template(file = "simple_taskbar.ui")]
+// "Private" implementation details of our GObject.
+#[derive(Default)]
 pub struct SimpleTaskbarPriv {
-    #[template_child]
-    pub clock_label: TemplateChild<gtk::Label>,
-
-    #[template_child]
-    pub task_items_box: TemplateChild<gtk::Box>,
-    #[template_child]
-    pub status_indicator_area: TemplateChild<gtk::DrawingArea>,
-    #[template_child]
-    pub animate_clock_button: TemplateChild<gtk::Button>,
+    // We can store child widgets here if we need to access them frequently
+    // after initialization, though for this setup, direct packing and
+    // capturing clones in closures is also fine.
+    // clock_label: RefCell<Option<Label>>,
+    // toplevel_container: RefCell<Option<GtkBox>>,
 }
 
-// GObject subclassing boilerplate.
 #[glib::object_subclass]
 impl ObjectSubclass for SimpleTaskbarPriv {
     const NAME: &'static str = "SimpleTaskbar";
     type Type = SimpleTaskbar;
-    type ParentType = gtk::ConstraintLayout; // Changed from gtk::Box
+    type ParentType = GtkBox;
 
-    fn class_init(klass: &mut Self::Class) {
-        klass.bind_template();
-        // Add custom CSS for the taskbar if needed, though applying "taskbar" class in UI is better
-        // klass.add_css_class("taskbar"); // This applies to the widget itself
-    }
+    // fn class_init(klass: &mut Self::Class) {}
+    // fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {}
+}
 
-    fn instance_init(obj: &glib::subclass::InitializingObject<Self>) {
-        obj.init_template();
-        // Setup draw function for the DrawingArea
-        let widget = obj.get(); // Get the wrapper SimpleTaskbar instance
+// Implementation of SimpleTaskbar.
+impl SimpleTaskbar {
+    pub fn new(list_store: ListStore<ToplevelListItemGObject>) -> Self {
+        let taskbar: Self = glib::Object::new();
+        taskbar.set_orientation(gtk::Orientation::Horizontal);
+        taskbar.add_css_class("taskbar");
+
+        // --- Launch Button ---
+        let launch_button = Button::with_label("Launch"); // Or use an icon
+        // let launch_button = Button::from_icon_name("application-x-executable-symbolic");
+        launch_button.add_css_class("taskbar-button"); // Consistent styling
+        launch_button.set_tooltip_text(Some("Launch a new application"));
         
-        // Setup draw function for the DrawingArea (as before)
-        let status_indicator_area = widget.imp().status_indicator_area.get();
-        status_indicator_area.set_draw_func(|_drawing_area, cr, width, height| {
-            let radius = (width.min(height) as f64 / 2.0) - 2.0; 
-            if radius <= 0.0 { return; }
-            cr.arc(width as f64 / 2.0, height as f64 / 2.0, radius, 0.0, 2.0 * std::f64::consts::PI);
-            cr.set_source_rgb(0.3, 0.8, 0.3); // Green for "OK"
-            if let Err(e) = cr.fill() { eprintln!("Cairo fill failed: {:?}", e); }
+        let taskbar_weak = taskbar.downgrade(); // Weak reference for the closure
+        launch_button.connect_clicked(move |_btn| {
+            if let Some(taskbar_instance) = taskbar_weak.upgrade() {
+                if let Some(root) = taskbar_instance.root() {
+                    if let Some(parent_window) = root.downcast_ref::<adw::ApplicationWindow>() {
+                        let dialog = MessageDialog::new(Some(parent_window), "Launch Application", None);
+                        let content_area = GtkBox::new(gtk::Orientation::Vertical, 6);
+
+                        let command_entry = Entry::new();
+                        command_entry.set_placeholder_text(Some("Enter command..."));
+
+                        let label_for_entry = Label::new(Some("Command:"));
+                        label_for_entry.set_halign(gtk::Align::Start); // Align label to the start
+
+                        content_area.append(&label_for_entry);
+                        content_area.append(&command_entry);
+
+                        // MessageDialog in Adwaita uses set_extra_child for custom content below the body.
+                        // If we want a more structured dialog, gtk::Dialog would be better.
+                        // For this, let's put the entry in extra_child.
+                        // dialog.set_body("Enter the command to launch below."); // Optional body
+                        dialog.set_extra_child(Some(&content_area));
+
+                        dialog.add_response("launch", "Launch");
+                        dialog.add_response("cancel", "Cancel");
+                        dialog.set_default_response(Some("launch"));
+                        dialog.set_close_response("cancel");
+
+                        let d_command_entry = command_entry.clone();
+                        dialog.connect_response(None, move |d, response_id| {
+                            if response_id == "launch" {
+                                let command_text = d_command_entry.text().to_string();
+                                let trimmed_command = command_text.trim();
+                                if !trimmed_command.is_empty() {
+                                    tracing::info!("Attempting to launch command: '{}'", trimmed_command);
+                                    let mut parts = trimmed_command.split_whitespace();
+                                    if let Some(executable) = parts.next() {
+                                        let args: Vec<&str> = parts.collect();
+                                        match std::process::Command::new(executable)
+                                            .args(&args)
+                                            .spawn() {
+                                            Ok(child) => {
+                                                tracing::info!("Successfully spawned process for '{}', PID: {}", trimmed_command, child.id());
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("Failed to spawn command '{}': {}", trimmed_command, e);
+                                                // TODO: Show an error toast/dialog to the user
+                                                let error_toast = adw::Toast::new(&format!("Failed: {}", e));
+                                                if let Some(toast_overlay) = taskbar_instance.ancestor(adw::ToastOverlay::static_type())
+                                                    .and_then(|w| w.downcast::<adw::ToastOverlay>().ok()){
+                                                    toast_overlay.add_toast(&error_toast);
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        tracing::warn!("Empty executable name after parsing: '{}'", trimmed_command);
+                                    }
+                                } else {
+                                    tracing::info!("Launch command was empty.");
+                                }
+                            }
+                            d.destroy();
+                        });
+                        dialog.present();
+                    } else {
+                        tracing::error!("Could not get ApplicationWindow as root for launch dialog.");
+                    }
+                } else {
+                    tracing::error!("Launch button has no root widget when clicked (taskbar not in window yet?).");
+                }
+            } else {
+                 tracing::error!("SimpleTaskbar instance for launch button was dropped.");
+            }
+        });
+        taskbar.pack_start(&launch_button, false, false, 5);
+
+        // --- Workspace Switcher ---
+        let workspace_switcher = WorkspaceSwitcher::new(4); // Default to 4 workspaces
+        taskbar.pack_start(&workspace_switcher.widget, false, false, 5);
+
+        // --- Toplevel Container ---
+        let toplevel_container = GtkBox::new(gtk::Orientation::Horizontal, 5);
+        toplevel_container.add_css_class("taskbar-toplevels");
+        taskbar.pack_start(&toplevel_container, true, true, 0); // Toplevels take most space
+
+        // --- Clock Label ---
+        let clock_label = Label::new(None);
+        clock_label.add_css_class("taskbar-clock");
+        taskbar.pack_end(&clock_label, false, false, 10);
+
+        // Initial population of taskbar items
+        Self::update_widgets_from_store(&toplevel_container, &list_store);
+
+        // Connect to ListStore "items-changed" signal
+        let tc_clone = toplevel_container.clone();
+        list_store.connect_items_changed(move |store, _position, _removed, _added| {
+            tracing::debug!("Taskbar ListStore items_changed triggered.");
+            Self::update_widgets_from_store(&tc_clone, store);
         });
 
-        // Set accessibility properties for the status_indicator_area
-        let accessible_indicator = status_indicator_area.accessible();
-        accessible_indicator.set_accessible_role(gtk::AccessibleRole::Image);
-        // For a dynamic indicator, this label should be updated when its state changes.
-        if let Err(e) = accessible_indicator.update_property(gtk::AccessibleProperty::Label, &"System status: OK".to_value()) {
-            eprintln!("Failed to set accessible label for status indicator: {:?}", e);
+        // Setup clock timer
+        let cl_clone = clock_label.clone();
+        glib::timeout_add_seconds_local(1, move || {
+            let now = Local::now();
+            cl_clone.set_text(&now.format("%H:%M:%S").to_string());
+            glib::ControlFlow::Continue
+        });
+
+        taskbar
+    }
+
+    fn update_widgets_from_store(container: &GtkBox, store: &ListStore<ToplevelListItemGObject>) {
+        while let Some(child) = container.first_child() {
+            container.remove(&child);
         }
-        // Also, consider setting a description if the label is very brief.
-        // accessible_indicator.update_property(gtk::AccessibleProperty::Description, &"A green circle indicating system is OK.".to_value());
 
+        for i in 0..store.n_items() {
+            if let Some(gobject) = store.item(i) {
+                if let Ok(item) = gobject.downcast::<ToplevelListItemGObject>() {
+                    let title = item.property::<String>("title");
+                    let app_id = item.property::<String>("app-id");
+                    let wayland_id = item.property::<u32>("wayland-id");
 
-        // Setup animation button
-        let clock_label_clone = widget.imp().clock_label.get(); // Get the GtkLabel instance
-        widget.imp().animate_clock_button.connect_clicked(move |_| {
-            let clock_label = clock_label_clone.clone(); // Clone for use in each animation stage
-            
-            // Animation: 1.0 (opaque) to 0.0 (transparent)
-            let anim_fade_out = gtk::PropertyAnimation::new_for_target(
-                &clock_label,
-                "opacity",
-                1.0, // from_value (explicitly start from current or known start)
-                0.0  // to_value
-            );
-            anim_fade_out.set_duration(500); // 500 ms
-            anim_fade_out.set_easing(gtk::Easing::Linear);
+                    let display_text = if !title.is_empty() {
+                        title.clone()
+                    } else if !app_id.is_empty() {
+                        app_id.clone()
+                    } else {
+                        format!("Window {}", wayland_id)
+                    };
 
-            // Animation: 0.0 (transparent) to 1.0 (opaque)
-            let anim_fade_in = gtk::PropertyAnimation::new_for_target(
-                &clock_label,
-                "opacity",
-                0.0, // from_value
-                1.0  // to_value
-            );
-            anim_fade_in.set_duration(500);
-            anim_fade_in.set_easing(gtk::Easing::Linear);
+                    let button = gtk::Button::with_label(&display_text);
+                    button.add_css_class("taskbar-button");
+                    let app_id_tooltip = item.property::<String>("app-id");
+                    button.set_tooltip_text(Some(&format!("ID: {}, AppID: {}", wayland_id, app_id_tooltip)));
 
-            // Chain animations: play fade_in after fade_out is done
-            let clock_label_for_fade_in = clock_label.clone();
-            anim_fade_out.connect_done(move |_animation| {
-                // Ensure opacity is actually 0 before starting fade in,
-                // as animation might be interrupted or end slightly off.
-                clock_label_for_fade_in.set_opacity(0.0); 
-                anim_fade_in.play();
-            });
-            
-            // Start the first animation
-            // Ensure opacity is 1.0 before starting, in case it was interrupted mid-animation before
-            clock_label.set_opacity(1.0); 
-            anim_fade_out.play();
-        });
+                    let wayland_id_clone = wayland_id;
+                    button.connect_clicked(move |_btn| {
+                        tracing::info!("Taskbar button clicked for toplevel Wayland ID: {}", wayland_id_clone);
+                        // Future: send request to activate this window.
+                    });
+                    container.append(&button);
+                }
+            }
+        }
+        container.show();
     }
 }
 
-impl ObjectImpl for SimpleTaskbarPriv {
-    fn dispose(&self) {
-        while let Some(child) = self.obj().first_child() {
-            child.unparent();
-        }
-    }
-}
-
-// Remove BoxImpl and OrientableImpl as ParentType is no longer GtkBox
-// impl BoxImpl for SimpleTaskbarPriv {} // GtkConstraintLayout is not a GtkBox
+impl ObjectImpl for SimpleTaskbarPriv {}
 impl WidgetImpl for SimpleTaskbarPriv {}
-// impl OrientableImpl for SimpleTaskbarPriv {} // GtkConstraintLayout is not Orientable by default
+impl BoxImpl for SimpleTaskbarPriv {}
+impl OrientableImpl for SimpleTaskbarPriv {}

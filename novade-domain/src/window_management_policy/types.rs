@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use novade_core::types::{RectInt, Size};
 use crate::workspaces::core::WindowIdentifier; // Corrected path based on typical structure
+use novade_core::types::geometry::{Rect, Point}; // Added for WindowPlacementInfo
+use uuid::Uuid; // Added for WindowPlacementInfo
 
 // --- Enums ---
 
@@ -276,4 +278,12 @@ mod tests {
         assert_eq!(info.is_maximized_requested, true);
         assert_eq!(info.requested_min_size, Some(Size::new(100,100)));
     }
+
+// --- Structs for Window Placement and Policy Service ---
+
+#[derive(Debug, Clone)]
+pub struct WindowPlacementInfo {
+    pub id: Uuid,
+    pub geometry: Rect, // Using Rect from novade_core::types::geometry
+}
 }

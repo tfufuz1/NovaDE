@@ -22,6 +22,9 @@ use smithay::{
 };
 use std::sync::Arc;
 use smithay::wayland::shell::xdg::ToplevelState as SmithayXdgToplevelState;
+use novade_domain::window_management_policy::{WindowPlacementInfo, WindowManagementPolicyService};
+use novade_core::types::geometry::{Rect as NovaRect, Point as NovaPoint, Size as NovaSize};
+use tokio::runtime::Runtime; // For the temporary block_on solution
 
 use crate::compositor::{
     core::state::DesktopState, // Changed from NovadeCompositorState
@@ -75,22 +78,78 @@ impl XdgShellHandler for DesktopState {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         tracing::info!(surface_id = ?surface.wl_surface().id(), "XDG New Toplevel requested");
-        let domain_window_id = DomainWindowIdentifier::new_v4();
 
+        // --- Integrate Window Management Policy ---
+        let existing_windows_info: Vec<WindowPlacementInfo> = self.windows.values()
+            .filter(|win| win.is_mapped())
+            .map(|win| {
+                let geo = win.geometry(); // Smithay's Rectangle
+                WindowPlacementInfo {
+                    id: win.domain_id.0, // Assuming domain_id is a tuple struct (Uuid)
+                    geometry: NovaRect::new(
+                        NovaPoint::new(geo.loc.x as f64, geo.loc.y as f64), // Convert Smithay's i32 to domain's f64
+                        NovaSize::new(geo.size.w as f64, geo.size.h as f64)
+                    ),
+                }
+            })
+            .collect();
+
+        let client_requested_geometry: Option<NovaRect> = None; // Simplified for now
+
+        let output_area: NovaRect = self.space.outputs().next()
+            .and_then(|o| self.space.output_geometry(o))
+            .map_or_else(
+                || {
+                    tracing::warn!("No output found in space for new_toplevel, using fallback 1920x1080@0,0");
+                    NovaRect::new(NovaPoint::new(0.0,0.0), NovaSize::new(1920.0, 1080.0))
+                },
+                |geom| NovaRect::new(
+                    NovaPoint::new(geom.loc.x as f64, geom.loc.y as f64),
+                    NovaSize::new(geom.size.w as f64, geom.size.h as f64)
+                )
+            );
+
+        let calculated_nova_rect = if let Some(domain_services) = &self.domain_services {
+            let rt = Runtime::new().expect("Failed to create Tokio runtime for policy service call");
+            rt.block_on(async {
+                domain_services.window_management_policy_service
+                    .get_initial_window_geometry(&existing_windows_info, client_requested_geometry, output_area)
+                    .await
+            })
+        } else {
+            tracing::warn!("Domain services not available for window placement, using fallback geometry.");
+            NovaRect::new(NovaPoint::new(100.0, 100.0), NovaSize::new(800.0, 600.0)) // Fallback
+        };
+
+        let initial_smithay_geometry = Rectangle::from_loc_and_size(
+            (calculated_nova_rect.pos.x as i32, calculated_nova_rect.pos.y as i32),
+            (calculated_nova_rect.size.w as i32, calculated_nova_rect.size.h as i32)
+        );
+        tracing::info!("Window placement policy calculated initial geometry: {:?}", initial_smithay_geometry);
+
+        // --- End Window Management Policy Integration ---
+
+        let domain_window_id = DomainWindowIdentifier::new_v4();
         let mut managed_window = ManagedWindow::new_toplevel(surface.clone(), domain_window_id);
         
-        let initial_geometry = managed_window.current_geometry;
+        // Set geometry from policy
+        managed_window.current_geometry = initial_smithay_geometry;
+        {
+            let mut state_guard = managed_window.state.write().unwrap();
+            state_guard.position = initial_smithay_geometry.loc.into();
+            state_guard.size = initial_smithay_geometry.size.into();
+        }
 
         surface.with_pending_state(|xdg_state| {
-            xdg_state.size = Some(initial_geometry.size);
+            xdg_state.size = Some(initial_smithay_geometry.size); // Use the policy-defined size
         });
         let configure_serial = surface.send_configure();
-        managed_window.last_configure_serial = Some(configure_serial); // Set serial before Arc::new
+        managed_window.last_configure_serial = Some(configure_serial);
 
         let window_arc = Arc::new(managed_window);
         self.windows.insert(domain_window_id, window_arc.clone());
 
-        tracing::info!("New XDG Toplevel (domain_id: {:?}, compositor_id: {:?}) created and configured with serial {:?}. Awaiting map.",
+        tracing::info!("New XDG Toplevel (domain_id: {:?}, compositor_id: {:?}) created with policy geometry, configured with serial {:?}. Awaiting map.",
                      domain_window_id, window_arc.id, configure_serial);
     }
 
@@ -535,6 +594,158 @@ impl XdgShellHandler for DesktopState {
             // interactive_ops::start_interactive_resize(self, &smithay_seat, window_arc.clone(), serial, edges);
             tracing::warn!("Interactive resize op (from client request) not fully implemented for window {:?}.", window_arc.id);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*; // Imports items from the parent module (handlers.rs)
+    use crate::compositor::core::state::DesktopState;
+    use crate::compositor::shell::xdg_shell::types::{ManagedWindow, DomainWindowIdentifier, WindowState};
+    use novade_domain::window_management_policy::{WindowManagementPolicyService, WindowPlacementInfo, DefaultWindowManagementPolicyService};
+    use novade_domain::DomainServices; // To mock or use actual
+    use novade_core::types::geometry::{Rect as NovaRect, Point as NovaPoint, Size as NovaSize};
+    use smithay::{
+        reexports::wayland_server::{
+            Client, Display, DisplayHandle, protocol::wl_surface::WlSurface,
+            globals::GlobalData, UserData, backend::{ClientId, GlobalId}
+        },
+        reexports::calloop::EventLoop,
+        wayland::shell::xdg::{ToplevelSurface, XdgShellHandler}, // XdgShellHandler for calling new_toplevel
+        utils::{Point as SmithayPoint, Size as SmithaySize, Rectangle as SmithayRectangle},
+        output::Output as SmithayOutput,
+    };
+    use std::sync::Arc;
+    use std::collections::HashMap;
+    use tokio::runtime::Runtime; // For block_on if needed
+    use async_trait::async_trait; // For async trait in mock
+
+    // Minimal test client data for creating Wayland objects
+    #[derive(Default, Clone)]
+    struct TestClientData { user_data: UserData }
+    impl smithay::reexports::wayland_server::backend::ClientData for TestClientData {
+        fn initialized(&self, _client_id: ClientId) {}
+        fn disconnected(&self, _client_id: ClientId, _reason: smithay::reexports::wayland_server::DisconnectReason) {}
+        fn data_map(&self) -> &UserData { &self.user_data }
+    }
+
+    // Helper to create a DisplayHandle and a Client for tests.
+    // fn create_test_display_and_client(display: &mut Display<DesktopState>) -> (DisplayHandle, Client) {
+    //     let dh = display.handle();
+    //     let client = display.create_client(TestClientData::default());
+    //     (dh, client)
+    // }
+
+    // Helper to create a mock ToplevelSurface
+    fn mock_toplevel_surface_for_test(dh: &DisplayHandle, client: &Client) -> ToplevelSurface {
+        let surface_obj = client.create_object::<WlSurface, _>(dh, 1, GlobalData).unwrap();
+        // Manually attach some data XdgShellState expects, like XdgVersion
+        surface_obj.data_map().insert_if_missing_threadsafe(|| smithay::wayland::shell::xdg::XdgVersion::V6);
+        ToplevelSurface::from_wl_surface(surface_obj, Default::default()).unwrap()
+    }
+
+    // Mock WindowManagementPolicyService
+    struct MockPlacementService {
+        expected_geometry: NovaRect,
+    }
+    #[async_trait] // Mark trait as async
+    impl WindowManagementPolicyService for MockPlacementService {
+        async fn get_initial_window_geometry(
+            &self,
+            _existing_windows: &[WindowPlacementInfo],
+            _client_requested_geometry: Option<NovaRect>,
+            _output_area: NovaRect,
+        ) -> NovaRect {
+            self.expected_geometry.clone()
+        }
+    }
+
+    // Simplified TestDomainServices that only implements what's needed for the test
+    // and uses todo!() for other methods if the DomainServices trait is complex.
+    struct TestDomainServices {
+        policy_service: Arc<dyn WindowManagementPolicyService>,
+        // Add other fields if DomainServices struct has them, and initialize appropriately
+    }
+
+    // This requires knowing the full definition of novade_domain::DomainServices trait
+    // For the purpose of this test, we only care about window_management_policy_service.
+    // If other methods are called by the code under test, they'd need mock implementations.
+    impl novade_domain::DomainServicesInterface for TestDomainServices { // Assuming DomainServices is a trait aliased as DomainServicesInterface or similar
+        fn window_management_policy_service(&self) -> Arc<dyn WindowManagementPolicyService> {
+            self.policy_service.clone()
+        }
+        // Implement other methods from the DomainServices trait with todo!() or default values
+        fn settings_service(&self) -> Arc<dyn novade_domain::global_settings::GlobalSettingsService> {
+            todo!("Mock settings_service if needed by the test path")
+        }
+        fn theming_engine(&self) -> Arc<novade_domain::theming::ThemingEngine> {
+            todo!("Mock theming_engine if needed by the test path")
+        }
+        fn workspace_manager(&self) -> Arc<dyn novade_domain::workspaces::WorkspaceManagerService> {
+            todo!("Mock workspace_manager if needed by the test path")
+        }
+        fn ai_interaction_service(&self) -> Arc<dyn novade_domain::user_centric_services::ai_interaction::AIInteractionLogicService> {
+            todo!("Mock ai_interaction_service if needed by the test path")
+        }
+        fn notification_rules_engine(&self) -> Arc<dyn novade_domain::notifications_rules::NotificationRulesEngine> {
+            todo!("Mock notification_rules_engine if needed by the test path")
+        }
+        fn notification_service(&self) -> Arc<dyn novade_domain::user_centric_services::notifications_core::NotificationService> {
+            todo!("Mock notification_service if needed by the test path")
+        }
+    }
+
+
+    #[test]
+    fn test_new_toplevel_uses_placement_policy() {
+        // 1. Setup: Minimal DesktopState, mock services
+        let mut event_loop: EventLoop<'static, DesktopState> = EventLoop::try_new().unwrap();
+        let mut display: Display<DesktopState> = Display::new().unwrap();
+        let dh = display.handle();
+
+        let mut test_state = DesktopState::new(event_loop.handle(), dh.clone());
+
+        let expected_pos_f64 = NovaPoint::new(100.0, 150.0); // Use f64 for domain types
+        let expected_size_f64 = NovaSize::new(700.0, 500.0);
+        let mock_policy_service = Arc::new(MockPlacementService {
+            expected_geometry: NovaRect::new(expected_pos_f64.clone(), expected_size_f64.clone())
+        });
+
+        test_state.domain_services = Some(Arc::new(TestDomainServices { policy_service: mock_policy_service }));
+
+        let output_physical_props = smithay::output::PhysicalProperties { size: (0,0).into(), subpixel: smithay::backend::drm::common::Subpixel::Unknown, make: "Test".into(), model: "Test".into() };
+        let output = SmithayOutput::new("test-output".to_string(), output_physical_props, None);
+        let output_mode = smithay::output::Mode { size: (1920, 1080).into(), refresh: 60000 };
+        output.change_current_state(Some(output_mode), None, None, None);
+        test_state.space.map_output(&output, SmithayPoint::from((0,0)));
+        test_state.outputs.push(output);
+
+        let (_client_dh, client) = display.create_client(TestClientData::default()); // Use the same display
+        let toplevel_surface = mock_toplevel_surface_for_test(&dh, &client);
+
+        let rt = Runtime::new().unwrap();
+        // new_toplevel is not async, but it calls an async block_on internally.
+        // We call it directly.
+        XdgShellHandler::new_toplevel(&mut test_state, toplevel_surface.clone());
+
+
+        let created_window_arc = test_state.windows.values().next().expect("Window should have been created");
+
+        // Assert geometry from policy (converted to i32 for Smithay)
+        assert_eq!(created_window_arc.current_geometry.loc, SmithayPoint::from((expected_pos_f64.x as i32, expected_pos_f64.y as i32)));
+        assert_eq!(created_window_arc.current_geometry.size, SmithaySize::from((expected_size_f64.w as i32, expected_size_f64.h as i32)));
+
+        let window_state_guard = created_window_arc.state.read().unwrap();
+        assert_eq!(window_state_guard.position, SmithayPoint::from((expected_pos_f64.x as i32, expected_pos_f64.y as i32)));
+        assert_eq!(window_state_guard.size, SmithaySize::from((expected_size_f64.w as i32, expected_size_f64.h as i32)));
+
+        // To check configured size on surface:
+        // This is tricky without a client acking. The size is set in pending_state.
+        // We can check if ToplevelSurface has a method to get its current or pending state directly.
+        // For example, if ToplevelSurface itself stores the pending state:
+        let pending_state = toplevel_surface.current_state(); // Or a method to get pending state if available
+        assert_eq!(pending_state.size, Some(SmithaySize::from((expected_size_f64.w as i32, expected_size_f64.h as i32))));
+
     }
 }
 

@@ -7,6 +7,21 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use crate::compositor::surface_management::SurfaceData; // Your existing SurfaceData
 use std::sync::{Arc, Mutex};
 use smithay::wayland::foreign_toplevel::{ForeignToplevelHandler, ForeignToplevelManagerState};
+use crate::compositor::shell::xdg_shell::types::WindowState; // Path to your WindowState
+use smithay::wayland::shell::xdg::ToplevelState as SmithayXdgToplevelState; // Alias for clarity
+
+// Helper function to convert ManagedWindow's state to Smithay's XDG ToplevelState
+fn managed_state_to_xdg_toplevel_state(win_state: &WindowState) -> SmithayXdgToplevelState {
+    let mut xdg_state = SmithayXdgToplevelState::empty();
+    if win_state.maximized { xdg_state.set(SmithayXdgToplevelState::MAXIMIZED, true); }
+    if win_state.fullscreen { xdg_state.set(SmithayXdgToplevelState::FULLSCREEN, true); }
+    // Note: Minimized is not an XDG ToplevelState bit. Typically, minimized windows are unmapped.
+    // The wlr-foreign-toplevel protocol uses its own set of states, which Smithay maps from XDG states.
+    // ACTIVATED is a key state for foreign toplevel.
+    if win_state.activated { xdg_state.set(SmithayXdgToplevelState::ACTIVATED, true); }
+    // Other states like RESIZING, SUSPENDED could be mapped if relevant
+    xdg_state
+}
 
 impl OutputHandler for DesktopState {
     fn output_state(&mut self) -> &mut OutputManagerState {
@@ -54,17 +69,59 @@ impl SeatHandler for DesktopState {
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
-        // This callback is primarily for keyboard focus changes.
-        // Smithay's SeatState manages the actual focus state. This is a notification.
         tracing::info!(
             seat_name = %seat.name(),
             new_focus_surface_id = ?focused.map(WlSurface::id),
             "Keyboard focus changed (SeatHandler::focus_changed)"
         );
+
+        // Handle previously focused window
+        if let Some(old_focused_weak) = self.active_input_surface.take() {
+            if let Some(old_focused_surface) = old_focused_weak.upgrade() {
+                if Some(&old_focused_surface) != focused { // Check if it's different from the new focus
+                    // Find the ManagedWindow associated with the old focused surface
+                    if let Some(window_arc) = self.windows.values().find(|w| w.wl_surface().as_ref() == Some(&old_focused_surface)).cloned() {
+                        let mut win_state_guard = window_arc.state.write().unwrap();
+                        win_state_guard.activated = false;
+                        let xdg_state = managed_state_to_xdg_toplevel_state(&win_state_guard);
+                        drop(win_state_guard); // Release lock before calling foreign_toplevel_state
+                        self.foreign_toplevel_state.update_state(&window_arc, xdg_state);
+                        tracing::debug!("Notified foreign_toplevel_manager about DEactivation for {:?}", window_arc.id);
+                    }
+                }
+            }
+        }
+
+        // Handle newly focused window
+        if let Some(new_focused_surface) = focused {
+            // Find the ManagedWindow associated with the new focused surface
+            if let Some(window_arc) = self.windows.values().find(|w| w.wl_surface().as_ref() == Some(new_focused_surface)).cloned() {
+                let mut win_state_guard = window_arc.state.write().unwrap();
+                win_state_guard.activated = true;
+                let xdg_state = managed_state_to_xdg_toplevel_state(&win_state_guard);
+                drop(win_state_guard); // Release lock
+                self.foreign_toplevel_state.update_state(&window_arc, xdg_state);
+                tracing::debug!("Notified foreign_toplevel_manager about ACTIVATION for {:?}", window_arc.id);
+            }
+            self.active_input_surface = Some(new_focused_surface.downgrade()); // Update active_input_surface
+        } else {
+            self.active_input_surface = None; // Clear if focus is lost entirely
+        }
+
+        // Original TODOs and domain layer notifications can remain or be integrated as needed.
         // TODO: Update internal compositor state if needed based on focus change.
         // For example, signal the previously focused window it lost focus,
         // and the newly focused window it gained focus (e.g., for drawing active decorations).
         // This might involve calling methods on ManagedWindow or sending domain events.
+        if let Some(surface) = focused {
+            let surface_id_for_log = surface.id();
+            tracing::info!(
+                "Domain layer would be notified: Keyboard focus changed to surface_id: {:?}",
+                surface_id_for_log
+            );
+        } else {
+            tracing::info!("Domain layer would be notified: Keyboard focus lost (cleared)");
+        }
     }
 
     fn cursor_image(&mut self, seat: &Seat<Self>, image: CursorImageStatus) {

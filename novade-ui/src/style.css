@@ -15,6 +15,56 @@ label {
     padding: 10px;
 }
 
+/* Workspace Switcher Styles */
+.workspace-switcher-container {
+    /* Add any container specific styles if needed */
+}
+
+.workspace-button {
+    padding: 2px 6px;
+    /* Add default button styling for workspaces */
+    background-color: alpha(@theme_bg_color, 0.7); /* Slightly transparent background */
+    color: @theme_fg_color;
+    border: 1px solid alpha(@theme_fg_color, 0.3);
+    border-radius: 4px;
+    margin: 2px;
+}
+
+.workspace-button.active-workspace {
+    background-color: @theme_selected_bg_color; /* Use Adwaita's selected background color */
+    color: @theme_selected_fg_color; /* Use Adwaita's selected foreground color */
+    border: 1px solid @theme_accent_color; /* Use accent color for border of active */
+    font-weight: bold;
+}
+
+/* Taskbar specific styles */
+.taskbar {
+    background-color: alpha(black, 0.3); /* Semi-transparent black background */
+    padding: 4px;
+    border-radius: 6px; /* Slightly rounded corners for the taskbar itself */
+}
+
+.taskbar-button {
+    /* Styles for buttons representing open applications */
+    background-color: alpha(@theme_button_bg_color, 0.8);
+    color: @theme_button_fg_color;
+    border: 1px solid alpha(@theme_button_fg_color, 0.2);
+    border-radius: 4px;
+    padding: 4px 8px;
+    margin: 0 2px; /* Spacing between taskbar buttons */
+}
+
+.taskbar-button:hover {
+    background-color: alpha(@theme_hovering_bg_color, 0.9);
+}
+
+.taskbar-clock {
+    font-weight: bold;
+    color: @theme_fg_color; /* Ensure clock text is visible */
+    margin-left: 10px;
+    margin-right: 5px;
+}
+
 .sidebar-box {
     background-color: #283747; /* Even darker blue for sidebar */
     border-radius: 5px;

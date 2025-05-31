@@ -24,6 +24,8 @@ use crate::compositor::{
 };
 use crate::renderer::wgpu_renderer::NovaWgpuRenderer; // Added NovaWgpuRenderer
 use super::CompositorBackend; // Super refers to novade-system/src/compositor/backend/mod.rs
+use smithay::output::{Output as SmithayOutput, PhysicalProperties, Scale, Mode};
+use smithay::utils::Transform;
 
 pub struct WinitBackend {
     event_loop_handle: LoopHandle<'static, DesktopState>,
@@ -67,6 +69,32 @@ impl CompositorBackend for WinitBackend {
         desktop_state.wgpu_renderer_concrete = Some(renderer_arc); // Store concrete type for commit path
         desktop_state.active_renderer_type = ActiveRendererType::Wgpu;
         tracing::info!("NovaWgpuRenderer initialized and stored in DesktopState.");
+
+        // Create Smithay Output for the Winit window
+        let physical_properties = PhysicalProperties {
+            size: (500, 300).into(), // Example physical size in mm
+            subpixel: smithay::backend::drm::common::Subpixel::Unknown,
+            make: "NovaDE".into(),
+            model: "Winit Output".into(),
+        };
+        let winit_output = SmithayOutput::new(
+            "winit-0".to_string(),
+            physical_properties,
+            Some(desktop_state.loop_handle.clone())
+        );
+
+        let initial_window_size_logical: smithay::utils::Size<i32, smithay::utils::Logical> =
+            (initial_size_physical.width as i32, initial_size_physical.height as i32).into();
+        let mode = Mode {
+            size: initial_window_size_logical,
+            refresh: 60_000,
+        };
+        winit_output.change_current_state(Some(mode), Some(Transform::Normal), Some(Scale::Integer(1)), None);
+
+        // Create the wl_output global. This will call OutputHandler::new_output for DesktopState.
+        // DesktopState's OutputHandler::new_output should then add it to desktop_state.outputs and map it to space.
+        winit_output.create_global::<DesktopState>(&display_handle);
+        tracing::info!("Winit output 'winit-0' Smithay object created and global initialized. OutputHandler should map it.");
 
         Ok(WinitBackend {
             event_loop_handle,

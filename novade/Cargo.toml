@@ -12,3 +12,8 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1.0"
+
+[dev-dependencies]
+anyhow = "1.0" # For Result in tests
+tracing = "0.1" # For logging within tests
+tracing-subscriber = { version = "0.3", features = ["fmt", "test-writer"] } # For test output
