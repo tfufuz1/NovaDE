@@ -1,0 +1,14 @@
+[package]
+name = "novade-compositor-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+novade-buffer-manager = { path = "../novade-buffer-manager" }
+
+# Add other dependencies as needed, e.g. wayland-server
+# For example:
+# wayland-server = "0.30"
+# slog = "2.7"
+# slog-term = "2.9"
+# slog-async = "2.7"
