@@ -8,4 +8,5 @@ pub mod shm;
 pub mod surface_management;
 pub mod wayland_server;
 pub mod shell; // Changed from xdg_shell
+pub mod xdg_shell; // Added for XDG specific shell logic
 pub mod nova_compositor_logic;

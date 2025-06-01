@@ -182,6 +182,9 @@ impl Surface {
         } else { self.committed_damage.clear(); }
 
         if let Some(pending_parent_action) = self.pending_parent.take() {
+            // This updates the surface's own view of its parent.
+            // The SurfaceRegistry::commit_surface_hierarchy() call will later update
+            // the parent's subsurfaces list based on this committed state.
             self.parent = pending_parent_action;
         }
         if let Some(pending_z) = self.pending_z_order.take() { self.z_order = pending_z; }
