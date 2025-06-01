@@ -9,3 +9,5 @@ pub mod surface_management;
 pub mod wayland_server;
 pub mod shell; // Changed from xdg_shell
 pub mod nova_compositor_logic;
+pub mod composition_engine;
+pub mod scene_graph;

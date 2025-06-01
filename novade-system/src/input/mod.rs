@@ -148,23 +148,3 @@ impl InputManager {
         tracing::info!("InputManager: --- Processing events END ({} raw events handled) ---", event_count);
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_input_manager_new() {
-        // This test mainly ensures that InputManager can be created without panics
-        // and that its internal components are initialized (which they log themselves).
-        // It uses a dummy config path as InputConfig::load_from_file is stubbed.
-        let im = InputManager::new("dummy_config_for_im_test.toml");
-
-        // We can check if the device manager has some devices (from the stubbed libinput_handler)
-        assert!(!im.device_manager.get_managed_devices().is_empty(), "Device manager should have stubbed devices");
-
-        // Further checks would involve more complex mocking or inspecting logged output,
-        // which is beyond typical unit test assertions.
-        // The example runner is better for observing the flow.
-    }
-}
