@@ -12,3 +12,8 @@ wayland-server = "0.31.0"
 wayland-protocols = "0.31.0"
 smithay = "0.6.0"
 zbus = "3"
+novade-compositor-core = { path = "../novade-compositor-core" }
+ash = { version = "0.37" } # Ensure relevant features if ash itself provides them, though ash-window is typical
+ash-window = "0.10"
+gpu-allocator = { version = "0.22", features = ["ash"] }
+raw-window-handle = "0.5"
