@@ -166,3 +166,101 @@ impl Keyboard {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::config::KeyboardConfig;
+    use crate::input::focus::ProcessedKeyEvent; // For type matching
+
+    #[test]
+    fn test_keyboard_new() {
+        let kb_config = KeyboardConfig { repeat_rate: Some(30), repeat_delay: Some(500) };
+        let keyboard = Keyboard::new(Some(kb_config));
+        assert!(keyboard.pressed_keys.is_empty());
+        assert_eq!(keyboard.modifier_state, ModifiersState::default());
+        assert!(keyboard.xkb_keymap.is_some()); // StubXkbKeymap::new returns Some
+        assert!(keyboard.xkb_state.is_some());  // StubXkbState::new returns Some
+        assert_eq!(keyboard.repeat_config.as_ref().unwrap().repeat_rate, Some(30));
+    }
+
+    #[test]
+    fn test_handle_key_event_press_release() {
+        let mut keyboard = Keyboard::new(None);
+        let keycode_a = 30; // Example keycode
+        let time = 1000;
+
+        // Press event
+        let event_opt = keyboard.handle_key_event(keycode_a, KeyState::Pressed, time);
+        assert!(event_opt.is_some());
+        let processed_event = event_opt.unwrap();
+
+        assert!(keyboard.pressed_keys.contains(&keycode_a));
+        assert_eq!(processed_event.raw_keycode, keycode_a);
+        assert_eq!(processed_event.state, KeyState::Pressed);
+        assert_eq!(processed_event.keysym, keycode_a + 1000); // StubXkbState logic
+
+        // Release event
+        let event_opt_rel = keyboard.handle_key_event(keycode_a, KeyState::Released, time + 10);
+        assert!(event_opt_rel.is_some());
+        let processed_event_rel = event_opt_rel.unwrap();
+
+        assert!(!keyboard.pressed_keys.contains(&keycode_a));
+        assert_eq!(processed_event_rel.state, KeyState::Released);
+    }
+
+    #[test]
+    fn test_modifier_state_update_on_key_event() {
+        // This test is limited because StubXkbState.serialize_mods always returns (0,0,0,0)
+        // and StubXkbState.update_key is a no-op regarding actual modifier calculation.
+        // A real test would need a mockable XKB state or more complex stubs.
+        let mut keyboard = Keyboard::new(None);
+        let keycode_shift = 42; // Example shift keycode
+
+        // Simulate Shift press - this should internally call update_modifier_state
+        keyboard.handle_key_event(keycode_shift, KeyState::Pressed, 100);
+
+        // In our current stub, serialize_mods() always returns default.
+        // So, this test mainly verifies that update_modifier_state is called and doesn't panic.
+        // The returned ModifiersState from update_modifier_state() will be the default.
+        let mod_state_opt = keyboard.update_modifier_state();
+        // If it was already default and no actual change happened in stub, it returns None
+        // If it was different and changed to default, it returns Some(default)
+        // Our initial state is default, stub always returns default, so expect None (no change from default)
+        // OR, if we want to ensure it *became* default:
+        if mod_state_opt.is_some() { // if it did change
+             assert_eq!(mod_state_opt.unwrap(), ModifiersState::default());
+        } else { // if it didn't change from initial default
+             assert_eq!(keyboard.modifier_state, ModifiersState::default());
+        }
+
+
+        // The ProcessedKeyEvent from handle_key_event would contain the modifier state
+        let event_opt = keyboard.handle_key_event(keycode_shift, KeyState::Pressed, 100);
+        let processed_event = event_opt.unwrap();
+        // This reflects the state *after* the key press, based on stubbed serialize_mods
+        assert_eq!(processed_event.modifiers, ModifiersState { depressed: 0, latched: 0, locked: 0, group: 0 });
+    }
+
+    #[test]
+    fn test_key_repeat_logic_conceptual() {
+        let kb_config = KeyboardConfig { repeat_rate: Some(25), repeat_delay: Some(600) };
+        let mut keyboard = Keyboard::new(Some(kb_config));
+        let keycode = 30;
+
+        assert!(keyboard.repeating_key.is_none());
+        keyboard.handle_key_event(keycode, KeyState::Pressed, 100);
+        assert_eq!(keyboard.repeating_key, Some(keycode));
+
+        // Press another key - repeat should switch
+        keyboard.handle_key_event(31, KeyState::Pressed, 110);
+        assert_eq!(keyboard.repeating_key, Some(31));
+
+        keyboard.handle_key_event(31, KeyState::Released, 120);
+        assert!(keyboard.repeating_key.is_none());
+
+        // Release a non-repeating key
+        keyboard.handle_key_event(keycode, KeyState::Released, 130); // keycode was not the one repeating
+        assert!(keyboard.repeating_key.is_none()); // Should still be none
+    }
+}

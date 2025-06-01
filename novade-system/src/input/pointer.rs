@@ -126,3 +126,141 @@ impl Pointer {
     // TODO: Implement Pointer Constraints
     // TODO: Implement more sophisticated Pointer Acceleration Curves
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::config::PointerConfig;
+    use std::collections::HashMap;
+
+    fn default_pointer_config() -> PointerConfig {
+        PointerConfig {
+            acceleration_factor: Some(0.0), // No accel by default for simple tests
+            sensitivity: Some(1.0),
+            acceleration_curve: None,
+            button_mapping: None,
+        }
+    }
+
+    #[test]
+    fn test_pointer_new() {
+        let pointer = Pointer::new(default_pointer_config());
+        assert_eq!(pointer.x, 0.0);
+        assert_eq!(pointer.y, 0.0);
+        assert_eq!(pointer.config.sensitivity, Some(1.0));
+    }
+
+    #[test]
+    fn test_handle_motion_event_no_accel_no_sens() {
+        let mut cfg = default_pointer_config();
+        cfg.sensitivity = Some(1.0); // Ensure it's exactly 1.0
+        cfg.acceleration_factor = Some(0.0); // Ensure no accel
+        let mut pointer = Pointer::new(cfg);
+
+        let event = pointer.handle_motion_event(10.0, -5.0, 100).unwrap();
+        assert_eq!(pointer.x, 10.0);
+        assert_eq!(pointer.y, -5.0);
+        assert_eq!(event.abs_x, 10.0);
+        assert_eq!(event.abs_y, -5.0);
+        assert_eq!(event.rel_dx, 10.0);
+        assert_eq!(event.rel_dy, -5.0);
+    }
+
+    #[test]
+    fn test_handle_motion_event_with_sensitivity() {
+        let mut cfg = default_pointer_config();
+        cfg.sensitivity = Some(2.0);
+        let mut pointer = Pointer::new(cfg);
+
+        let event = pointer.handle_motion_event(10.0, -5.0, 100).unwrap();
+        assert_eq!(pointer.x, 20.0); // 10.0 * 2.0
+        assert_eq!(pointer.y, -10.0); // -5.0 * 2.0
+        assert_eq!(event.rel_dx, 20.0);
+        assert_eq!(event.rel_dy, -10.0);
+    }
+
+    #[test]
+    fn test_handle_motion_event_with_linear_acceleration() {
+        let mut cfg = default_pointer_config();
+        cfg.sensitivity = Some(1.0);
+        cfg.acceleration_factor = Some(0.1); // Simple factor
+        let mut pointer = Pointer::new(cfg);
+
+        // dx=3, dy=4, velocity (hypotenuse) = 5
+        // accel = 1.0 + (5.0 * 0.1) = 1.5
+        // final_dx = 3.0 * 1.5 = 4.5
+        // final_dy = 4.0 * 1.5 = 6.0
+        let event = pointer.handle_motion_event(3.0, 4.0, 100).unwrap();
+        assert_eq!(pointer.x, 4.5);
+        assert_eq!(pointer.y, 6.0);
+        assert_eq!(event.rel_dx, 4.5);
+        assert_eq!(event.rel_dy, 6.0);
+    }
+
+    #[test]
+    fn test_handle_motion_event_no_movement_no_accel_change() {
+        let mut cfg = default_pointer_config();
+        cfg.acceleration_factor = Some(0.5); // Non-zero accel factor
+        let mut pointer = Pointer::new(cfg);
+        let event = pointer.handle_motion_event(0.0, 0.0, 100).unwrap();
+        assert_eq!(pointer.x, 0.0);
+        assert_eq!(pointer.y, 0.0);
+        assert_eq!(event.rel_dx, 0.0);
+        assert_eq!(event.rel_dy, 0.0);
+    }
+
+    #[test]
+    fn test_handle_button_event_no_mapping() {
+        let pointer = Pointer::new(default_pointer_config());
+        let event = pointer.handle_button_event(1, ButtonState::Pressed, 100).unwrap();
+        assert_eq!(event.button_code, 1);
+        assert_eq!(event.state, ButtonState::Pressed);
+        assert_eq!(event.abs_x, 0.0); // Pointer hasn't moved
+    }
+
+    #[test]
+    fn test_handle_button_event_with_mapping() {
+        let mut cfg = default_pointer_config();
+        let mut mapping = HashMap::new();
+        mapping.insert(1, 272); // Map button 1 (e.g. left) to BTN_LEFT (Linux evdev code)
+        mapping.insert(3, 273); // Map button 3 (e.g. right) to BTN_RIGHT
+        cfg.button_mapping = Some(mapping);
+        let pointer = Pointer::new(cfg);
+
+        let event1 = pointer.handle_button_event(1, ButtonState::Pressed, 100).unwrap();
+        assert_eq!(event1.button_code, 272);
+
+        let event2 = pointer.handle_button_event(3, ButtonState::Released, 101).unwrap();
+        assert_eq!(event2.button_code, 273);
+
+        let event_unmapped = pointer.handle_button_event(2, ButtonState::Pressed, 102).unwrap();
+        assert_eq!(event_unmapped.button_code, 2); // Unmapped, so raw code
+    }
+
+    #[test]
+    fn test_handle_scroll_event_discrete() {
+        let mut pointer = Pointer::new(default_pointer_config());
+        let event = pointer.handle_scroll_event(1.0, -1.0, 0.0, 0.0, ScrollSource::Wheel, 100).unwrap();
+        assert_eq!(event.delta_x, 1.0);
+        assert_eq!(event.delta_y, -1.0);
+        assert_eq!(event.source, ScrollSource::Wheel);
+    }
+
+    #[test]
+    fn test_handle_scroll_event_continuous_priority() {
+        let mut pointer = Pointer::new(default_pointer_config());
+        // Provide both discrete and continuous, continuous should be used
+        let event = pointer.handle_scroll_event(1.0, -1.0, 0.5, -0.7, ScrollSource::Finger, 100).unwrap();
+        assert_eq!(event.delta_x, 0.5);
+        assert_eq!(event.delta_y, -0.7);
+        assert_eq!(event.source, ScrollSource::Finger);
+    }
+     #[test]
+    fn test_handle_scroll_event_continuous_only() {
+        let mut pointer = Pointer::new(default_pointer_config());
+        let event = pointer.handle_scroll_event(0.0, 0.0, 0.25, -0.35, ScrollSource::Continuous, 100).unwrap();
+        assert_eq!(event.delta_x, 0.25);
+        assert_eq!(event.delta_y, -0.35);
+        assert_eq!(event.source, ScrollSource::Continuous);
+    }
+}
