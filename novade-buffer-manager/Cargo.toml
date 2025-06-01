@@ -1,0 +1,7 @@
+[package]
+name = "novade-buffer-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# No dependencies needed for now, but can be added later (e.g. for wayland-server)
