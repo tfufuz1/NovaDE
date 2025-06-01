@@ -1,11 +1,12 @@
 [workspace]
 resolver = "2" # Enable new feature resolver
 members = [
-    "novade-core",
-    "novade-domain",
-    "novade-system",
-    "novade-ui",
+    # "novade-core", # Temporarily commented out to resolve dependency issues
+    # "novade-domain", # Temporarily commented out
+    # "novade-system", # Temporarily commented out
+    # "novade-ui", # Temporarily commented out
     # nova_compositor will be merged into novade-system
+    "novade-vulkan-renderer",
 ]
 
 [workspace.package]

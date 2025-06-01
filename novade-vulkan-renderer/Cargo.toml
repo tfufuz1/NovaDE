@@ -1,0 +1,21 @@
+[package]
+name = "novade-vulkan-renderer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ash = "0.37.3"
+smithay-client-toolkit = { version = "0.18.0", optional = true } # Or the version used in novade-system for wayland integration
+wayland-client = { version = "0.31.1", optional = true } # Or the version used in novade-system
+wayland-sys = { version = "0.31.1", optional = true } # Added for wl_display
+tracing = "0.1.40"
+thiserror = "1.0.50"
+anyhow = "1.0.75"
+# Add other common dependencies like smallvec, bitflags, once_cell if they become necessary.
+
+[features]
+default = ["wayland"]
+wayland = ["dep:smithay-client-toolkit", "dep:wayland-client", "dep:wayland-sys"]
+
+[dev-dependencies]
+tracing-subscriber = "0.3" # Or a version compatible with 'tracing = "0.1.40"'
