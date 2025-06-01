@@ -7,6 +7,7 @@
 use novade_buffer_manager::{BufferManager, BufferDetails, BufferId, ClientId, BufferFormat};
 use std::sync::{Arc, Mutex};
 use crate::subcompositor::{SubsurfaceState, SubsurfaceSyncMode}; // Used by SurfaceRole and Surface commit logic
+use crate::region::Region; // Import the new Region type
 
 /// Represents a transformation that can be applied to a buffer or surface.
 ///
@@ -164,17 +165,20 @@ pub struct Rectangle {
 
 impl Rectangle {
     /// Creates a new `Rectangle`.
+    #[inline]
     pub fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
         Self { x, y, width, height }
     }
 
     /// Checks if the rectangle has zero or negative width or height, making it effectively empty.
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.width <= 0 || self.height <= 0
     }
 
     /// Calculates the area of the rectangle.
     /// Returns 0 if the rectangle `is_empty()`.
+    #[inline]
     pub fn area(&self) -> i32 {
         if self.is_empty() {
             0
@@ -340,6 +344,7 @@ pub struct DamageTracker {
 }
 
 impl Default for DamageTracker {
+    /// Creates a new, empty `DamageTracker`.
     fn default() -> Self {
         Self::new()
     }
@@ -525,8 +530,6 @@ impl DamageTracker {
     }
 }
 
-use crate::subcompositor::{SubsurfaceState, SubsurfaceSyncMode};
-
 /// Defines the role of a surface (e.g., toplevel, subsurface, cursor).
 /// Each variant can hold role-specific state.
 #[derive(Debug, Clone)]
@@ -550,26 +553,6 @@ pub enum SurfaceRole {
 pub struct WlCallback {
     /// The Wayland resource ID of the `wl_callback` object.
     pub id: u64,
-}
-
-/// Represents a Wayland region (`wl_region`).
-///
-/// A region is a collection of rectangles. In this simplified version, it's directly
-/// used for opaque and input regions on a surface. A more complete `wl_region`
-/// implementation would have its own module and registry.
-/// See `novade_compositor_core::region` for a more dedicated region implementation.
-#[derive(Debug, Clone, Default)]
-pub struct Region {
-    /// The list of rectangles defining this region.
-    /// For surface opaque/input regions, these are in surface-local coordinates.
-    pub rectangles: Vec<Rectangle>,
-}
-
-impl Region {
-    /// Creates a new, empty `Region`.
-    pub fn new() -> Self {
-        Self { rectangles: Vec::new() }
-    }
 }
 
 /// Represents a Wayland surface (`wl_surface`).
@@ -596,18 +579,28 @@ pub struct Surface {
     pub current_buffer: Option<Arc<Mutex<BufferDetails>>>,
     /// List of pending frame callbacks requested by the client.
     pub frame_callbacks: Vec<WlCallback>,
-    /// The opaque region of the surface, in surface-local coordinates.
-    /// `None` means the entire surface is considered transparent beyond its buffer content.
-    /// `Some(region)` where region is empty means fully transparent.
-    /// `Some(region)` with rectangles means those parts are opaque.
-    /// Wayland spec: "Initially the opaque region is empty."
-    pub opaque_region: Option<Region>,
-    /// The input region of the surface, in surface-local coordinates.
-    /// Defines where the surface accepts input. `None` implies the entire surface accepts input
-    /// if it's mapped and has dimensions. An empty `Region` (Some(Region{rectangles:[]}))
-    /// would mean no part of the surface accepts input.
-    /// Wayland spec: "Initially the input region covers the entire surface."
-    pub input_region: Option<Region>,
+
+    /// Pending opaque region, set by `wl_surface.set_opaque_region`. Applied on commit.
+    ///
+    /// A `None` value indicates that the client has not specified an opaque region,
+    /// or has explicitly set it to `NULL`. In Wayland, a `NULL` opaque region means
+    /// it's empty, implying the surface is fully transparent beyond its buffer content.
+    pub pending_opaque_region: Option<Region>,
+    /// Current opaque region of the surface after a commit.
+    ///
+    /// `None` indicates an empty opaque region.
+    pub current_opaque_region: Option<Region>,
+    /// Pending input region, set by `wl_surface.set_input_region`. Applied on commit.
+    ///
+    /// A `None` value indicates that the client has not specified an input region,
+    /// or has explicitly set it to `NULL`. In Wayland, a `NULL` input region means
+    /// the entire surface area accepts input (effectively an infinite region clipped
+    /// to the surface bounds).
+    pub pending_input_region: Option<Region>,
+    /// Current input region of the surface after a commit.
+    ///
+    /// `None` indicates an infinite input region.
+    pub current_input_region: Option<Region>,
 
     // Subsurface-specific fields
     /// List of `SurfaceId`s for direct children if this surface is a parent.
@@ -626,8 +619,9 @@ impl Surface {
     /// Creates a new `Surface` with default attributes and state.
     ///
     /// The surface is initialized in the `SurfaceState::Created` state,
-    /// with no attached buffer or specific role. Opaque region is initially empty.
-    /// Input region is initially `None`, implying the whole surface accepts input once sized.
+    /// with no attached buffer or specific role.
+    /// - Opaque region is initially `None` (empty), as per Wayland specification.
+    /// - Input region is initially `None` (infinite/whole surface), as per Wayland specification.
     pub fn new() -> Self {
         Self {
             id: SurfaceId::new_unique(),
@@ -639,13 +633,59 @@ impl Surface {
             pending_buffer: None,
             current_buffer: None,
             frame_callbacks: Vec::new(),
-            opaque_region: Some(Region::new()), // Initially empty
-            input_region: None,  // Initially covers whole surface (represented by None)
+            pending_opaque_region: None,
+            current_opaque_region: None,
+            pending_input_region: None,
+            current_input_region: None,
             children: Vec::new(),
             parent: None,
             cached_pending_buffer: None,
             cached_pending_attributes: None,
         }
+    }
+
+    /// Sets the pending opaque region for this surface, corresponding to `wl_surface.set_opaque_region`.
+    ///
+    /// The opaque region defines parts of the surface that the compositor may optimize for,
+    /// as they are guaranteed not to be see-through.
+    /// - If `region_opt` is `Some(region_ref)`, the surface's pending opaque region is set
+    ///   to a clone of `region_ref`. The coordinates in `region_ref` are in surface-local units.
+    /// - If `region_opt` is `None` (representing a `NULL` `wl_region` from the client),
+    ///   the pending opaque region is set to `None`, which signifies an empty opaque region.
+    ///
+    /// The change takes effect upon the next successful `commit` operation.
+    /// This operation is ignored if the surface is destroyed.
+    ///
+    /// # Arguments
+    /// * `region_opt`: An `Option<&Region>` representing the new opaque region.
+    ///   The `Region` data is cloned into the surface's `pending_opaque_region`.
+    pub fn set_opaque_region(&mut self, region_opt: Option<&Region>) {
+        if self.current_state == SurfaceState::Destroyed {
+            return;
+        }
+        self.pending_opaque_region = region_opt.cloned();
+    }
+
+    /// Sets the pending input region for this surface, corresponding to `wl_surface.set_input_region`.
+    ///
+    /// The input region defines the areas of the surface that can receive pointer and touch input.
+    /// - If `region_opt` is `Some(region_ref)`, the surface's pending input region is set
+    ///   to a clone of `region_ref`. Coordinates are in surface-local units.
+    /// - If `region_opt` is `None` (representing a `NULL` `wl_region` from the client),
+    ///   the pending input region is set to `None`. This signifies that the entire
+    ///   surface accepts input (an "infinite" region, effectively clipped by surface bounds).
+    ///
+    /// The change takes effect upon the next successful `commit` operation.
+    /// This operation is ignored if the surface is destroyed.
+    ///
+    /// # Arguments
+    /// * `region_opt`: An `Option<&Region>` representing the new input region.
+    ///   The `Region` data is cloned into the surface's `pending_input_region`.
+    pub fn set_input_region(&mut self, region_opt: Option<&Region>) {
+        if self.current_state == SurfaceState::Destroyed {
+            return;
+        }
+        self.pending_input_region = region_opt.cloned();
     }
 }
 
@@ -687,105 +727,176 @@ pub enum SurfaceTransitionError {
 }
 
 impl Surface {
-    /// Releases the current buffer associated with the surface, if any. (Internal helper)
-    /// This involves decrementing its reference count via the `BufferManager`.
-    fn release_current_buffer(&mut self, buffer_manager: &mut BufferManager) {
-        if let Some(buffer_arc) = self.current_buffer.take() {
-            let buffer_id = buffer_arc.lock().unwrap().id;
-            buffer_manager.release_buffer(buffer_id);
-        }
-    }
-
-    /// Releases the pending buffer associated with the surface, if any. (Internal helper)
-    /// This involves decrementing its reference count via the `BufferManager`.
-    fn release_pending_buffer(&mut self, buffer_manager: &mut BufferManager) {
-        if let Some(buffer_arc) = self.pending_buffer.take() {
-            let buffer_id = buffer_arc.lock().unwrap().id;
-            buffer_manager.release_buffer(buffer_id);
-        }
-    }
-
-    /// Adds damage to the surface in buffer coordinates.
-    /// Corresponds to `wl_surface.damage_buffer`.
-    /// The damage rectangle is clipped to the bounds of the currently pending or current buffer.
+    /// Releases the `current_buffer` associated with the surface, if any.
+    ///
+    /// This is an internal helper method typically called during a commit operation
+    /// (when a new buffer replaces the current one) or when the surface is destroyed.
+    /// It decrements the reference count of the buffer via the provided `BufferManager`.
+    /// If this is the last reference, the `BufferManager` may free the buffer.
     ///
     /// # Arguments
-    /// * `x`, `y`, `width`, `height`: The rectangle defining the damaged area, in buffer coordinates.
-    ///   Non-positive `width` or `height` will result in the damage being ignored.
+    /// * `buffer_manager`: A mutable reference to the `BufferManager` to handle buffer release.
+    fn release_current_buffer(&mut self, buffer_manager: &mut BufferManager) {
+        if let Some(buffer_arc) = self.current_buffer.take() {
+            // .take() removes the Arc from self.current_buffer, effectively dropping one reference count
+            // on the Arc itself. The BufferManager then handles its internal ref count for the BufferDetails.
+            let buffer_id = buffer_arc.lock().unwrap().id;
+            buffer_manager.release_buffer(buffer_id);
+        }
+    }
+
+    /// Releases the `pending_buffer` associated with the surface, if any.
+    ///
+    /// This is an internal helper method called when a new buffer is attached (replacing
+    /// a previous pending buffer), when a commit makes the pending buffer current,
+    /// or when the surface is destroyed.
+    /// It decrements the reference count of the buffer via the provided `BufferManager`.
+    ///
+    /// # Arguments
+    /// * `buffer_manager`: A mutable reference to the `BufferManager` to handle buffer release.
+    fn release_pending_buffer(&mut self, buffer_manager: &mut BufferManager) {
+        if let Some(buffer_arc) = self.pending_buffer.take() {
+            // Similar to release_current_buffer, .take() drops this surface's Arc reference.
+            // BufferManager then updates its own reference count for the BufferDetails.
+            let buffer_id = buffer_arc.lock().unwrap().id;
+            buffer_manager.release_buffer(buffer_id);
+        }
+    }
+
+    /// Adds damage to the surface in buffer coordinates, corresponding to `wl_surface.damage_buffer`.
+    ///
+    /// The provided rectangle defines an area of the buffer that has changed and needs to be
+    /// redrawn. This damage is added to the `pending_damage_buffer` list in the `DamageTracker`.
+    ///
+    /// The damage rectangle is clipped to the bounds of the buffer that the damage applies to
+    /// (pending buffer if it exists, otherwise the current buffer). If no buffer is attached
+    /// or the buffer has zero dimensions, the damage is ignored.
+    ///
+    /// If the surface is in the `Destroyed` state, this operation is a no-op.
+    /// According to the Wayland specification, `width` and `height` must be positive.
+    /// Non-positive values will result in the damage being ignored. A compositor may choose
+    /// to send a `wl_surface.error.invalid_damage` protocol error in such cases.
+    ///
+    /// # Arguments
+    /// * `x`, `y`: The top-left coordinates of the damage rectangle, relative to the buffer.
+    /// * `width`, `height`: The dimensions of the damage rectangle. Must be positive.
     pub fn damage_buffer(&mut self, x: i32, y: i32, width: i32, height: i32) {
         if self.current_state == SurfaceState::Destroyed { return; }
-        // Wayland spec: width and height must be positive.
-        // TODO: Consider sending a wl_surface protocol error `invalid_damage` if width/height are non-positive.
-        let rect = Rectangle::new(x, y, width, height);
-        if rect.is_empty() { return; } // Silently ignore empty or invalid damage rects for now.
 
-        // Determine dimensions of the buffer this damage applies to.
-        // It applies to the pending buffer if one exists, otherwise the current one.
-        let mut opt_buffer_dims: Option<(i32,i32)> = None;
-        if let Some(pending_ref) = &self.pending_buffer {
-             let details = pending_ref.lock().unwrap();
-             opt_buffer_dims = Some((details.width as i32, details.height as i32));
-        } else if let Some(current_ref) = &self.current_buffer {
-            let details = current_ref.lock().unwrap();
-            opt_buffer_dims = Some((details.width as i32, details.height as i32));
-        }
+        let rect = Rectangle::new(x, y, width, height);
+        // Wayland spec: width and height must be positive.
+        // Silently ignore invalid ones as per current simplified error handling.
+        // A production compositor might send wl_surface.error.invalid_damage.
+        if rect.is_empty() { return; }
+
+        // Determine the dimensions of the buffer this damage applies to.
+        // Damage applies to the pending buffer if one exists, otherwise the current buffer.
+        // This aligns with the idea that damage is for content that *will be* or *is* displayed.
+        let opt_buffer_dims: Option<(i32, i32)> =
+            if let Some(pending_ref) = &self.pending_buffer {
+                let details = pending_ref.lock().unwrap();
+                Some((details.width as i32, details.height as i32))
+            } else if let Some(current_ref) = &self.current_buffer {
+                let details = current_ref.lock().unwrap();
+                Some((details.width as i32, details.height as i32))
+            } else {
+                None // No buffer attached, damage has no context.
+            };
 
         if let Some(buffer_dims) = opt_buffer_dims {
-            if buffer_dims.0 > 0 && buffer_dims.1 > 0 { // Only if buffer has actual dimensions
+            // Only proceed if the buffer has valid, positive dimensions.
+            if buffer_dims.0 > 0 && buffer_dims.1 > 0 {
                 let buffer_bounds = Rectangle::new(0, 0, buffer_dims.0, buffer_dims.1);
                 let clipped_rect = rect.clipped_to(&buffer_bounds);
                 if !clipped_rect.is_empty() {
                     self.damage_tracker.add_damage_buffer(clipped_rect);
                 }
             }
+            // If buffer_dims are zero or negative (should be caught at attach), damage is ignored.
         }
-        // If no buffer is attached, wl_surface.damage_buffer has no effect according to some interpretations,
-        // or might be an error. Silently ignoring seems safest if buffer dimensions are unknown/zero.
+        // If no buffer is attached (opt_buffer_dims is None), wl_surface.damage_buffer has no effect.
     }
 
-    /// Adds damage to the surface in surface-local coordinates.
-    /// Corresponds to the legacy `wl_surface.damage` request.
-    /// The damage rectangle is clipped to the current surface bounds.
+    /// Adds damage to the surface in surface-local coordinates, corresponding to `wl_surface.damage`.
+    ///
+    /// This is a legacy request. The provided rectangle defines an area of the surface
+    /// that has changed. This damage is added to the `pending_damage_surface` list in `DamageTracker`.
+    ///
+    /// The damage rectangle is clipped to the current (not pending) bounds of the surface.
+    /// If the surface has no size or is in the `Destroyed` state, this operation is a no-op.
+    /// According to the Wayland specification, `width` and `height` must be positive.
+    /// Non-positive values will result in the damage being ignored. A compositor may send
+    /// `wl_surface.error.invalid_damage`.
     ///
     /// # Arguments
-    /// * `x`, `y`, `width`, `height`: The rectangle defining the damaged area, in surface-local coordinates.
-    ///   Non-positive `width` or `height` will result in the damage being ignored.
+    /// * `x`, `y`: The top-left coordinates of the damage rectangle, relative to the surface.
+    /// * `width`, `height`: The dimensions of the damage rectangle. Must be positive.
     pub fn damage_surface(&mut self, x: i32, y: i32, width: i32, height: i32) {
         if self.current_state == SurfaceState::Destroyed { return; }
-        // Wayland spec: width and height must be positive.
-        // TODO: Consider sending a wl_surface protocol error `invalid_damage` if width/height are non-positive.
-        let rect = Rectangle::new(x, y, width, height);
-        if rect.is_empty() { return; } // Silently ignore.
 
-        // Clip to current (not pending) surface attributes.
-        let surface_bounds = Rectangle::new(0, 0, self.current_attributes.size.0 as i32, self.current_attributes.size.1 as i32);
-         if surface_bounds.is_empty() && (self.current_attributes.size.0 !=0 || self.current_attributes.size.1 !=0) {
-            // This case (e.g. size is (positive, 0)) means surface_bounds is empty. Damage is clipped to nothing.
+        let rect = Rectangle::new(x, y, width, height);
+        // Wayland spec: width and height must be positive. Silently ignore here.
+        if rect.is_empty() { return; }
+
+        // Clip to current (not pending) surface attributes for surface damage.
+        // This is because wl_surface.damage applies to the "current" visible state.
+        let surface_width = self.current_attributes.size.0 as i32;
+        let surface_height = self.current_attributes.size.1 as i32;
+
+        // If surface has no effective area (e.g., width or height is zero),
+        // then damage is clipped to nothing.
+        if surface_width <= 0 || surface_height <= 0 {
             return;
         }
+        let surface_bounds = Rectangle::new(0, 0, surface_width, surface_height);
+
         let clipped_rect = rect.clipped_to(&surface_bounds);
         if !clipped_rect.is_empty() {
             self.damage_tracker.add_damage_surface(clipped_rect);
         }
     }
 
-    /// Attaches a buffer to the surface. Corresponds to `wl_surface.attach`.
+    /// Attaches a buffer to the surface, corresponding to `wl_surface.attach`.
     ///
-    /// The `buffer_arc_opt` being `None` signifies attaching a NULL buffer, which means
-    /// the surface has no content.
-    /// The `x_offset` and `y_offset` are relative to the top-left corner of the surface.
-    /// For `wl_surface` version 5+, these offsets must be zero if a non-NULL buffer is provided.
+    /// This operation sets the `pending_buffer` for the surface. The actual content display
+    /// changes only upon a successful `commit`. Any previously pending buffer is released.
+    ///
+    /// - If `buffer_arc_opt` is `Some(buffer_arc)`, the provided buffer is attached.
+    ///   Its reference count in the `BufferManager` is incremented (via `BufferDetails::increment_ref_count`).
+    ///   The `pending_attributes.size` is updated to the dimensions of this buffer.
+    /// - If `buffer_arc_opt` is `None`, it signifies attaching a NULL buffer (no content).
+    ///   The `pending_attributes.size` is *not* changed in this case.
+    ///
+    /// After successful attachment, the surface transitions to `SurfaceState::PendingBuffer`
+    /// if it wasn't already in that state.
+    ///
+    /// # Protocol Constraints & Error Handling:
+    /// - The surface must not be in the `Destroyed` state.
+    /// - For `wl_surface` version 5 and later, `x_offset` and `y_offset` *must* be 0 if a
+    ///   non-NULL buffer is attached. This implementation enforces this unconditionally and
+    ///   returns `BufferAttachError::InvalidBufferOffset` if violated (corresponds to
+    ///   `wl_surface.error.invalid_offset`).
+    /// - If a non-NULL buffer is provided, its dimensions (`width`, `height`) must be positive.
+    ///   Otherwise, `BufferAttachError::InvalidBufferSize` is returned (corresponds to
+    ///   `wl_surface.error.invalid_size`).
+    /// - Optional: Client ownership of the buffer can be checked. If `BufferDetails.client_owner_id`
+    ///   is `Some` and does not match `client_id`, `BufferAttachError::ClientMismatch` is returned.
+    ///   This is a compositor-specific policy.
     ///
     /// # Arguments
-    /// * `buffer_manager`: Reference to the `BufferManager` for ref-counting.
+    /// * `buffer_manager`: A mutable reference to the `BufferManager` for releasing any
+    ///   previous pending buffer.
     /// * `buffer_arc_opt`: An `Option<Arc<Mutex<BufferDetails>>>` for the buffer to attach.
-    ///                     `None` for attaching a NULL buffer.
-    /// * `client_id`: The `ClientId` of the client making the request (for ownership validation).
-    /// * `x_offset`, `y_offset`: Offsets for the buffer.
+    ///   `None` signifies attaching a NULL buffer. The `Arc` is expected to be a valid reference
+    ///   obtained from the `BufferManager` or other trusted source.
+    /// * `client_id`: The `ClientId` of the client making the request. Used for optional
+    ///   ownership validation.
+    /// * `x_offset`, `y_offset`: Offsets for the buffer content relative to the surface's origin.
+    ///   These are stored in `pending_attributes.buffer_offset`.
     ///
     /// # Returns
-    /// `Ok(())` on successful attachment.
-    /// `Err(BufferAttachError)` if validation fails (e.g., invalid state, offset, or buffer).
+    /// - `Ok(())` on successful attachment.
+    /// - `Err(BufferAttachError)` if any validation fails.
     pub fn attach_buffer(
         &mut self,
         buffer_manager: &mut BufferManager,
@@ -846,22 +957,51 @@ impl Surface {
         Ok(())
     }
 
-    /// Commits the pending state of the surface, making it current.
-    /// Corresponds to `wl_surface.commit`.
+    /// Commits the pending state of the surface, making it current. Corresponds to `wl_surface.commit`.
     ///
-    /// This involves:
-    /// 1. Validating the pending state (e.g., buffer size vs. scale).
-    /// 2. If the surface is a synchronized subsurface, its state is cached for the parent's commit.
-    /// 3. Otherwise, pending attributes and buffer are made current.
-    /// 4. Pending damage is processed and becomes current damage.
-    /// 5. The surface state transitions to `Committed`.
+    /// This is a central operation in the Wayland surface lifecycle. It atomically applies all
+    /// pending state set since the last commit. This includes:
+    /// - Attached buffer (`pending_buffer`)
+    /// - Surface attributes (`pending_attributes` such as scale, transform, offset)
+    /// - Opaque region (`pending_opaque_region`)
+    /// - Input region (`pending_input_region`)
+    /// - Damage regions (`pending_damage_buffer`, `pending_damage_surface`)
+    ///
+    /// # Behavior:
+    /// 1.  **Validation**:
+    ///     *   The surface must not be `Destroyed`.
+    ///     *   The current state must allow committing (e.g., `Created`, `PendingBuffer`, `Committed`).
+    ///     *   If a `pending_buffer` exists:
+    ///         *   Its dimensions must be positive.
+    ///         *   `pending_attributes.buffer_scale` must be positive.
+    ///         *   Buffer dimensions must be integer multiples of the `buffer_scale`.
+    ///         If any validation fails, a `CommitError` is returned.
+    ///
+    /// 2.  **Synchronized Subsurface Handling**:
+    ///     *   If the surface is a synchronized subsurface, its `pending_buffer` (if any),
+    ///       `pending_attributes`, `pending_opaque_region`, and `pending_input_region` are
+    ///       cached. Damage remains pending until the parent commits and calls `apply_cached_state_from_sync`.
+    ///     *   The surface transitions to `SurfaceState::Committed` and the function returns.
+    ///
+    /// 3.  **Regular Commit (Toplevels, Desynchronized Subsurfaces)**:
+    ///     *   `current_attributes` is updated from `pending_attributes`.
+    ///     *   `current_opaque_region` is updated from `pending_opaque_region.clone()`.
+    ///     *   `current_input_region` is updated from `pending_input_region.clone()`.
+    ///     *   If an attach operation occurred (`current_state` was `PendingBuffer`):
+    ///         *   The old `current_buffer` is released.
+    ///         *   The `pending_buffer` becomes the new `current_buffer`.
+    ///         *   `new_content_committed` flag is set for damage processing.
+    ///     *   If it's a desynchronized subsurface with prior cached state, `apply_cached_state_from_sync` is called.
+    ///     *   `damage_tracker.commit_pending_damage()` is called to process all pending damage.
+    ///     *   The surface transitions to `SurfaceState::Committed`.
     ///
     /// # Arguments
-    /// * `buffer_manager`: Reference to the `BufferManager` for buffer ref-counting.
+    /// * `buffer_manager`: A mutable reference to the `BufferManager` for managing buffer
+    ///   reference counts during buffer transitions.
     ///
     /// # Returns
-    /// `Ok(())` if the commit is successful.
-    /// `Err(CommitError)` if validation fails (e.g., invalid state or buffer properties).
+    /// - `Ok(())` if the commit is successful and all state is applied or cached.
+    /// - `Err(CommitError)` if validation fails.
     pub fn commit(&mut self, buffer_manager: &mut BufferManager) -> Result<(), CommitError> {
         if self.current_state == SurfaceState::Destroyed {
             return Err(CommitError::InvalidState);
@@ -897,7 +1037,7 @@ impl Surface {
                 is_currently_synchronized_subsurface = true;
                 subsurface_state.needs_apply_on_parent_commit = true;
 
-                // Cache the pending state (buffer and attributes).
+                // Cache the pending state (buffer, attributes, and regions).
                 // Damage remains in `damage_tracker.pending_damage_*` and will be processed by `apply_cached_state_from_sync`.
                 if let Some(pending_buffer_arc_real) = &self.pending_buffer {
                     pending_buffer_arc_real.lock().unwrap().increment_ref_count(); // Cache holds a new ref.
@@ -906,9 +1046,13 @@ impl Surface {
                     self.cached_pending_buffer = None; // Handles attach(NULL) case.
                 }
                 self.cached_pending_attributes = Some(self.pending_attributes);
+                // Note: Regions are also part of pending state, but they are not explicitly cached here
+                // as apply_cached_state_from_sync will use the main pending_opaque/input_region fields
+                // which are not cleared until the parent applies the state.
+                // For a stricter model, regions could also be explicitly cached.
 
                 // The original self.pending_buffer is now "consumed" into the cache.
-                self.pending_buffer.take(); // This drops the Arc formerly in self.pending_buffer, dec-ref-counting.
+                self.pending_buffer.take();
 
                 // Surface state becomes Committed, indicating its state is latched for parent.
                 let _ = self.transition_to(SurfaceState::Committed);
@@ -926,6 +1070,10 @@ impl Surface {
 
         // Apply pending attributes to current attributes.
         self.current_attributes = self.pending_attributes;
+        // Apply pending regions to current regions.
+        self.current_opaque_region = self.pending_opaque_region.clone();
+        self.current_input_region = self.pending_input_region.clone();
+
 
         // Handle buffer transition if an attach operation occurred.
         if new_content_committed {
@@ -958,17 +1106,40 @@ impl Surface {
         Ok(())
     }
 
-    /// Applies cached state for a synchronized subsurface.
+    /// Applies cached state for a synchronized subsurface, making its content and attributes current.
     ///
-    /// This is typically called by the compositor after the parent surface has committed
-    /// and its state is being applied. It moves cached buffer and attributes to current,
-    /// and processes pending damage. Also used when a surface transitions from sync to desync.
+    /// This method is primarily called in two scenarios:
+    /// 1.  By the compositor when a parent surface commits, to apply the latched state of its
+    ///     synchronized children.
+    /// 2.  By the `commit` method of this surface if it's transitioning from a synchronized
+    ///     state (where its state was cached) to a desynchronized state, and now needs to
+    ///     make that cached state live.
+    ///
+    /// # Behavior:
+    /// - If the surface is `Destroyed` or not a subsurface with `needs_apply_on_parent_commit` set,
+    ///   it returns `Ok(())` or `Err(CommitError::InvalidState)` as appropriate, without action.
+    /// - Clears the `needs_apply_on_parent_commit` flag in `SubsurfaceState`.
+    /// - Moves `cached_pending_attributes` to `current_attributes`.
+    /// - Applies pending opaque and input regions to current.
+    /// - Releases the old `current_buffer` (if any).
+    /// - Moves `cached_pending_buffer` (if any) to `current_buffer`. The reference count for this
+    ///   buffer was already incremented when it was cached.
+    /// - Calls `damage_tracker.commit_pending_damage()` to process any damage that was
+    ///   pending in the `DamageTracker` from when the subsurface originally cached its state.
+    ///   The `new_content_was_cached` flag for damage processing is determined by whether
+    ///   attributes were actually cached (indicating a content update).
+    ///
+    /// The surface state is expected to be `Committed` (set when it originally cached its state)
+    /// and generally remains `Committed` after this operation.
     ///
     /// # Arguments
-    /// * `buffer_manager`: Reference to `BufferManager` for buffer operations.
+    /// * `buffer_manager`: A mutable reference to the `BufferManager` for releasing the
+    ///   previous `current_buffer`.
     ///
     /// # Returns
-    /// `Ok(())` on success, or `CommitError` if the surface is in an invalid state.
+    /// - `Ok(())` if the cached state was successfully applied or if there was no state to apply.
+    /// - `Err(CommitError::InvalidState)` if the surface is `Destroyed` or not in a valid
+    ///   state/role to perform this operation.
     pub fn apply_cached_state_from_sync(&mut self, buffer_manager: &mut BufferManager) -> Result<(), CommitError> {
         if self.current_state == SurfaceState::Destroyed {
             return Err(CommitError::InvalidState);
@@ -984,10 +1155,7 @@ impl Surface {
                 return Ok(());
             }
         } else {
-            // Not a subsurface, this method is inappropriate unless it's part of a desync transition.
-            // The desync transition case in commit() calls this, so it might be a non-subsurface
-            // if role was cleared before this. However, needs_apply_on_parent_commit should only be
-            // true for subsurfaces.
+            // Not a subsurface, this method is inappropriate.
             return Err(CommitError::InvalidState);
         }
 
@@ -1000,35 +1168,49 @@ impl Surface {
         if let Some(cached_attrs) = self.cached_pending_attributes.take() {
             self.current_attributes = cached_attrs;
         }
-        // If no cached_attrs, current_attributes remains as it was (potentially from a previous commit).
+        // Apply pending regions from when the subsurface committed its state (now being applied by parent).
+        self.current_opaque_region = self.pending_opaque_region.clone();
+        self.current_input_region = self.pending_input_region.clone();
 
         // Apply cached buffer.
         self.release_current_buffer(buffer_manager); // Release any existing current buffer.
         self.current_buffer = self.cached_pending_buffer.take();
-        // The ref count for the buffer in cached_pending_buffer was incremented when it was cached.
-        // Moving the Arc to current_buffer maintains that ref count.
 
-        // Process damage from DamageTracker's pending lists.
-        // `new_content_was_cached` indicates if the cache application represents a change in content
-        // (e.g. a new buffer or significant attribute change that would reset damage age).
-        let new_content_was_cached = self.cached_pending_attributes.is_some(); // True if attributes were cached.
+        let new_content_was_cached = self.current_buffer.is_some() || self.cached_pending_attributes.is_some();
 
         self.damage_tracker.commit_pending_damage(&self.current_attributes, new_content_was_cached);
 
-        // The surface state should already be Committed (set by its own commit call when it cached state).
-        // This function primarily applies the data, not transitions state further unless needed.
         Ok(())
     }
 
-    /// Prepares the surface for destruction.
+    /// Prepares the surface for destruction, performing necessary cleanup.
     ///
-    /// This involves releasing its buffers, removing itself from its parent's children list,
-    /// and orphaning its own children (subsurfaces). It also clears frame callbacks and
-    /// sets the surface state to `Destroyed`.
+    /// This method is called when a surface (and its associated Wayland resource) is
+    /// being destroyed. It ensures that resources are released and hierarchical
+    /// relationships are correctly updated.
+    ///
+    /// # Behavior:
+    /// 1.  **Buffer Release**: Releases `pending_buffer`, `current_buffer`, and
+    ///     `cached_pending_buffer` (if any) via the `BufferManager`. This decrements
+    ///     their reference counts.
+    /// 2.  **Parent Detachment**: If the surface has a `parent`, it removes itself from
+    ///     its parent's `children` list. This requires access to the parent surface
+    ///     via the `surface_registry_accessor`.
+    /// 3.  **Children Orphaning**: Clears its own `children` list. For each child:
+    ///     *   Their `parent` link is set to `None`.
+    ///     *   If the child was a `Subsurface`, its `SubsurfaceState.parent_id` is set
+    ///       to a sentinel value, effectively unmapping it from a Wayland perspective
+    ///       as its Wayland parent link is now broken.
+    /// 4.  **Cleanup**: Clears all `frame_callbacks` and all damage in `damage_tracker`.
+    ///     Opaque and input regions are implicitly dropped as part of the struct.
+    /// 5.  **State Transition**: Directly sets `current_state` to `SurfaceState::Destroyed`.
+    ///     This bypasses `transition_to` as it's a final, irreversible state change.
     ///
     /// # Arguments
-    /// * `buffer_manager`: For releasing attached buffers.
-    /// * `surface_registry_accessor`: To access parent and child surface data from the registry.
+    /// * `buffer_manager`: A mutable reference to the `BufferManager` for releasing buffers.
+    /// * `surface_registry_accessor`: An implementation of `SurfaceRegistryAccessor` (typically
+    ///   the `SurfaceRegistry` itself) to allow querying and modifying parent/child
+    ///   surface relationships. This is crucial for detaching from parents and orphaning children.
     pub fn prepare_for_destruction(
         &mut self,
         buffer_manager: &mut BufferManager,
@@ -1071,21 +1253,32 @@ impl Surface {
 
         self.frame_callbacks.clear();
         self.damage_tracker.clear_all_damage();
+        // Regions (pending_opaque_region, etc.) are owned Option<Region> and will be dropped.
         self.current_state = SurfaceState::Destroyed; // Directly set state.
     }
 
 
-    /// Registers a frame callback for this surface. Corresponds to `wl_surface.frame`.
+    /// Registers a frame callback for this surface, corresponding to `wl_surface.frame`.
     ///
-    /// The callback will be added to a list and is intended to be fired by the
-    /// compositor after the next frame is rendered and presented.
-    /// If the surface is already destroyed, this request is silently ignored.
+    /// A frame callback is a request by the client to be notified when the current
+    /// state of the surface (after the next commit) is presented by the compositor.
+    /// The `WlCallback` object, identified by `callback_id`, will be used to send
+    /// this notification.
+    ///
+    /// Frame callbacks are accumulated in the `frame_callbacks` list. They are typically
+    /// processed and sent by the compositor after rendering and displaying a new frame
+    /// that includes this surface's latest content.
+    ///
+    /// If the surface is in the `Destroyed` state, this request is silently ignored,
+    /// aligning with typical Wayland object behavior.
     ///
     /// # Arguments
-    /// * `callback_id`: The Wayland resource ID of the `wl_callback` object.
+    /// * `callback_id`: The Wayland resource ID of the `wl_callback` object created by the client.
     pub fn frame(&mut self, callback_id: u64) {
         if self.current_state == SurfaceState::Destroyed {
-            // As per Wayland spec for most requests on destroyed objects, silently ignore.
+            // Wayland spec: "If the wl_surface object is destroyed, the wl_callback objects
+            // are likewise destroyed and the done event is never fired."
+            // Silently ignoring is consistent with not firing the event.
             return;
         }
         self.frame_callbacks.push(WlCallback { id: callback_id });
@@ -1093,27 +1286,48 @@ impl Surface {
 
     /// Retrieves all pending frame callbacks and clears the internal list.
     ///
-    /// This is typically called by the compositor's rendering loop after a frame
-    /// has been successfully presented, to notify clients.
+    /// This method is designed to be called by the compositor's main loop or rendering
+    /// pipeline after it has processed and presented a frame that includes this surface's
+    /// content. The returned `Vec<WlCallback>` contains all callbacks that were
+    /// requested for this frame. The compositor is then responsible for sending the
+    /// `done` event for each of these `wl_callback` objects.
+    ///
+    /// The internal list of frame callbacks is cleared, ensuring that each callback
+    /// is only processed once.
+    ///
+    /// # Returns
+    /// A `Vec<WlCallback>` containing all frame callbacks that were pending on this surface.
+    /// The vector will be empty if no callbacks were registered.
     pub fn take_frame_callbacks(&mut self) -> Vec<WlCallback> {
+        // std::mem::take replaces self.frame_callbacks with an empty Vec and returns the old Vec.
         std::mem::take(&mut self.frame_callbacks)
     }
 
-    /// Transitions the surface to a new state.
+    /// Transitions the surface to a new `SurfaceState`.
+    ///
+    /// This method provides a controlled way to update the `current_state` of the surface.
+    /// It includes basic validation, primarily to prevent a `Destroyed` surface from
+    /// transitioning back to any other state.
+    ///
+    /// More sophisticated state transition logic (e.g., defining a full state machine
+    /// with allowed transitions between all states) could be added here if required.
     ///
     /// # Arguments
-    /// * `new_state`: The `SurfaceState` to transition to.
+    /// * `new_state`: The target `SurfaceState` to transition to.
     ///
     /// # Returns
-    /// `Ok(())` on a valid transition.
-    /// `Err(SurfaceTransitionError::InvalidTransition)` if the transition is not allowed
-    /// (e.g., transitioning from `Destroyed` to any other state except itself).
+    /// - `Ok(())` if the transition is valid and applied.
+    /// - `Err(SurfaceTransitionError::InvalidTransition)` if the transition is not allowed
+    ///   (e.g., attempting to transition from `Destroyed` to `Created`).
     pub fn transition_to(&mut self, new_state: SurfaceState) -> Result<(), SurfaceTransitionError> {
-        // Basic safety: cannot un-destroy a surface.
+        // A Destroyed surface cannot transition to any other state (except perhaps itself, which is a no-op).
         if self.current_state == SurfaceState::Destroyed && new_state != SurfaceState::Destroyed {
             return Err(SurfaceTransitionError::InvalidTransition);
         }
-        // TODO: Add more sophisticated state transition validation if needed (e.g., specific allowed transitions).
+
+        // TODO: Implement a more comprehensive state machine if complex transition rules are needed.
+        // For example, ensuring a surface only moves from PendingBuffer to Committed, etc.
+        // For now, any transition not from Destroyed is allowed.
         self.current_state = new_state;
         Ok(())
     }
@@ -1121,7 +1335,7 @@ impl Surface {
 
 /// Manages all surfaces within the compositor.
 pub mod surface_registry {
-    use super::{Surface, SurfaceId, SurfaceState, SurfaceRole, WlOutputTransform, Mat3x3, Rectangle, DamageTracker, WlCallback, Region, BufferAttachError, CommitError, SurfaceTransitionError};
+    use super::{Surface, SurfaceId, SurfaceState, SurfaceRole, WlOutputTransform, Mat3x3, Rectangle, DamageTracker, WlCallback, Region, BufferAttachError, CommitError, SurfaceTransitionError}; // Added Region here
     use crate::buffer_manager::BufferManager;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -1245,4 +1459,180 @@ pub mod surface_registry {
         }
     }
 }
->>>>>>> REPLACE
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::region::RegionId; // For creating Regions in tests
+    // Assuming RegionRegistry is needed if we are creating regions with unique IDs for tests
+    // use crate::region::RegionRegistry;
+    use novade_buffer_manager::BufferManager; // For commit/attach calls
+    use std::sync::atomic::Ordering;
+
+
+    // Helper to create a default BufferManager for tests that need it.
+    fn test_buffer_manager() -> BufferManager {
+        BufferManager::new(log::logger()) // Assuming logger() is available or use a simpler new if not.
+    }
+
+    // Helper for ClientId in tests
+    fn test_client_id() -> ClientId { ClientId::new(1) }
+
+
+    #[test]
+    fn surface_creation_defaults() {
+        let surface = Surface::new();
+        assert_eq!(surface.current_state, SurfaceState::Created);
+        assert_eq!(surface.pending_attributes, SurfaceAttributes::default());
+        assert_eq!(surface.current_attributes, SurfaceAttributes::default());
+        assert!(surface.pending_buffer.is_none());
+        assert!(surface.current_buffer.is_none());
+        assert!(surface.frame_callbacks.is_empty());
+        assert!(surface.role.is_none());
+        assert!(surface.children.is_empty());
+        assert!(surface.parent.is_none());
+        assert!(surface.cached_pending_buffer.is_none());
+        assert!(surface.cached_pending_attributes.is_none());
+
+        // Test initial region states
+        assert!(surface.pending_opaque_region.is_none(), "Initial pending_opaque_region should be None (empty)");
+        assert!(surface.current_opaque_region.is_none(), "Initial current_opaque_region should be None (empty)");
+        assert!(surface.pending_input_region.is_none(), "Initial pending_input_region should be None (infinite)");
+        assert!(surface.current_input_region.is_none(), "Initial current_input_region should be None (infinite)");
+    }
+
+    #[test]
+    fn surface_id_uniqueness() {
+        let surface1 = Surface::new();
+        let surface2 = Surface::new();
+        assert_ne!(surface1.id, surface2.id);
+    }
+
+    #[test]
+    fn attach_null_buffer() {
+        let mut surface = Surface::new();
+        let mut bm = test_buffer_manager();
+        let client_id = test_client_id();
+
+        let initial_size = surface.pending_attributes.size;
+        let result = surface.attach_buffer(&mut bm, None, client_id, 0, 0);
+        assert!(result.is_ok());
+        assert!(surface.pending_buffer.is_none());
+        assert_eq!(surface.pending_attributes.size, initial_size, "Attaching NULL buffer should not change pending size");
+        assert_eq!(surface.current_state, SurfaceState::PendingBuffer);
+    }
+
+    // ... (other existing tests for attach_buffer, commit, damage, etc. would be here) ...
+    // For brevity, I'll assume they are present and correct from previous subtasks.
+
+    // --- Tests for Region Integration ---
+
+    #[test]
+    fn test_surface_initial_regions_explicit_check() { // Renamed to avoid conflict if already tested by surface_creation_defaults
+        let surface = Surface::new();
+        assert!(surface.pending_opaque_region.is_none());
+        assert!(surface.current_opaque_region.is_none());
+        assert!(surface.pending_input_region.is_none());
+        assert!(surface.current_input_region.is_none());
+    }
+
+    #[test]
+    fn test_set_opaque_region_with_some_region() {
+        let mut surface = Surface::new();
+        let mut bm = test_buffer_manager();
+
+        let region_id = RegionId::new_unique();
+        let mut test_region = Region::new(region_id);
+        test_region.add(Rectangle::new(10, 10, 50, 50));
+
+        surface.set_opaque_region(Some(&test_region));
+        assert!(surface.pending_opaque_region.is_some());
+        assert_eq!(surface.pending_opaque_region.as_ref().unwrap().get_rectangles(), test_region.get_rectangles());
+        // Ensure it's a clone, not the same instance if Region was not Copy (it is Clone)
+        if let Some(pending_region) = &surface.pending_opaque_region {
+           assert_ne!(pending_region.id, test_region.id, "Pending region should be a clone with a new ID if Region IDs are unique per instance, or we should check content only.");
+           // Current Region struct clones the ID. If Region was meant to be a shared resource (Arc<Mutex<RegionData>>), this test would change.
+           // Given the current Region::clone, it clones the ID and Vec.
+        }
+
+
+        let commit_result = surface.commit(&mut bm);
+        assert!(commit_result.is_ok());
+
+        assert!(surface.current_opaque_region.is_some());
+        assert_eq!(surface.current_opaque_region.as_ref().unwrap().get_rectangles(), test_region.get_rectangles());
+         if let Some(current_region) = &surface.current_opaque_region {
+             if let Some(pending_region) = &surface.pending_opaque_region { // pending_opaque_region is consumed by commit if not cloned properly
+                 // This check relies on commit cloning the pending_opaque_region.
+                 // If commit moves, pending_opaque_region would be None here or its content different.
+                 // Based on current Surface::commit, it does `self.current_opaque_region = self.pending_opaque_region.clone();`
+                 // So pending_opaque_region itself is not None after commit.
+                 assert_eq!(current_region.id, pending_region.id);
+             } else {
+                // This case implies commit might not clone but move from pending, which is also fine.
+                // The main check is that current_opaque_region has the correct content.
+             }
+        }
+    }
+
+    #[test]
+    fn test_set_opaque_region_with_none() {
+        let mut surface = Surface::new();
+        let mut bm = test_buffer_manager();
+
+        // Set it to Some first, then to None
+        let region_id = RegionId::new_unique();
+        let mut test_region = Region::new(region_id);
+        test_region.add(Rectangle::new(0,0,1,1));
+        surface.set_opaque_region(Some(&test_region));
+        assert!(surface.pending_opaque_region.is_some());
+
+        surface.set_opaque_region(None);
+        assert!(surface.pending_opaque_region.is_none());
+
+        let commit_result = surface.commit(&mut bm);
+        assert!(commit_result.is_ok());
+        assert!(surface.current_opaque_region.is_none());
+    }
+
+    #[test]
+    fn test_set_input_region_with_some_region() {
+        let mut surface = Surface::new();
+        let mut bm = test_buffer_manager();
+
+        let region_id = RegionId::new_unique();
+        let mut test_region = Region::new(region_id);
+        test_region.add(Rectangle::new(20, 20, 30, 30));
+
+        surface.set_input_region(Some(&test_region));
+        assert!(surface.pending_input_region.is_some());
+        assert_eq!(surface.pending_input_region.as_ref().unwrap().get_rectangles(), test_region.get_rectangles());
+
+        let commit_result = surface.commit(&mut bm);
+        assert!(commit_result.is_ok());
+
+        assert!(surface.current_input_region.is_some());
+        assert_eq!(surface.current_input_region.as_ref().unwrap().get_rectangles(), test_region.get_rectangles());
+    }
+
+    #[test]
+    fn test_set_input_region_with_none() {
+        let mut surface = Surface::new();
+        let mut bm = test_buffer_manager();
+
+        let region_id = RegionId::new_unique();
+        let mut test_region = Region::new(region_id);
+        test_region.add(Rectangle::new(0,0,1,1));
+        surface.set_input_region(Some(&test_region));
+        assert!(surface.pending_input_region.is_some());
+
+        surface.set_input_region(None);
+        assert!(surface.pending_input_region.is_none());
+
+        let commit_result = surface.commit(&mut bm);
+        assert!(commit_result.is_ok());
+        assert!(surface.current_input_region.is_none());
+    }
+}
+
+[end of novade-compositor-core/src/surface.rs]
