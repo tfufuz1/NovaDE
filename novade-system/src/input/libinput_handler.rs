@@ -1,109 +1,98 @@
 // src/input/libinput_handler.rs
+use input::{Libinput, LibinputInterface, Device, event::Event}; // Changed to input
+use udev::{Context as UdevContext, Enumerator};
+use std::fs::{File, OpenOptions};
+use std::os::unix::io::{RawFd, AsRawFd, FromRawFd};
+use std::path::Path;
+use std::os::unix::fs::OpenOptionsExt;
+use tracing::{error, info, warn};
 
-// Assuming KeyState, ScrollSource etc. are defined elsewhere or will be here for stub.
-use crate::input::keyboard::KeyState;
-use crate::input::focus::ScrollSource; // Re-using from focus for stub consistency
+// Minimal interface for udev interaction with libinput
+struct MinimalInterface;
 
-// Placeholder for what a device might look like after libinput processing
-#[derive(Debug, Clone)]
-pub struct StubbedInputDevice {
-    pub name: String,
-    pub capabilities: Vec<DeviceCapability>,
-}
-
-// Placeholder for device capabilities
-#[derive(Debug, Clone, PartialEq, Eq, Copy)] // Added Copy
-pub enum DeviceCapability {
-    Keyboard,
-    Pointer,
-    Touch,
-    Tablet,
-    Gesture,
-}
-
-// --- Raw Input Event Simulation ---
-#[derive(Debug, Clone, Copy)]
-pub enum RawInputEventEnum {
-    Keyboard { raw_keycode: u32, state: KeyState, time: u32 },
-    PointerMotion { dx: f64, dy: f64, time: u32 },
-    PointerButton { raw_button_code: u32, state: crate::input::pointer::ButtonState, time: u32 }, // Use pointer's ButtonState
-    PointerScroll { dx_discrete: f64, dy_discrete: f64, dx_continuous: f64, dy_continuous: f64, source: ScrollSource, time: u32 },
-    TouchDown { id: i32, x: f64, y: f64, time: u32 },
-    TouchMotion { id: i32, x: f64, y: f64, time: u32 },
-    TouchUp { id: i32, time: u32 },
-    TouchFrame { time: u32 },
-    // TODO: Add other raw event types if needed (e.g., tablet events)
-}
-
-
-pub struct LibinputHandler {
-    // For stubbing, we might want a queue of events to dispatch
-    event_queue: Vec<RawInputEventEnum>,
-    event_cursor: usize,
-}
-
-impl LibinputHandler {
-    pub fn new() -> Self {
-        tracing::info!("LibinputHandler (Pure Stub): Initializing. No actual libinput interaction will occur.");
-        // Pre-populate with some events for dispatch_stub_event to work
-        let mut event_queue = Vec::new();
-        event_queue.push(RawInputEventEnum::PointerMotion{ dx: 10.0, dy: 5.0, time: 100});
-        event_queue.push(RawInputEventEnum::Keyboard{ raw_keycode: 30, state: KeyState::Pressed, time: 101}); // 'a' key
-        event_queue.push(RawInputEventEnum::Keyboard{ raw_keycode: 30, state: KeyState::Released, time: 102});
-        event_queue.push(RawInputEventEnum::TouchDown{ id: 0, x: 100.0, y: 100.0, time: 103});
-        event_queue.push(RawInputEventEnum::TouchMotion{ id: 0, x: 110.0, y: 105.0, time: 104});
-        event_queue.push(RawInputEventEnum::TouchUp{ id: 0, time: 105});
-        event_queue.push(RawInputEventEnum::TouchFrame{ time: 106 });
-
-
-        Self { event_queue, event_cursor: 0 }
+impl LibinputInterface for MinimalInterface {
+    fn open_restricted(&mut self, path: &Path, flags: i32) -> Result<RawFd, i32> {
+        OpenOptions::new()
+            .custom_flags(flags)
+            .read(true)
+            .write(true) // Required by input, even if not strictly used for all devices
+            .open(path)
+            .map(|file| file.into_raw_fd())
+            .map_err(|err| {
+                error!("Failed to open path {}: {}", path.display(), err);
+                err.raw_os_error().unwrap_or(libc::EIO)
+            })
     }
 
-    // This method is kept for DeviceManager's initial device scan.
-    pub fn get_devices(&self) -> Vec<StubbedInputDevice> {
-        tracing::debug!("LibinputHandler (Pure Stub): get_devices() called, returning predefined devices.");
-        let devices = vec![
-            StubbedInputDevice {
-                name: "Stubbed Keyboard".to_string(),
-                capabilities: vec![DeviceCapability::Keyboard],
-            },
-            StubbedInputDevice {
-                name: "Stubbed Mouse".to_string(),
-                capabilities: vec![DeviceCapability::Pointer],
-            },
-            StubbedInputDevice {
-                name: "Stubbed Touchscreen".to_string(),
-                capabilities: vec![DeviceCapability::Touch],
-            },
-        ];
-        tracing::trace!("LibinputHandler (Pure Stub): get_devices() returning: {:?}", devices);
-        devices
-    }
-
-    // This would be the new method for InputManager's event loop
-    pub fn dispatch_stub_event(&mut self) -> Option<RawInputEventEnum> {
-        if self.event_cursor < self.event_queue.len() {
-            let event = self.event_queue[self.event_cursor];
-            self.event_cursor += 1;
-            tracing::trace!("LibinputHandler (Pure Stub): dispatch_stub_event() -> {:?}", event);
-            Some(event)
-        } else {
-            tracing::trace!("LibinputHandler (Pure Stub): dispatch_stub_event() -> No more events.");
-            None
+    fn close_restricted(&mut self, fd: RawFd) {
+        unsafe {
+            // Consumes the File object, which closes the fd upon drop
+            drop(File::from_raw_fd(fd));
         }
     }
+}
 
-    // Old dispatch and get_event are no longer the primary interface for the main loop
-    // but might be kept if other parts of the stub system relied on them.
-    // For this refactor, assume dispatch_stub_event is the new way.
-    pub fn dispatch(&mut self) -> Result<(), String> { // Kept for now, might be removed later
-        tracing::debug!("LibinputHandler (Pure Stub): dispatch() called (conceptual reset for stub events).");
-        // self.event_cursor = 0; // Optional: reset queue for re-simulation
-        Ok(())
+pub struct LibinputUdevHandler {
+    libinput_context: Libinput, // This type comes from input
+    // We might need to store the udev context if we plan to use it later,
+    // e.g., for monitoring udev events for hotplugging.
+    // _udev_context: UdevContext,
+}
+
+impl LibinputUdevHandler {
+    pub fn new() -> Result<Self, String> {
+        info!("LibinputUdevHandler: Initializing...");
+
+        let udev_context = UdevContext::new().map_err(|e| {
+            let err_msg = format!("Failed to create udev context: {}", e);
+            error!("{}", err_msg);
+            err_msg
+        })?;
+        info!("LibinputUdevHandler: Udev context created successfully.");
+
+        let mut libinput_context = Libinput::new_with_udev(MinimalInterface); // Libinput::new_with_udev from input
+        info!("LibinputUdevHandler: Libinput context created with udev interface.");
+
+        // Assign the udev backend. This tells input to use udev for device discovery.
+        // The seat ID is "seat0".
+        if let Err(_e) = libinput_context.udev_assign_seat("seat0") {
+            let err_msg = "Failed to assign udev backend to libinput context (seat0).".to_string();
+            error!("{}", err_msg);
+            return Err(err_msg);
+        }
+        info!("LibinputUdevHandler: Udev backend assigned to seat0 successfully.");
+
+        info!("LibinputUdevHandler: Initialization successful.");
+        Ok(Self {
+            libinput_context,
+        })
     }
 
-    pub fn get_event(&mut self) -> Option<()> { // Kept for now, might be removed later
-        tracing::trace!("LibinputHandler (Pure Stub): get_event() called, returning None.");
-        None
+    pub fn context(&self) -> &Libinput { // Libinput from input
+        &self.libinput_context
+    }
+
+    // Expose a mutable context if needed for operations like dispatch
+    pub fn context_mut(&mut self) -> &mut Libinput { // Libinput from input
+        &mut self.libinput_context
+    }
+
+    // Placeholder for future event dispatching, if this handler manages the loop
+    pub fn dispatch_events(&mut self) -> Result<(), ()> {
+        match self.libinput_context.dispatch() { // dispatch from input
+            Ok(_) => Ok(()),
+            Err(_) => {
+                error!("LibinputUdevHandler: Error during libinput dispatch.");
+                Err(())
+            }
+        }
+    }
+}
+
+// Optional: A default implementation for when initialization might fail or is not critical.
+impl Default for LibinputUdevHandler {
+    fn default() -> Self {
+        warn!("LibinputUdevHandler: Attempting to create default instance. This might indicate an issue if a real handler was expected.");
+        Self::new().expect("Failed to create a default LibinputUdevHandler. Check udev/input availability.")
     }
 }

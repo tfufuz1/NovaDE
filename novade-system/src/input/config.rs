@@ -1,149 +1,161 @@
 // src/input/config.rs
-use serde::Deserialize;
-use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use tracing::{error, info};
 
-#[derive(Deserialize, Debug, Clone)]
-pub struct PointerConfig {
-    pub acceleration_factor: Option<f64>,
-    pub sensitivity: Option<f64>,
-    pub acceleration_curve: Option<String>, // e.g., "linear", "adaptive"
-    pub button_mapping: Option<HashMap<u32, u32>>, // Raw button to mapped button
+// Define a simple error type for configuration loading.
+#[deriveDebug, Serialize, Deserialize)]
+pub enum ConfigError {
+    IoError(String),
+    ParseError(String),
+    NotFound,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyboardConfig {
-    pub repeat_rate: Option<u32>, // chars per second
-    pub repeat_delay: Option<u32>, // ms
+    pub repeat_rate: i32,    // Characters per second
+    pub repeat_delay: i32,   // Milliseconds
+    // pub layout: String, // Example: "us", "gb", etc. Might be handled by xkbcommon directly.
+    // pub model: Option<String>,
+    // pub variant: Option<String>,
+    // pub options: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
-pub struct DeviceSpecificConfig {
-    pub name_match: String, // Field to match against device name
-    pub pointer: Option<PointerConfig>,
-    pub keyboard: Option<KeyboardConfig>,
+impl Default for KeyboardConfig {
+    fn default() -> Self {
+        Self {
+            repeat_rate: 25,
+            repeat_delay: 600,
+            // layout: "us".to_string(),
+            // model: None,
+            // variant: None,
+            // options: None,
+        }
+    }
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PointerConfig {
+    pub acceleration_factor: f64, // Simple linear factor for now. 0.0 means 1x speed, >0 increases, <0 decreases.
+    pub scroll_factor: f64,       // How much to multiply scroll values by
+    pub natural_scrolling: bool,
+    // pub button_mapping: Option<HashMap<u32, u32>>, // e.g. {272: 273, 273: 272} to swap left/right
+
+    // Conceptual fields for future advanced acceleration and pointer behavior
+    // pub acceleration_profile: String, // e.g., "adaptive", "linear", "flat"
+    // pub acceleration_custom_curve_points: Option<Vec<(f64, f64)>>, // For a truly custom curve
+    // pub pointer_sensitivity: f64, // General sensitivity setting, often from DE.
+}
+
+impl Default for PointerConfig {
+    fn default() -> Self {
+        Self {
+            acceleration_factor: 0.0, // Default to a flat profile (effective multiplier 1.0)
+            scroll_factor: 1.0,
+            natural_scrolling: false,
+            // button_mapping: None,
+            // acceleration_profile: "linear".to_string(), // Default profile
+            // acceleration_custom_curve_points: None,
+            // pointer_sensitivity: 0.0, // Neutral sensitivity
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TouchConfig {
+    pub pressure_threshold: Option<f64>, // Example: For distinguishing tap from drag
+    pub disable_while_typing: bool,
+
+    // Conceptual fields for future advanced touch features
+    // pub enable_gestures: bool,
+    // pub gesture_config_path: Option<String>, // Path to a gesture specific config if needed
+    // pub calibration_file_path: Option<String>, // Path to a touch calibration file
+    // pub enable_palm_rejection: bool,
+}
+
+impl Default for TouchConfig {
+    fn default() -> Self {
+        Self {
+            pressure_threshold: None,
+            disable_while_typing: true,
+            // enable_gestures: true,
+            // gesture_config_path: None,
+            // calibration_file_path: None,
+            // enable_palm_rejection: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct InputConfig {
-    pub default_pointer_config: Option<PointerConfig>,
-    pub default_keyboard_config: Option<KeyboardConfig>,
-    // Store device-specific configs in a way that's easy to look up.
-    // A Vec is fine if we iterate, or HashMap if names are unique identifiers.
-    // The prompt used HashMap<String, DeviceSpecificConfig> for device_specific,
-    // implying the key (device name) is part of the map itself.
-    // Let's refine DeviceSpecificConfig to not hold its own name_match if it's a key.
-    pub device_specific: Option<HashMap<String, DeviceSpecificConfigEntry>>,
+    #[serde(default)]
+    pub keyboard: KeyboardConfig,
+    #[serde(default)]
+    pub pointer: PointerConfig,
+    #[serde(default)]
+    pub touch: TouchConfig,
+    #[serde(default)]
+    pub enable_tap_to_click: bool,
+    #[serde(default)]
+    pub enable_natural_scrolling_pointer: bool, // Specific to pointer, separate from touch
 }
-
-// Renaming DeviceSpecificConfig to DeviceSpecificConfigEntry to avoid confusion
-// when it's used as a value in the HashMap. The key of the HashMap will be the device name.
-#[derive(Deserialize, Debug, Clone)]
-pub struct DeviceSpecificConfigEntry {
-    pub pointer: Option<PointerConfig>,
-    pub keyboard: Option<KeyboardConfig>,
-}
-
 
 impl InputConfig {
-    pub fn load_from_file(path: &str) -> Result<Self, String> {
-        // For this subtask, we'll return a default/stubbed config.
-        // Actual file reading (e.g., from a TOML file) would be:
-        // let content = std::fs::read_to_string(path).map_err(|e| crate::input::errors::InputError::ConfigFileError(e.to_string()))?;
-        // toml::from_str(&content).map_err(|e| crate::input::errors::InputError::TomlDeserializationError(e))?;
-        tracing::info!("InputConfig: Loading stubbed configuration from path: '{}'.", path);
-
-        let mut specific_configs = HashMap::new();
-        // Example of adding a specific config for a known stubbed device
-        specific_configs.insert(
-            "Stubbed Mouse".to_string(),
-            DeviceSpecificConfigEntry {
-                pointer: Some(PointerConfig {
-                    acceleration_factor: Some(0.2), // Override default
-                    sensitivity: Some(1.5),         // Override default
-                    acceleration_curve: Some("linear".to_string()),
-                    button_mapping: None, // No specific button mapping for this device
-                }),
-                keyboard: None,
-            }
-        );
-
-        Ok(Self {
-            default_pointer_config: Some(PointerConfig {
-                acceleration_factor: Some(0.5),
-                sensitivity: Some(1.0),
-                acceleration_curve: Some("adaptive".to_string()),
-                button_mapping: None, // No default button mapping
-            }),
-            default_keyboard_config: Some(KeyboardConfig {
-                repeat_rate: Some(25),
-                repeat_delay: Some(600),
-            }),
-            device_specific: Some(specific_configs),
-        })
-    }
-
-    // Helper method to get config for a device
-    pub fn get_effective_pointer_config(&self, device_name: &str) -> Option<PointerConfig> {
-        let mut effective_config = self.default_pointer_config.clone();
-
-        if let Some(specific_map) = &self.device_specific {
-            if let Some(specific_device_entry) = specific_map.get(device_name) {
-                if let Some(specific_pointer_cfg) = &specific_device_entry.pointer {
-                    let mut current_effective = effective_config.unwrap_or_else(|| PointerConfig {
-                        acceleration_factor: None,
-                        sensitivity: None,
-                        acceleration_curve: None,
-                        button_mapping: None,
-                    });
-                    if specific_pointer_cfg.acceleration_factor.is_some() {
-                        current_effective.acceleration_factor = specific_pointer_cfg.acceleration_factor;
+    pub fn load_from_file(path: &Path) -> Result<Self, ConfigError> {
+        info!("InputConfig: Attempting to load configuration from '{}' (stubbed).", path.display());
+        // For now, this is a stub that returns default configuration.
+        // In a real implementation:
+        // 1. Read the file content.
+        // 2. Deserialize from a format like TOML or JSON.
+        // Example using std::fs and toml (if toml crate is added):
+        /*
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                match toml::from_str(&contents) {
+                    Ok(config) => {
+                        info!("InputConfig: Successfully loaded and parsed from '{}'.", path.display());
+                        Ok(config)
                     }
-                    if specific_pointer_cfg.sensitivity.is_some() {
-                        current_effective.sensitivity = specific_pointer_cfg.sensitivity;
+                    Err(e) => {
+                        error!("InputConfig: Failed to parse config file '{}': {}", path.display(), e);
+                        Err(ConfigError::ParseError(e.to_string()))
                     }
-                    if specific_pointer_cfg.acceleration_curve.is_some() {
-                        current_effective.acceleration_curve = specific_pointer_cfg.acceleration_curve.clone();
-                    }
-                    if specific_pointer_cfg.button_mapping.is_some() {
-                        // Button mappings usually replace, not merge, unless explicitly designed to.
-                        current_effective.button_mapping = specific_pointer_cfg.button_mapping.clone();
-                    }
-                    effective_config = Some(current_effective);
                 }
             }
-        }
-        effective_config
-    }
-
-    // Helper method to get config for a device (already exists, ensure logging if complex decisions made)
-    // pub fn get_effective_pointer_config(&self, device_name: &str) -> Option<PointerConfig> {
-    //     tracing::debug!("Getting effective pointer config for device: {}", device_name);
-    //     ...
-    // }
-
-    pub fn get_effective_keyboard_config(&self, device_name: &str) -> Option<KeyboardConfig> {
-        let mut effective_config = self.default_keyboard_config.clone();
-
-        if let Some(specific_map) = &self.device_specific {
-            if let Some(specific_device_entry) = specific_map.get(device_name) {
-                if let Some(specific_keyboard_cfg) = &specific_device_entry.keyboard {
-                     let mut current_effective = effective_config.unwrap_or_else(|| KeyboardConfig {
-                        repeat_rate: None,
-                        repeat_delay: None,
-                    });
-                    if specific_keyboard_cfg.repeat_rate.is_some() {
-                        current_effective.repeat_rate = specific_keyboard_cfg.repeat_rate;
-                    }
-                    if specific_keyboard_cfg.repeat_delay.is_some() {
-                        current_effective.repeat_delay = specific_keyboard_cfg.repeat_delay;
-                    }
-                    effective_config = Some(current_effective);
-                }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!("InputConfig: Config file '{}' not found. Using default configuration.", path.display());
+                Ok(InputConfig::default()) // Or return ConfigError::NotFound if preferred
+            }
+            Err(e) => {
+                error!("InputConfig: Failed to read config file '{}': {}", path.display(), e);
+                Err(ConfigError::IoError(e.to_string()))
             }
         }
-        effective_config
+        */
+        // Stub implementation:
+        if !path.exists() {
+             info!("InputConfig: Config file '{}' not found (stub check). Returning default.", path.display());
+        }
+        Ok(InputConfig::default())
     }
 }
+
+// Example usage (not part of the library code itself, maybe in main.rs or tests)
+/*
+fn main() {
+    let config_path = Path::new("config/input.toml"); // Example path
+    match InputConfig::load_from_file(config_path) {
+        Ok(config) => {
+            println!("Loaded input configuration: {:?}", config);
+            // Apply this config to input manager and devices
+        }
+        Err(e) => {
+            eprintln!("Error loading input configuration: {:?}", e);
+            // Fallback to default or handle error
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -266,3 +278,4 @@ mod tests {
         assert_eq!(effective_config.repeat_delay, Some(250)); // Specific
     }
 }
+
