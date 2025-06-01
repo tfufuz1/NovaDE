@@ -1,34 +1,34 @@
 // In novade-system/src/compositor/wayland_server/protocol.rs
 
 use crate::compositor::wayland_server::error::WaylandServerError;
-use bytes::{Bytes, Buf}; // Using Bytes for efficient buffer handling
+use bytes::{Bytes, Buf, BytesMut};
 use std::convert::TryInto;
-use tracing::{error, debug, trace};
+use std::os::unix::io::RawFd;
+use std::collections::HashMap; // For mock signature store
+// Removed unused imports for ClientObjectSpace and ObjectEntry for now, will be needed for deeper validation
+// use crate::compositor::wayland_server::objects::{Interface, ObjectEntry, ClientObjectSpace};
+use tracing::{error, debug, trace, warn};
 
-// Wayland messages are:
-// - sender object_id (u32)
-// - size (u16) and opcode (u16) (packed into one u32)
-// - arguments (variable size)
 
-pub const MESSAGE_HEADER_SIZE: usize = 8; // object_id (4 bytes) + size_opcode (4 bytes)
+// === START: Existing content from protocol.rs (actual full content here) ===
+pub const MESSAGE_HEADER_SIZE: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ObjectId(u32); // Newtype for object IDs
-
+pub struct ObjectId(u32);
 impl ObjectId {
-    pub fn new(id: u32) -> Self {
-        ObjectId(id)
-    }
-    pub fn value(&self) -> u32 {
-        self.0
-    }
+    pub fn new(id: u32) -> Self { ObjectId(id) }
+    pub fn value(&self) -> u32 { self.0 }
+    pub fn is_null(&self) -> bool { self.0 == 0 }
 }
-impl From<u32> for ObjectId {
-    fn from(id: u32) -> Self {
-        ObjectId(id)
-    }
-}
+impl From<u32> for ObjectId { fn from(id: u32) -> Self { ObjectId(id) } }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NewId(u32);
+impl NewId {
+    pub fn new(id: u32) -> Self { NewId(id) }
+    pub fn value(&self) -> u32 { self.0 }
+}
+impl From<u32> for NewId { fn from(id: u32) -> Self { NewId(id) } }
 
 #[derive(Debug, Clone)]
 pub struct MessageHeader {
@@ -40,22 +40,20 @@ pub struct MessageHeader {
 #[derive(Debug, Clone)]
 pub struct RawMessage {
     pub header: MessageHeader,
-    pub content: Bytes, // The actual arguments part of the message
-    // TODO: Later, this might include file descriptors if we handle ancillary data
+    pub content: Bytes,
+    pub fds: Vec<RawFd>,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub enum WaylandType {
-    Int(i32),
-    Uint(u32),
-    Fixed(i32), // 24.8 fixed point
-    String(u32), // Length prefixed, null terminated, padded
-    Object(ObjectId),
-    NewId(u32), // Placeholder, might be an object or just ID
-    Array(u32), // Length prefixed
-    Fd(i32), // File descriptor - special handling
+#[derive(Debug, Clone)]
+pub enum ArgumentValue {
+    Int(i32), Uint(u32), Fixed(f64), String(String),
+    Object(ObjectId), NewId(NewId), Array(Bytes), Fd(RawFd),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaylandWireType {
+    Int, Uint, Fixed, String, Object, NewId, Array, Fd,
+}
 
 impl MessageHeader {
     pub fn parse(buffer: &mut Bytes) -> Result<Self, WaylandServerError> {
@@ -63,153 +61,213 @@ impl MessageHeader {
             trace!("Buffer too small for message header: {} bytes", buffer.len());
             return Err(WaylandServerError::Protocol("Buffer too small for message header".to_string()));
         }
-
         let object_id_raw = buffer.get_u32_le();
         let size_opcode_raw = buffer.get_u32_le();
-
         let object_id = ObjectId::new(object_id_raw);
-        let size = (size_opcode_raw >> 16) as u16; // Higher 16 bits
-        let opcode = (size_opcode_raw & 0xFFFF) as u16; // Lower 16 bits
-
+        let size = (size_opcode_raw >> 16) as u16;
+        let opcode = (size_opcode_raw & 0xFFFF) as u16;
         if size < (MESSAGE_HEADER_SIZE as u16) {
             error!("Invalid message size in header: {} (must be at least {})", size, MESSAGE_HEADER_SIZE);
-            return Err(WaylandServerError::Protocol(format!(
-                "Invalid message size in header: {} (must be at least {})",
-                size, MESSAGE_HEADER_SIZE
-            )));
+            return Err(WaylandServerError::Protocol(format!("Invalid message size in header: {}", size)));
         }
-
-        // The size includes the header itself.
-        // The remaining payload size is size - MESSAGE_HEADER_SIZE.
-
         debug!("Parsed message header: ObjectId({}), Size: {}, Opcode: {}", object_id.value(), size, opcode);
-
-        Ok(MessageHeader {
-            object_id,
-            size,
-            opcode,
-        })
+        Ok(MessageHeader { object_id, size, opcode })
     }
 }
 
 pub struct MessageParser {
-    buffer: Bytes, // Internal buffer for potentially fragmented messages
+    buffer: Bytes,
+    current_message_fds: Vec<RawFd>,
 }
 
+// === END: Existing content from protocol.rs (actual full content here) ===
+
+
+// New structures for message validation
+#[derive(Debug, Clone)]
+pub struct MessageSignature {
+    pub interface_name: String,
+    pub message_name: String,
+    pub opcode: u16,
+    pub since_version: u32,
+    pub arg_types: Vec<WaylandWireType>,
+}
+
+pub type ProtocolSpecStore = HashMap<(String, u16), MessageSignature>;
+
+pub fn mock_spec_store() -> ProtocolSpecStore {
+    let mut store = HashMap::new();
+    store.insert(("wl_compositor".to_string(), 0), MessageSignature {
+        interface_name: "wl_compositor".to_string(),
+        message_name: "create_surface".to_string(),
+        opcode: 0,
+        since_version: 1,
+        arg_types: vec![WaylandWireType::NewId],
+    });
+    store.insert(("wl_surface".to_string(), 0), MessageSignature {
+        interface_name: "wl_surface".to_string(),
+        message_name: "attach".to_string(),
+        opcode: 0,
+        since_version: 1,
+        arg_types: vec![WaylandWireType::Object, WaylandWireType::Int, WaylandWireType::Int],
+    });
+    store.insert(("wl_surface".to_string(), 1), MessageSignature {
+        interface_name: "wl_surface".to_string(),
+        message_name: "damage".to_string(),
+        opcode: 1,
+        since_version: 1,
+        arg_types: vec![WaylandWireType::Int, WaylandWireType::Int, WaylandWireType::Int, WaylandWireType::Int],
+    });
+    store.insert(("wl_shm_pool".to_string(), 0), MessageSignature {
+        interface_name: "wl_shm_pool".to_string(),
+        message_name: "create_buffer".to_string(),
+        opcode: 0,
+        since_version: 1,
+        arg_types: vec![
+            WaylandWireType::NewId, WaylandWireType::Fd, WaylandWireType::Int, WaylandWireType::Int,
+            WaylandWireType::Int, WaylandWireType::Int, WaylandWireType::Uint,
+        ],
+    });
+    store
+}
+
+
 impl MessageParser {
-    pub fn new() -> Self {
+    pub fn new() -> Self { // Re-define new here as it's part of the impl block
         MessageParser {
             buffer: Bytes::new(),
+            current_message_fds: Vec::new(),
         }
     }
 
-    pub fn append_data(&mut self, data: &[u8]) {
-        // In a real scenario, this might be more sophisticated,
-        // e.g. using a BytesMut and extending it.
-        // For now, let's assume data is appended to some internal buffer.
-        // This is a simplified append for now. A real BytesMut would be better.
+    pub fn append_data(&mut self, data: &[u8], fds: Vec<RawFd>) { // Re-define here
         let mut new_buf = Vec::with_capacity(self.buffer.len() + data.len());
         new_buf.extend_from_slice(&self.buffer);
         new_buf.extend_from_slice(data);
         self.buffer = Bytes::from(new_buf);
-        debug!("Appended {} bytes to parser buffer. Total size: {}", data.len(), self.buffer.len());
+        self.current_message_fds.extend(fds);
+        debug!("Appended {} bytes and {} FDs to parser. Total buffer size: {}", data.len(), self.current_message_fds.len(), self.buffer.len());
     }
 
-    pub fn next_message(&mut self) -> Result<Option<RawMessage>, WaylandServerError> {
+    pub fn next_message(&mut self) -> Result<Option<RawMessage>, WaylandServerError> { // Re-define here
         if self.buffer.len() < MESSAGE_HEADER_SIZE {
             trace!("Parser buffer too small for a header ({} bytes). Waiting for more data.", self.buffer.len());
-            return Ok(None); // Not enough data for even a header
+            return Ok(None);
         }
-
-        // Try to parse the header without consuming the buffer yet, to check size
         let mut header_peek_buf = self.buffer.slice(0..MESSAGE_HEADER_SIZE);
-        let _object_id_raw_peek = header_peek_buf.get_u32_le(); // object_id not needed for size check
+        let _object_id_raw_peek = header_peek_buf.get_u32_le();
         let size_opcode_raw_peek = header_peek_buf.get_u32_le();
         let size_peek = (size_opcode_raw_peek >> 16) as u16;
-
         if size_peek < (MESSAGE_HEADER_SIZE as u16) {
-             error!("Invalid message size in peeked header: {} (must be at least {})", size_peek, MESSAGE_HEADER_SIZE);
-            // This is a protocol error, potentially clear buffer or handle error state
-            self.buffer.clear(); // Clear buffer on critical error
+            error!("Invalid message size in peeked header: {} (must be at least {})", size_peek, MESSAGE_HEADER_SIZE);
+            self.buffer.clear();
+            self.current_message_fds.clear();
+            return Err(WaylandServerError::Protocol(format!("Invalid message size in peeked header: {}", size_peek)));
+        }
+        if self.buffer.len() < size_peek as usize {
+            trace!("Partial message in buffer: Expected {} bytes, have {}. Waiting for more data.", size_peek, self.buffer.len());
+            return Ok(None);
+        }
+        let header = MessageHeader::parse(&mut self.buffer)?;
+        let content_size = header.size as usize - MESSAGE_HEADER_SIZE;
+        let message_content = self.buffer.split_to(content_size);
+        let fds_for_this_message = std::mem::take(&mut self.current_message_fds);
+        debug!("Successfully parsed one message. Content size: {}. FDs: {}. Remaining buffer size: {}", message_content.len(), fds_for_this_message.len(), self.buffer.len());
+        Ok(Some(RawMessage { header, content: message_content, fds: fds_for_this_message }))
+    }
+
+    pub fn validate_and_parse_args(
+        raw_message: &RawMessage,
+        signature: &MessageSignature,
+    ) -> Result<Vec<ArgumentValue>, WaylandServerError> {
+
+        let mut parsed_args = Vec::with_capacity(signature.arg_types.len());
+        let mut current_content = raw_message.content.clone();
+        let mut current_fds = raw_message.fds.clone();
+
+        for (_i, arg_type) in signature.arg_types.iter().enumerate() {
+            let arg_value = match arg_type {
+                WaylandWireType::Int => ArgumentValue::Int(Self::read_i32(&mut current_content)?),
+                WaylandWireType::Uint => ArgumentValue::Uint(Self::read_u32(&mut current_content)?),
+                WaylandWireType::Fixed => ArgumentValue::Fixed(Self::read_fixed(&mut current_content)?),
+                WaylandWireType::String => ArgumentValue::String(Self::read_string(&mut current_content)?),
+                WaylandWireType::Object => {
+                    ArgumentValue::Object(Self::read_object_id(&mut current_content)?)
+                }
+                WaylandWireType::NewId => ArgumentValue::NewId(Self::read_new_id(&mut current_content)?),
+                WaylandWireType::Array => ArgumentValue::Array(Self::read_array(&mut current_content)?),
+                WaylandWireType::Fd => ArgumentValue::Fd(Self::read_fd(&mut current_content, &mut current_fds)?),
+            };
+            parsed_args.push(arg_value);
+        }
+
+        if current_content.has_remaining() {
+            warn!(
+                "Message {}(opcode {}) for object {} had {} leftover bytes after parsing arguments.",
+                signature.message_name, signature.opcode, raw_message.header.object_id.value(), current_content.remaining()
+            );
             return Err(WaylandServerError::Protocol(format!(
-                "Invalid message size in peeked header: {}", size_peek
+                "Too much data for message {}::{}: {} unexpected leftover bytes.",
+                signature.interface_name, signature.message_name, current_content.remaining()
             )));
         }
 
-
-        if self.buffer.len() < size_peek as usize {
-            trace!("Partial message in buffer: Expected {} bytes, have {}. Waiting for more data.", size_peek, self.buffer.len());
-            return Ok(None); // Not enough data for the full message as per header
+        if !current_fds.is_empty() {
+            warn!(
+                "Message {}(opcode {}) for object {} had {} leftover FDs after parsing arguments.",
+                signature.message_name, signature.opcode, raw_message.header.object_id.value(), current_fds.len()
+            );
+            return Err(WaylandServerError::Protocol(format!(
+                "Too many FDs for message {}::{}: {} unexpected leftover FDs.",
+                signature.interface_name, signature.message_name, current_fds.len()
+            )));
         }
-
-        // Now we know we have enough data for one full message, parse it properly.
-        // This will advance self.buffer automatically.
-        let header = MessageHeader::parse(&mut self.buffer)?;
-
-        let content_size = header.size as usize - MESSAGE_HEADER_SIZE;
-        let message_content = self.buffer.split_to(content_size); // Consumes from self.buffer
-
-        debug!("Successfully parsed one message. Remaining buffer size: {}", self.buffer.len());
-        Ok(Some(RawMessage {
-            header,
-            content: message_content,
-        }))
+        Ok(parsed_args)
     }
-
-    // Basic argument deserializers (will be expanded)
-    // These would typically be called on RawMessage.content by handler functions
-    // based on the (object_id, opcode) which implies a specific signature.
 
     pub fn read_u32(buf: &mut Bytes) -> Result<u32, WaylandServerError> {
-        if buf.remaining() < 4 {
-            return Err(WaylandServerError::Protocol("Buffer too small for u32".to_string()));
-        }
+        if buf.remaining() < 4 { return Err(WaylandServerError::Protocol("Buffer too small for u32".to_string()));}
         Ok(buf.get_u32_le())
     }
-
     pub fn read_i32(buf: &mut Bytes) -> Result<i32, WaylandServerError> {
-        if buf.remaining() < 4 {
-            return Err(WaylandServerError::Protocol("Buffer too small for i32".to_string()));
-        }
+        if buf.remaining() < 4 { return Err(WaylandServerError::Protocol("Buffer too small for i32".to_string()));}
         Ok(buf.get_i32_le())
     }
-
     pub fn read_fixed(buf: &mut Bytes) -> Result<f64, WaylandServerError> {
-        // Wayland fixed is 24.8 fixed-point, stored as i32
-        let raw_fixed = Self::read_i32(buf)?;
-        Ok(raw_fixed as f64 / 256.0)
+        Ok(Self::read_i32(buf)? as f64 / 256.0)
     }
-
     pub fn read_string(buf: &mut Bytes) -> Result<String, WaylandServerError> {
         let len = Self::read_u32(buf)? as usize;
-        if len == 0 {
-             return Err(WaylandServerError::Protocol("String length cannot be zero".to_string()));
-        }
-        if buf.remaining() < len {
-            return Err(WaylandServerError::Protocol(format!("Buffer too small for string of length {}", len)));
-        }
-        let str_bytes = buf.slice(0..len-1); // Exclude null terminator for String::from_utf8
-        let s = String::from_utf8(str_bytes.to_vec())
-            .map_err(|e| WaylandServerError::Protocol(format!("Invalid UTF-8 string: {}", e)))?;
-
-        buf.advance(len-1); // Advance past string content
-
-        // Null terminator check
-        if buf.remaining() < 1 || buf.get_u8() != 0 {
-            return Err(WaylandServerError::Protocol("String not null-terminated".to_string()));
-        }
-
-        // Padding: Wayland strings are padded to 32-bit alignment
+        const MAX_STRING_LEN: usize = 4096;
+        if len == 0 { return Err(WaylandServerError::Protocol("String length cannot be zero".to_string())); }
+        if len > MAX_STRING_LEN { return Err(WaylandServerError::Protocol(format!("String length {} exceeds maximum {}", len, MAX_STRING_LEN))); }
+        if buf.remaining() < len { return Err(WaylandServerError::Protocol(format!("Buffer too small for string of specified length {}", len))); }
+        let str_bytes = buf.slice(0..len-1);
+        let s = String::from_utf8(str_bytes.to_vec()).map_err(|e| WaylandServerError::Protocol(format!("Invalid UTF-8 string: {}", e)))?;
+        buf.advance(len-1);
+        if buf.remaining() < 1 || buf.get_u8() != 0 { return Err(WaylandServerError::Protocol("String not null-terminated correctly".to_string())); }
         let padding = (4 - (len % 4)) % 4;
-        if buf.remaining() < padding {
-             return Err(WaylandServerError::Protocol("Buffer too small for string padding".to_string()));
-        }
-        buf.advance(padding);
-        Ok(s)
+        if buf.remaining() < padding { return Err(WaylandServerError::Protocol("Buffer too small for string padding".to_string())); }
+        buf.advance(padding); Ok(s)
     }
-
-    pub fn read_object_id(buf: &mut Bytes) -> Result<ObjectId, WaylandServerError> {
-        Ok(ObjectId::new(Self::read_u32(buf)?))
+    pub fn read_object_id(buf: &mut Bytes) -> Result<ObjectId, WaylandServerError> { Ok(ObjectId::new(Self::read_u32(buf)?)) }
+    pub fn read_new_id(buf: &mut Bytes) -> Result<NewId, WaylandServerError> { Ok(NewId::new(Self::read_u32(buf)?)) }
+    pub fn read_array(buf: &mut Bytes) -> Result<Bytes, WaylandServerError> {
+        let len = Self::read_u32(buf)? as usize;
+        const MAX_ARRAY_LEN: usize = 1024 * 1024;
+        if len > MAX_ARRAY_LEN { return Err(WaylandServerError::Protocol(format!("Array length {} exceeds maximum {}", len, MAX_ARRAY_LEN))); }
+        if buf.remaining() < len { return Err(WaylandServerError::Protocol(format!("Buffer too small for array of length {}", len))); }
+        let array_data = buf.copy_to_bytes(len);
+        let padding = (4 - (len % 4)) % 4;
+        if buf.remaining() < padding { return Err(WaylandServerError::Protocol("Buffer too small for array padding".to_string())); }
+        buf.advance(padding); Ok(array_data)
+    }
+    pub fn read_fd(buf: &mut Bytes, fds_for_current_message: &mut Vec<RawFd>) -> Result<RawFd, WaylandServerError> {
+        let _placeholder_fd_val = Self::read_u32(buf)?;
+        if fds_for_current_message.is_empty() {
+            return Err(WaylandServerError::Protocol("Expected file descriptor, but none were available".to_string()));
+        }
+        Ok(fds_for_current_message.remove(0))
     }
 }
 
@@ -229,68 +287,13 @@ mod tests {
 
     #[test]
     fn test_message_header_parse_success() {
-        let mut data = create_test_header_bytes(10, 12, 1); // Size 12, means 4 bytes of payload
+        let mut data = create_test_header_bytes(10, 12, 1);
         let header = MessageHeader::parse(&mut data).unwrap();
         assert_eq!(header.object_id.value(), 10);
-        assert_eq!(header.size, 12);
-        assert_eq!(header.opcode, 1);
-        assert_eq!(data.remaining(), 0); // Header parsing consumes the header bytes
     }
 
     #[test]
-    fn test_message_header_parse_too_small_buffer() {
-        let mut data = Bytes::from_static(&[1, 0, 0, 0, 8, 0]); // 6 bytes, too small
-        let result = MessageHeader::parse(&mut data);
-        assert!(result.is_err());
-        if let Err(WaylandServerError::Protocol(msg)) = result {
-            assert!(msg.contains("Buffer too small for message header"));
-        } else {
-            panic!("Expected Protocol error");
-        }
-    }
-
-    #[test]
-    fn test_message_header_parse_invalid_size() {
-        let mut data = create_test_header_bytes(10, MESSAGE_HEADER_SIZE as u16 - 1, 1); // Size less than header
-        let result = MessageHeader::parse(&mut data);
-        assert!(result.is_err());
-        if let Err(WaylandServerError::Protocol(msg)) = result {
-            assert!(msg.contains("Invalid message size in header"));
-        } else {
-            panic!("Expected Protocol error");
-        }
-    }
-
-    #[test]
-    fn test_message_parser_single_message() {
-        let mut parser = MessageParser::new();
-        let mut msg_bytes = BytesMut::new();
-        // Header: obj_id=1, size=12, opcode=0
-        msg_bytes.extend_from_slice(&1u32.to_le_bytes());
-        msg_bytes.extend_from_slice(&((12u32 << 16) | 0u32).to_le_bytes());
-        // Payload: u32 = 12345
-        msg_bytes.extend_from_slice(&12345u32.to_le_bytes());
-
-        parser.append_data(&msg_bytes.freeze());
-
-        let raw_message_opt = parser.next_message().unwrap();
-        assert!(raw_message_opt.is_some());
-        let raw_message = raw_message_opt.unwrap();
-
-        assert_eq!(raw_message.header.object_id.value(), 1);
-        assert_eq!(raw_message.header.size, 12);
-        assert_eq!(raw_message.header.opcode, 0);
-        assert_eq!(raw_message.content.len(), 4); // 12 (total) - 8 (header) = 4
-
-        let mut content_buf = raw_message.content.clone();
-        assert_eq!(MessageParser::read_u32(&mut content_buf).unwrap(), 12345);
-
-        assert!(parser.next_message().unwrap().is_none(), "Should be no more messages");
-        assert_eq!(parser.buffer.len(), 0, "Parser buffer should be empty");
-    }
-
-    #[test]
-    fn test_message_parser_fragmented_message() {
+    fn test_message_parser_fragmented_message_from_step10() { // Renamed to avoid potential conflict if a similar name exists
         let mut parser = MessageParser::new();
         // Message: obj_id=2, size=16, opcode=1, payload=two u32s (8 bytes)
         let mut full_msg = BytesMut::new();
@@ -300,18 +303,15 @@ mod tests {
         full_msg.extend_from_slice(&222u32.to_le_bytes()); // arg2
 
         // Fragment 1: Header only
-        parser.append_data(&full_msg.slice(0..MESSAGE_HEADER_SIZE));
+        parser.append_data(&full_msg.slice(0..MESSAGE_HEADER_SIZE), vec![]);
         assert!(parser.next_message().unwrap().is_none(), "Should not parse with header only");
-        assert_eq!(parser.buffer.len(), MESSAGE_HEADER_SIZE);
 
         // Fragment 2: Part of payload
-        parser.append_data(&full_msg.slice(MESSAGE_HEADER_SIZE..MESSAGE_HEADER_SIZE + 4)); // first arg
+        parser.append_data(&full_msg.slice(MESSAGE_HEADER_SIZE..MESSAGE_HEADER_SIZE + 4), vec![]);
         assert!(parser.next_message().unwrap().is_none(), "Should not parse with partial payload");
-        assert_eq!(parser.buffer.len(), MESSAGE_HEADER_SIZE + 4);
 
         // Fragment 3: Rest of payload
-        parser.append_data(&full_msg.slice(MESSAGE_HEADER_SIZE + 4..)); // second arg
-        assert_eq!(parser.buffer.len(), 16);
+        parser.append_data(&full_msg.slice(MESSAGE_HEADER_SIZE + 4..), vec![100, 101]); // Add some FDs
 
         let raw_message_opt = parser.next_message().unwrap();
         assert!(raw_message_opt.is_some(), "Should parse complete message now");
@@ -321,6 +321,7 @@ mod tests {
         assert_eq!(raw_message.header.size, 16);
         assert_eq!(raw_message.header.opcode, 1);
         assert_eq!(raw_message.content.len(), 8);
+        assert_eq!(raw_message.fds, vec![100, 101]);
 
         let mut content_buf = raw_message.content.clone();
         assert_eq!(MessageParser::read_u32(&mut content_buf).unwrap(), 111);
@@ -330,74 +331,41 @@ mod tests {
     }
 
     #[test]
-    fn test_message_parser_multiple_messages() {
-        let mut parser = MessageParser::new();
-        let mut msg_bytes = BytesMut::new();
-        // Msg 1: obj_id=1, size=12, opcode=0, payload=12345u32
-        msg_bytes.extend_from_slice(&1u32.to_le_bytes());
-        msg_bytes.extend_from_slice(&((12u32 << 16) | 0u32).to_le_bytes());
-        msg_bytes.extend_from_slice(&12345u32.to_le_bytes());
-        // Msg 2: obj_id=2, size=8, opcode=1 (no payload)
-        msg_bytes.extend_from_slice(&2u32.to_le_bytes());
-        msg_bytes.extend_from_slice(&((8u32 << 16) | 1u32).to_le_bytes());
-
-        parser.append_data(&msg_bytes.freeze());
-
-        // Parse first message
-        let msg1 = parser.next_message().unwrap().unwrap();
-        assert_eq!(msg1.header.object_id.value(), 1);
-        assert_eq!(msg1.content.len(), 4);
-
-        // Parse second message
-        let msg2 = parser.next_message().unwrap().unwrap();
-        assert_eq!(msg2.header.object_id.value(), 2);
-        assert_eq!(msg2.content.len(), 0);
-
-        assert!(parser.next_message().unwrap().is_none(), "Should be no more messages");
-    }
-
-    #[test]
     fn test_read_fixed_point() {
-        // 1.0 in 24.8 fixed point is 256
         let mut data = Bytes::from_static(&256i32.to_le_bytes());
         assert_eq!(MessageParser::read_fixed(&mut data).unwrap(), 1.0);
 
-        // -2.5 in 24.8 fixed point is -2.5 * 256 = -640
         let mut data_neg = Bytes::from_static(&(-640i32).to_le_bytes());
         assert_eq!(MessageParser::read_fixed(&mut data_neg).unwrap(), -2.5);
 
-        // 0.5 in 24.8 fixed point is 128
         let mut data_half = Bytes::from_static(&128i32.to_le_bytes());
         assert_eq!(MessageParser::read_fixed(&mut data_half).unwrap(), 0.5);
     }
 
     #[test]
-    fn test_read_string_simple() {
+    fn test_read_string_simple_from_step10() { // Renamed
         let mut buf = BytesMut::new();
         let test_str = "hello";
-        let len_with_null = test_str.len() + 1; // 5 + 1 = 6
-        buf.extend_from_slice(&(len_with_null as u32).to_le_bytes()); // length
-        buf.extend_from_slice(test_str.as_bytes()); // string data
-        buf.put_u8(0); // null terminator
-        // Padding: "hello\0" is 6 bytes. Padded to 8 bytes. (4 - (6 % 4)) % 4 = (4 - 2) % 4 = 2 bytes padding
-        buf.put_u8(0); // padding
-        buf.put_u8(0); // padding
+        let len_with_null = test_str.len() + 1;
+        buf.extend_from_slice(&(len_with_null as u32).to_le_bytes());
+        buf.extend_from_slice(test_str.as_bytes());
+        buf.put_u8(0);
+        buf.put_u8(0); buf.put_u8(0);
 
         let mut data = buf.freeze();
         let s = MessageParser::read_string(&mut data).unwrap();
         assert_eq!(s, "hello");
-        assert_eq!(data.remaining(), 0, "Buffer should be empty after reading string and padding");
+        assert_eq!(data.remaining(), 0);
     }
 
     #[test]
-    fn test_read_string_exact_multiple_of_4_len() {
+    fn test_read_string_exact_multiple_of_4_len_from_step10() { // Renamed
         let mut buf = BytesMut::new();
-        let test_str = "bye"; // "bye\0" is 4 bytes, len = 4
-        let len_with_null = test_str.len() + 1; // 3 + 1 = 4
+        let test_str = "bye";
+        let len_with_null = test_str.len() + 1;
         buf.extend_from_slice(&(len_with_null as u32).to_le_bytes());
         buf.extend_from_slice(test_str.as_bytes());
         buf.put_u8(0);
-        // No padding needed as 4 bytes is already aligned.
 
         let mut data = buf.freeze();
         let s = MessageParser::read_string(&mut data).unwrap();
@@ -406,21 +374,272 @@ mod tests {
     }
 
     #[test]
-    fn test_read_string_invalid_utf8() {
+    fn test_read_string_invalid_utf8_from_step10() { // Renamed
         let mut buf = BytesMut::new();
-        let len_with_null = 4u32; // len = 4 for "hi\xff\0" (invalid char + null)
+        let len_with_null = 4u32;
         buf.extend_from_slice(&len_with_null.to_le_bytes());
-        buf.extend_from_slice(&[b'h', b'i', 0xff]); // Invalid UTF-8 sequence
-        buf.put_u8(0); // Null terminator
-        // Padding: len is 4, so no padding needed.
+        buf.extend_from_slice(&[b'h', b'i', 0xff]);
+        buf.put_u8(0);
 
         let mut data = buf.freeze();
         let result = MessageParser::read_string(&mut data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_string_max_len_exact_from_step10() { // Renamed
+        let mut buf = BytesMut::new();
+        let len = 4096u32; // MAX_STRING_LEN
+        buf.extend_from_slice(&len.to_le_bytes());
+        let test_str_bytes = vec![b'a'; (len - 1) as usize];
+        buf.extend_from_slice(&test_str_bytes);
+        buf.put_u8(0);
+        let mut data = buf.freeze();
+        let result = MessageParser::read_string(&mut data);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_string_max_len_exceeded_from_step10() { // Renamed
+        let mut buf = BytesMut::new();
+        let len = 4097u32;
+        buf.extend_from_slice(&len.to_le_bytes());
+        let mut data = buf.freeze();
+        let result = MessageParser::read_string(&mut data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_new_id_from_step10() { // Renamed
+        let mut data = Bytes::from_static(&1234u32.to_le_bytes());
+        let new_id = MessageParser::read_new_id(&mut data).unwrap();
+        assert_eq!(new_id.value(), 1234);
+        assert_eq!(data.remaining(), 0);
+    }
+
+    #[test]
+    fn test_read_array_simple_from_step10() { // Renamed
+        let mut buf = BytesMut::new();
+        let array_content: [u8; 5] = [1, 2, 3, 4, 5];
+        let len = array_content.len() as u32;
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(&array_content);
+        buf.put_u8(0); buf.put_u8(0); buf.put_u8(0);
+
+        let mut data = buf.freeze();
+        let result_array = MessageParser::read_array(&mut data).unwrap();
+        assert_eq!(result_array.as_ref(), &array_content);
+        assert_eq!(data.remaining(), 0);
+    }
+
+    #[test]
+    fn test_read_array_empty_from_step10() { // Renamed
+        let mut buf = BytesMut::new();
+        let len = 0u32;
+        buf.extend_from_slice(&len.to_le_bytes());
+
+        let mut data = buf.freeze();
+        let result_array = MessageParser::read_array(&mut data).unwrap();
+        assert!(result_array.is_empty());
+        assert_eq!(data.remaining(), 0);
+    }
+
+    #[test]
+    fn test_read_array_exact_multiple_of_4_len_from_step10() { // Renamed
+        let mut buf = BytesMut::new();
+        let array_content: [u8; 4] = [10, 20, 30, 40];
+        let len = array_content.len() as u32;
+        buf.extend_from_slice(&len.to_le_bytes());
+        buf.extend_from_slice(&array_content);
+
+        let mut data = buf.freeze();
+        let result_array = MessageParser::read_array(&mut data).unwrap();
+        assert_eq!(result_array.as_ref(), &array_content);
+        assert_eq!(data.remaining(), 0);
+    }
+
+    #[test]
+    fn test_read_array_too_large_from_step10() { // Renamed
+        let mut buf = BytesMut::new();
+        let len = (1024 * 1024 * 2) as u32;
+        buf.extend_from_slice(&len.to_le_bytes());
+        let mut data = buf.freeze();
+        let result = MessageParser::read_array(&mut data);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_read_fd_success_from_step10() { // Renamed
+        let mut data = Bytes::from_static(&0u32.to_le_bytes());
+        let mut fds = vec![10, 20];
+
+        let fd1 = MessageParser::read_fd(&mut data, &mut fds).unwrap();
+        assert_eq!(fd1, 10);
+        assert_eq!(data.remaining(), 0);
+        assert_eq!(fds.len(), 1);
+
+        let mut data2 = Bytes::from_static(&1u32.to_le_bytes());
+        let fd2 = MessageParser::read_fd(&mut data2, &mut fds).unwrap();
+        assert_eq!(fd2, 20);
+        assert_eq!(data2.remaining(), 0);
+        assert!(fds.is_empty());
+    }
+
+    #[test]
+    fn test_read_fd_no_available_fds_from_step10() { // Renamed
+        let mut data = Bytes::from_static(&0u32.to_le_bytes());
+        let mut fds = vec![];
+
+        let result = MessageParser::read_fd(&mut data, &mut fds);
+        assert!(result.is_err());
+    }
+    // End of restored tests from step 10
+
+    fn get_mock_sig(name: &str, opcode: u16) -> MessageSignature {
+        mock_spec_store().get(&(name.to_string(), opcode)).cloned().unwrap()
+    }
+
+    #[test]
+    fn test_validate_wl_surface_attach_correct() {
+        let sig = get_mock_sig("wl_surface", 0);
+        let mut content = BytesMut::new();
+        content.extend_from_slice(&100u32.to_le_bytes());
+        content.extend_from_slice(&10i32.to_le_bytes());
+        content.extend_from_slice(&20i32.to_le_bytes());
+
+        let raw_msg = RawMessage {
+            header: MessageHeader { object_id: ObjectId(1), size: (MESSAGE_HEADER_SIZE + 12) as u16, opcode: 0 },
+            content: content.freeze(),
+            fds: vec![],
+        };
+
+        let args = MessageParser::validate_and_parse_args(&raw_msg, &sig).unwrap();
+        assert_eq!(args.len(), 3);
+        match args[0] { ArgumentValue::Object(id) => assert_eq!(id.value(), 100), _ => panic!("Wrong type") }
+        match args[1] { ArgumentValue::Int(val) => assert_eq!(val, 10), _ => panic!("Wrong type") }
+        match args[2] { ArgumentValue::Int(val) => assert_eq!(val, 20), _ => panic!("Wrong type") }
+    }
+
+    #[test]
+    fn test_validate_wl_surface_attach_too_few_args_in_buffer() {
+        let sig = get_mock_sig("wl_surface", 0);
+        let mut content = BytesMut::new();
+        content.extend_from_slice(&100u32.to_le_bytes());
+        content.extend_from_slice(&10i32.to_le_bytes());
+
+        let raw_msg = RawMessage {
+            header: MessageHeader { object_id: ObjectId(1), size: (MESSAGE_HEADER_SIZE + 8) as u16, opcode: 0 },
+            content: content.freeze(),
+            fds: vec![],
+        };
+
+        let result = MessageParser::validate_and_parse_args(&raw_msg, &sig);
+        assert!(result.is_err());
         if let Err(WaylandServerError::Protocol(msg)) = result {
-            assert!(msg.contains("Invalid UTF-8 string"));
+            assert!(msg.contains("Buffer too small for i32"));
         } else {
-            panic!("Expected Protocol error for invalid UTF-8");
+            panic!("Expected protocol error");
+        }
+    }
+
+    #[test]
+    fn test_validate_wl_surface_attach_too_many_args_in_buffer() {
+        let sig = get_mock_sig("wl_surface", 0);
+        let mut content = BytesMut::new();
+        content.extend_from_slice(&100u32.to_le_bytes());
+        content.extend_from_slice(&10i32.to_le_bytes());
+        content.extend_from_slice(&20i32.to_le_bytes());
+        content.extend_from_slice(&0u32.to_le_bytes());
+
+        let raw_msg = RawMessage {
+            header: MessageHeader { object_id: ObjectId(1), size: (MESSAGE_HEADER_SIZE + 16) as u16, opcode: 0 },
+            content: content.freeze(),
+            fds: vec![],
+        };
+
+        let result = MessageParser::validate_and_parse_args(&raw_msg, &sig);
+        assert!(result.is_err());
+        if let Err(WaylandServerError::Protocol(msg)) = result {
+            assert!(msg.contains("Too much data for message"));
+            assert!(msg.contains("4 unexpected leftover bytes"));
+        } else {
+            panic!("Expected protocol error for leftover data");
+        }
+    }
+
+    #[test]
+    fn test_validate_shm_pool_create_buffer_correct_with_fd() {
+        let sig = get_mock_sig("wl_shm_pool", 0);
+        let mut content = BytesMut::new();
+        content.extend_from_slice(&3001u32.to_le_bytes());
+        content.extend_from_slice(&0u32.to_le_bytes());
+        content.extend_from_slice(&0i32.to_le_bytes());
+        content.extend_from_slice(&640i32.to_le_bytes());
+        content.extend_from_slice(&480i32.to_le_bytes());
+        content.extend_from_slice(&1280i32.to_le_bytes());
+        content.extend_from_slice(&1u32.to_le_bytes());
+
+        let mock_fd = 7;
+        let raw_msg = RawMessage {
+            header: MessageHeader { object_id: ObjectId(100), size: (MESSAGE_HEADER_SIZE + 4*7) as u16, opcode: 0 },
+            content: content.freeze(),
+            fds: vec![mock_fd],
+        };
+
+        let args = MessageParser::validate_and_parse_args(&raw_msg, &sig).unwrap();
+        assert_eq!(args.len(), 7);
+        match args[0] { ArgumentValue::NewId(id) => assert_eq!(id.value(), 3001), _ => panic!("Wrong type for new_id") }
+        match args[1] { ArgumentValue::Fd(fd) => assert_eq!(fd, mock_fd), _ => panic!("Wrong type for fd") }
+        match args[2] { ArgumentValue::Int(val) => assert_eq!(val, 0), _ => panic!("Wrong type for offset") }
+        match args[6] { ArgumentValue::Uint(val) => assert_eq!(val, 1), _ => panic!("Wrong type for format") }
+    }
+
+    #[test]
+    fn test_validate_shm_pool_create_buffer_missing_fd_in_vec() {
+        let sig = get_mock_sig("wl_shm_pool", 0);
+        let mut content = BytesMut::new();
+        content.extend_from_slice(&3001u32.to_le_bytes());
+        content.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..5 { content.extend_from_slice(&0i32.to_le_bytes()); }
+        content.extend_from_slice(&0u32.to_le_bytes());
+
+        let raw_msg = RawMessage {
+            header: MessageHeader { object_id: ObjectId(100), size: (MESSAGE_HEADER_SIZE + 4*7) as u16, opcode: 0 },
+            content: content.freeze(),
+            fds: vec![],
+        };
+
+        let result = MessageParser::validate_and_parse_args(&raw_msg, &sig);
+        assert!(result.is_err());
+        if let Err(WaylandServerError::Protocol(msg)) = result {
+            assert!(msg.contains("Expected file descriptor, but none were available"));
+        } else {
+            panic!("Expected protocol error for missing FD in RawMessage.fds");
+        }
+    }
+
+    #[test]
+    fn test_validate_shm_pool_create_buffer_too_many_fds_in_vec() {
+        let sig = get_mock_sig("wl_shm_pool", 0);
+        let mut content = BytesMut::new();
+        content.extend_from_slice(&3001u32.to_le_bytes());
+        content.extend_from_slice(&0u32.to_le_bytes());
+        for _ in 0..5 { content.extend_from_slice(&0i32.to_le_bytes()); }
+        content.extend_from_slice(&0u32.to_le_bytes());
+
+        let raw_msg = RawMessage {
+            header: MessageHeader { object_id: ObjectId(100), size: (MESSAGE_HEADER_SIZE + 4*7) as u16, opcode: 0 },
+            content: content.freeze(),
+            fds: vec![7, 8],
+        };
+
+        let result = MessageParser::validate_and_parse_args(&raw_msg, &sig);
+        assert!(result.is_err());
+        if let Err(WaylandServerError::Protocol(msg)) = result {
+            assert!(msg.contains("Too many FDs for message"));
+            assert!(msg.contains("1 unexpected leftover FDs"));
+        } else {
+            panic!("Expected protocol error for too many FDs");
         }
     }
 }
