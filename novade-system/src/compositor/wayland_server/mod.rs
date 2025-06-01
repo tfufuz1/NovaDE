@@ -1,4 +1,5 @@
 pub mod client;
+pub mod dispatcher;
 pub mod error;
 pub mod events;
 pub mod objects;
