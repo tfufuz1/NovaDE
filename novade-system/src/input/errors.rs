@@ -42,4 +42,16 @@ pub enum InputError {
 
     #[error("Internal error: {0}")]
     InternalError(String),
+
+    // Added for this subtask
+    #[error("Configuration file error: {0}")]
+    ConfigFileError(String),
+
+    #[error("Event processing error: {0}")]
+    EventProcessingError(String),
+
+    #[error("Focus management error: {0}")]
+    FocusError(String),
+    // Note: LibinputError and LibinputSessionError might be less relevant for pure stubs
+    // but are kept as they exist. DeviceInitializationFailed can be a new variant if needed.
 }

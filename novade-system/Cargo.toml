@@ -10,10 +10,22 @@ async-trait = "0.1.68"
 tokio = { version = "1", features = ["full"] }
 wayland-server = "0.31.0"
 wayland-protocols = "0.31.0"
-smithay = "0.6.0"
+smithay = { version = "=0.3.0", default-features = false } # Downgraded significantly & disabled default features
 zbus = "3"
-novade-compositor-core = { path = "../novade-compositor-core" }
-ash = { version = "0.37" } # Ensure relevant features if ash itself provides them, though ash-window is typical
-ash-window = "0.10"
-gpu-allocator = { version = "0.22", features = ["ash"] }
-raw-window-handle = "0.5"
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8" # For future config file parsing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+# libinput and udev dependencies have been completely removed.
+
+[features]
+default = []
+# The enable-libinput-integration feature is removed as the dependencies are gone.
+# If this feature flag was used for other purposes in the .rs files, those #[cfg] attributes
+# will now effectively be false, which should be fine as we are providing pure stubs.
+# For a clean slate, it's better to remove it if its only purpose was for the removed deps.
+# If other parts of the code were using #[cfg(feature = "enable-libinput-integration")],
+# they will now use their #[cfg(not(feature = "enable-libinput-integration"))] paths,
+# which is the intended outcome for a pure stub implementation.
+
+# Conditional dependency sections for libinput/udev are also removed.

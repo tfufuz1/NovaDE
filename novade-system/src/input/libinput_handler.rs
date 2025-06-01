@@ -1,112 +1,109 @@
-// novade-system/src/input/libinput_handler.rs
+// src/input/libinput_handler.rs
 
-use anyhow::{Result, Context};
-use smithay::backend::input::{InputEvent, LibinputInputBackend, SeatName};
-use calloop::{LoopHandle, Interest, PostAction, RegistrationToken};
-use calloop::source::PollOnce; // For direct polling if not using as regular event source
-use std::path::PathBuf; // May not be needed if not using Udev or direct session here
+// Assuming KeyState, ScrollSource etc. are defined elsewhere or will be here for stub.
+use crate::input::keyboard::KeyState;
+use crate::input::focus::ScrollSource; // Re-using from focus for stub consistency
 
-use crate::compositor::core::state::DesktopState; // To potentially dispatch events
-
-// Forward declare other input modules if they are created and used by this handler
-// pub mod input_dispatcher;
-// pub mod keyboard_layout;
-
-/// Manages the Libinput backend for input event processing.
-pub struct NovadeLibinputManager {
-    pub backend: LibinputInputBackend,
-    // reg_token: Option<RegistrationToken>, // If registered as a persistent source
+// Placeholder for what a device might look like after libinput processing
+#[derive(Debug, Clone)]
+pub struct StubbedInputDevice {
+    pub name: String,
+    pub capabilities: Vec<DeviceCapability>,
 }
 
-impl NovadeLibinputManager {
-    /// Creates a new `NovadeLibinputManager`.
-    ///
-    /// # Arguments
-    ///
-    /// * `seat_name`: The name of the seat this libinput backend is associated with.
-    ///                This must match the seat name provided to `Seat::new_wl_seat`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `LibinputInputBackend` fails to initialize or
-    /// link to the specified seat.
-    pub fn new(seat_name: &str) -> Result<Self> {
-        // Initialize LibinputInputBackend.
-        // The `None::<fn(_)>` argument means we are not providing a specific
-        // logger function to libinput, it will use its default or stderr.
-        // For a production compositor, integrating with a session manager (libseat, logind)
-        // would be done here, potentially using UdevBackend or DirectSession from Smithay.
-        // For now, this basic setup is similar to what was in main.rs.
-        let mut libinput_backend = LibinputInputBackend::new(None::<fn(_)>)
-            .context("Failed to initialize LibinputInputBackend")?;
+// Placeholder for device capabilities
+#[derive(Debug, Clone, PartialEq, Eq, Copy)] // Added Copy
+pub enum DeviceCapability {
+    Keyboard,
+    Pointer,
+    Touch,
+    Tablet,
+    Gesture,
+}
 
-        // Link the libinput backend to the specified seat name.
-        // This is crucial for Smithay to correctly associate input events.
-        // If this fails, input events might not be routed correctly or at all.
-        libinput_backend.link_seat(seat_name)
-            .map_err(|e| anyhow::anyhow!("Failed to link libinput backend to seat '{}': {}", seat_name, e))?;
+// --- Raw Input Event Simulation ---
+#[derive(Debug, Clone, Copy)]
+pub enum RawInputEventEnum {
+    Keyboard { raw_keycode: u32, state: KeyState, time: u32 },
+    PointerMotion { dx: f64, dy: f64, time: u32 },
+    PointerButton { raw_button_code: u32, state: crate::input::pointer::ButtonState, time: u32 }, // Use pointer's ButtonState
+    PointerScroll { dx_discrete: f64, dy_discrete: f64, dx_continuous: f64, dy_continuous: f64, source: ScrollSource, time: u32 },
+    TouchDown { id: i32, x: f64, y: f64, time: u32 },
+    TouchMotion { id: i32, x: f64, y: f64, time: u32 },
+    TouchUp { id: i32, time: u32 },
+    TouchFrame { time: u32 },
+    // TODO: Add other raw event types if needed (e.g., tablet events)
+}
 
-        tracing::info!("NovadeLibinputManager initialized and linked to seat: {}", seat_name);
-        Ok(Self {
-            backend: libinput_backend,
-            // reg_token: None,
-        })
+
+pub struct LibinputHandler {
+    // For stubbing, we might want a queue of events to dispatch
+    event_queue: Vec<RawInputEventEnum>,
+    event_cursor: usize,
+}
+
+impl LibinputHandler {
+    pub fn new() -> Self {
+        tracing::info!("LibinputHandler (Pure Stub): Initializing. No actual libinput interaction will occur.");
+        // Pre-populate with some events for dispatch_stub_event to work
+        let mut event_queue = Vec::new();
+        event_queue.push(RawInputEventEnum::PointerMotion{ dx: 10.0, dy: 5.0, time: 100});
+        event_queue.push(RawInputEventEnum::Keyboard{ raw_keycode: 30, state: KeyState::Pressed, time: 101}); // 'a' key
+        event_queue.push(RawInputEventEnum::Keyboard{ raw_keycode: 30, state: KeyState::Released, time: 102});
+        event_queue.push(RawInputEventEnum::TouchDown{ id: 0, x: 100.0, y: 100.0, time: 103});
+        event_queue.push(RawInputEventEnum::TouchMotion{ id: 0, x: 110.0, y: 105.0, time: 104});
+        event_queue.push(RawInputEventEnum::TouchUp{ id: 0, time: 105});
+        event_queue.push(RawInputEventEnum::TouchFrame{ time: 106 });
+
+
+        Self { event_queue, event_cursor: 0 }
     }
 
-    /// Prepares the libinput backend as a Calloop event source.
-    ///
-    /// The returned `LibinputInputBackend` can be inserted into a Calloop event loop.
-    /// The callback provided to `EventLoop::insert_source` will receive `InputEvent`s.
-    ///
-    /// This method consumes the manager and returns the backend because
-    /// `LibinputInputBackend` itself is the event source.
-    pub fn into_event_source(self) -> LibinputInputBackend {
-        self.backend
+    // This method is kept for DeviceManager's initial device scan.
+    pub fn get_devices(&self) -> Vec<StubbedInputDevice> {
+        tracing::debug!("LibinputHandler (Pure Stub): get_devices() called, returning predefined devices.");
+        let devices = vec![
+            StubbedInputDevice {
+                name: "Stubbed Keyboard".to_string(),
+                capabilities: vec![DeviceCapability::Keyboard],
+            },
+            StubbedInputDevice {
+                name: "Stubbed Mouse".to_string(),
+                capabilities: vec![DeviceCapability::Pointer],
+            },
+            StubbedInputDevice {
+                name: "Stubbed Touchscreen".to_string(),
+                capabilities: vec![DeviceCapability::Touch],
+            },
+        ];
+        tracing::trace!("LibinputHandler (Pure Stub): get_devices() returning: {:?}", devices);
+        devices
     }
 
-    // Alternatively, if we want to keep NovadeLibinputManager around and poll manually,
-    // or if it manages more state:
-    /*
-    pub fn register_event_source(
-        &mut self,
-        loop_handle: &LoopHandle<'static, DesktopState>,
-        // Define how events are dispatched, e.g., via a channel or callback to InputDispatcher
-        // For now, assume the caller handles event dispatch from the callback given to insert_source
-    ) -> Result<()> {
-        // This example shows how one might register it if it were a persistent source.
-        // However, LibinputInputBackend itself is typically the source.
-        // If we were wrapping a raw FD from libinput, this would be different.
+    // This would be the new method for InputManager's event loop
+    pub fn dispatch_stub_event(&mut self) -> Option<RawInputEventEnum> {
+        if self.event_cursor < self.event_queue.len() {
+            let event = self.event_queue[self.event_cursor];
+            self.event_cursor += 1;
+            tracing::trace!("LibinputHandler (Pure Stub): dispatch_stub_event() -> {:?}", event);
+            Some(event)
+        } else {
+            tracing::trace!("LibinputHandler (Pure Stub): dispatch_stub_event() -> No more events.");
+            None
+        }
+    }
 
-        // This is not the typical way to use LibinputInputBackend with Calloop.
-        // Usually, the LibinputInputBackend *is* the source.
-        // This method is more of a conceptual placeholder.
-        tracing::warn!("register_event_source is conceptual; LibinputInputBackend is the source itself.");
+    // Old dispatch and get_event are no longer the primary interface for the main loop
+    // but might be kept if other parts of the stub system relied on them.
+    // For this refactor, assume dispatch_stub_event is the new way.
+    pub fn dispatch(&mut self) -> Result<(), String> { // Kept for now, might be removed later
+        tracing::debug!("LibinputHandler (Pure Stub): dispatch() called (conceptual reset for stub events).");
+        // self.event_cursor = 0; // Optional: reset queue for re-simulation
         Ok(())
     }
-    */
 
-    // Example of how to process events if polled directly (less common with Calloop integration)
-    /*
-    pub fn dispatch_new_events(&mut self, desktop_state: &mut DesktopState) -> Result<()> {
-        // This is how you might manually poll if not using Calloop's event loop integration.
-        // Note: This is generally not how you'd integrate with Calloop for LibinputInputBackend.
-        // You'd insert `self.backend` as an event source.
-        let source = PollOnce::new(&mut self.backend); // This is not quite right for direct use.
-                                                       // LibinputInputBackend implements EventSource directly.
-
-        // The correct way is to insert self.backend into the event loop.
-        // This method is just for conceptual understanding of event dispatch.
-
-        // This is a simplified placeholder. The actual event dispatch would involve
-        // matching on InputEvent and calling handlers in DesktopState or InputDispatcher.
-        // The event processing logic from main.rs (the match statement) will be moved
-        // to the InputDispatcher or the callback provided when inserting the libinput source.
-
-        // self.backend.dispatch_new_events(|event| {
-        //    desktop_state.process_input_event(event); // Example call
-        // })?;
-        tracing::warn!("dispatch_new_events is conceptual; use Calloop event source integration.");
-        Ok(())
+    pub fn get_event(&mut self) -> Option<()> { // Kept for now, might be removed later
+        tracing::trace!("LibinputHandler (Pure Stub): get_event() called, returning None.");
+        None
     }
-    */
 }
