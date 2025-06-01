@@ -128,6 +128,50 @@ pub fn mock_spec_store() -> ProtocolSpecStore {
             WaylandWireType::Int, WaylandWireType::Int, WaylandWireType::Uint,
         ],
     });
+
+    // wl_display.sync (opcode 0): new_id (callback)
+    store.insert(("wl_display".to_string(), 0), MessageSignature {
+        interface_name: "wl_display".to_string(), message_name: "sync".to_string(),
+        opcode: 0, since_version: 1, arg_types: vec![WaylandWireType::NewId],
+    });
+    // wl_display.get_registry (opcode 1): new_id (registry)
+    store.insert(("wl_display".to_string(), 1), MessageSignature {
+        interface_name: "wl_display".to_string(), message_name: "get_registry".to_string(),
+        opcode: 1, since_version: 1, arg_types: vec![WaylandWireType::NewId],
+    });
+
+    // wl_compositor.create_surface (opcode 0): new_id (surface)
+    store.insert(("wl_compositor".to_string(), 0), MessageSignature {
+        interface_name: "wl_compositor".to_string(),
+        message_name: "create_surface".to_string(),
+        opcode: 0, // REQ_CREATE_SURFACE_OPCODE from wl_compositor.rs
+        since_version: 1, // Assuming version 1 for this core functionality
+        arg_types: vec![WaylandWireType::NewId], // Expects one argument: new_id for the wl_surface
+    });
+
+    // wl_registry.bind (opcode 0): uint (name), new_id (id)
+    store.insert(("wl_registry".to_string(), 0), MessageSignature {
+        interface_name: "wl_registry".to_string(),
+        message_name: "bind".to_string(),
+        opcode: 0, // REQ_BIND_OPCODE from wl_registry.rs
+        since_version: 1,
+        arg_types: vec![WaylandWireType::Uint, WaylandWireType::NewId], // name, id<interface>
+                                                                    // Note: The 'interface' (string) and 'version' (uint)
+                                                                    // that are conceptually part of 'new_id<interface>'
+                                                                    // are *not* separate arguments for wl_registry.bind.
+                                                                    // Client libraries handle this. Our parser gives NewId(numeric_id).
+                                                                    // The dispatcher uses context (the global being bound) for interface/version.
+    });
+
+    // wl_shm.create_pool (opcode 0): new_id (pool_id), fd (fd), int (size)
+    store.insert(("wl_shm".to_string(), 0), MessageSignature {
+        interface_name: "wl_shm".to_string(),
+        message_name: "create_pool".to_string(),
+        opcode: 0, // REQ_CREATE_POOL_OPCODE from wl_shm.rs
+        since_version: 1,
+        arg_types: vec![WaylandWireType::NewId, WaylandWireType::Fd, WaylandWireType::Int],
+    });
+
     store
 }
 

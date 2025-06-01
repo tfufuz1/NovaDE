@@ -16,14 +16,46 @@ use tracing::{debug, error, info, warn};
 pub async fn process_wayland_event(
     event: WaylandEvent,
     global_object_manager: Arc<GlobalObjectManager>,
-    protocol_specs: &ProtocolSpecStore, // In a real app, this might be Arced or &'static
-    // event_queue: &EventQueue, // To send further events, e.g., protocol errors to client
+    protocol_specs: &ProtocolSpecStore,
+    event_sender: Arc<EventSender>,
+    // This is a placeholder argument. In a real system, the dispatcher would get the
+    // specific client's stream from a client manager or the WaylandEvent itself.
+    client_streams: Arc<Mutex<HashMap<ClientId, Arc<TokioUnixStream>>>>,
 ) -> Result<(), WaylandServerError> {
+    // Import protocol handlers
+    use crate::compositor::wayland_server::event_sender::EventSender;
+    use crate::compositor::wayland_server::protocols::core::{
+        wl_display::{
+            handle_sync, handle_get_registry, REQ_SYNC_OPCODE as WL_DISPLAY_REQ_SYNC_OPCODE,
+            REQ_GET_REGISTRY_OPCODE as WL_DISPLAY_REQ_GET_REGISTRY_OPCODE,
+            WL_DISPLAY_ID, wl_display_interface, WL_DISPLAY_VERSION,
+        },
+        wl_registry::{
+            handle_bind as handle_registry_bind, REQ_BIND_OPCODE as WL_REGISTRY_REQ_BIND_OPCODE,
+            get_server_globals_list,
+        },
+        wl_compositor::{
+            handle_create_surface as handle_compositor_create_surface,
+            REQ_CREATE_SURFACE_OPCODE as WL_COMPOSITOR_REQ_CREATE_SURFACE_OPCODE,
+        },
+        wl_shm::{ // Added for wl_shm
+            handle_create_pool as handle_shm_create_pool,
+            REQ_CREATE_POOL_OPCODE as WL_SHM_REQ_CREATE_POOL_OPCODE,
+            // send_initial_format_events function will be called elsewhere (e.g. on wl_shm bind)
+        },
+    };
+
     match event {
         WaylandEvent::NewClient { client_id } => {
             info!("Dispatcher: Processing NewClient event for {}", client_id);
-            let _client_space = global_object_manager.add_client(client_id).await;
-            debug!("Dispatcher: ClientObjectSpace ensured for new client {}", client_id);
+            let client_space = global_object_manager.add_client(client_id).await;
+            // Register the wl_display object for this new client
+            if let Err(e) = client_space.register_object(WL_DISPLAY_ID, wl_display_interface(), WL_DISPLAY_VERSION).await {
+                error!("Dispatcher: Failed to register initial wl_display for client {}: {}. Removing client.", client_id, e);
+                global_object_manager.remove_client(client_id).await; // Cleanup
+                return Err(e);
+            }
+            debug!("Dispatcher: ClientObjectSpace created and initial wl_display registered for new client {}", client_id);
         }
         WaylandEvent::ClientDisconnected { client_id, reason } => {
             info!("Dispatcher: Processing ClientDisconnected event for {}. Reason: {}", client_id, reason);
@@ -91,6 +123,71 @@ pub async fn process_wayland_event(
                                 object_entry.interface.as_str(), signature.message_name, object_entry.id.value(), parsed_args
                             );
                             // TODO: Actual dispatch to object's method handler.
+                                // This is where the big match or trait system would go.
+                                match object_entry.interface.as_str() {
+                                    "wl_display" => {
+                                        // Acquire the specific client's stream for sending events
+                                        let streams_guard = client_streams.lock().await;
+                                        let client_stream = streams_guard.get(&client_id).ok_or_else(|| {
+                                            error!("Dispatcher: Client stream not found for client_id: {}", client_id);
+                                            WaylandServerError::EventDispatch("Client stream not found".to_string())
+                                        })?;
+
+                                        match signature.opcode {
+                                            WL_DISPLAY_REQ_SYNC_OPCODE => {
+                                                handle_sync(client_id, object_entry.id, object_entry.version, parsed_args, Arc::clone(&client_space), Arc::clone(&event_sender), Arc::clone(client_stream)).await?;
+                                            }
+                                            WL_DISPLAY_REQ_GET_REGISTRY_OPCODE => {
+                                                let server_globals = get_server_globals_list();
+                                                handle_get_registry(client_id, object_entry.id, object_entry.version, parsed_args, Arc::clone(&client_space), Arc::clone(&event_sender), Arc::clone(client_stream), &server_globals).await?;
+                                            }
+                                            _ => {
+                                                error!("Dispatcher: Unhandled opcode {} for wl_display object {}", signature.opcode, object_entry.id.value());
+                                                return Err(WaylandServerError::Protocol(format!("Unhandled opcode {} for wl_display", signature.opcode)));
+                                            }
+                                        }
+                                    }
+                                    "wl_registry" => {
+                                        match signature.opcode {
+                                            WL_REGISTRY_REQ_BIND_OPCODE => {
+                                                // handle_registry_bind needs the list of server globals.
+                                                let server_globals = get_server_globals_list();
+                                                handle_registry_bind(client_id, object_entry.id, object_entry.version, parsed_args, Arc::clone(&client_space), &server_globals).await?;
+                                            }
+                                            _ => {
+                                                error!("Dispatcher: Unhandled opcode {} for wl_registry object {}", signature.opcode, object_entry.id.value());
+                                                return Err(WaylandServerError::Protocol(format!("Unhandled opcode {} for wl_registry", signature.opcode)));
+                                            }
+                                        }
+                                    }
+                                    "wl_compositor" => {
+                                        match signature.opcode {
+                                            WL_COMPOSITOR_REQ_CREATE_SURFACE_OPCODE => {
+                                                handle_compositor_create_surface(client_id, object_entry.id, object_entry.version, parsed_args, Arc::clone(&client_space)).await?;
+                                            }
+                                            _ => {
+                                                error!("Dispatcher: Unhandled opcode {} for wl_compositor object {}", signature.opcode, object_entry.id.value());
+                                                return Err(WaylandServerError::Protocol(format!("Unhandled opcode {} for wl_compositor", signature.opcode)));
+                                            }
+                                        }
+                                    }
+                                    "wl_shm" => {
+                                        match signature.opcode {
+                                            WL_SHM_REQ_CREATE_POOL_OPCODE => {
+                                                handle_shm_create_pool(client_id, object_entry.id, object_entry.version, parsed_args, Arc::clone(&client_space)).await?;
+                                            }
+                                            _ => {
+                                                error!("Dispatcher: Unhandled opcode {} for wl_shm object {}", signature.opcode, object_entry.id.value());
+                                                return Err(WaylandServerError::Protocol(format!("Unhandled opcode {} for wl_shm", signature.opcode)));
+                                            }
+                                        }
+                                    }
+                                    // TODO: Add cases for other interfaces like wl_surface, wl_shm_pool, etc.
+                                    _ => {
+                                        warn!("Dispatcher: Received message for unhandled interface '{}' on object {}",
+                                            object_entry.interface.as_str(), object_entry.id.value());
+                                    }
+                                }
                         }
                         Err(e) => {
                             error!(
@@ -123,27 +220,49 @@ pub async fn process_wayland_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compositor::wayland_server::protocol::{mock_spec_store, MessageHeader, ObjectId, MESSAGE_HEADER_SIZE};
+    use crate::compositor::wayland_server::protocol::{mock_spec_store, MessageHeader, ObjectId, MESSAGE_HEADER_SIZE, NewId};
     use crate::compositor::wayland_server::client::ClientId;
-    use bytes::{Bytes, BytesMut}; // Added Bytes for test_process_client_message_non_existent_object
+    use bytes::{Bytes, BytesMut};
+    use tokio::net::UnixStream as TokioUnixStream;
+    use tempfile::tempdir;
+    use std::collections::HashMap;
 
-    fn setup_test_env() -> (Arc<GlobalObjectManager>, ProtocolSpecStore) {
-        (Arc::new(GlobalObjectManager::new()), mock_spec_store())
+
+    // Helper for tests that need a mock client stream
+    async fn create_mock_stream_pair() -> (Arc<TokioUnixStream>, Arc<TokioUnixStream>) {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("test_dispatcher_mock.sock");
+        let listener = tokio::net::UnixListener::bind(&socket_path).await.unwrap();
+        let client_stream = Arc::new(TokioUnixStream::connect(&socket_path).await.unwrap());
+        let (server_stream_for_client, _addr) = listener.accept().await.unwrap(); // This is the stream the server would use to send to client
+        (client_stream, Arc::new(server_stream_for_client))
+    }
+
+
+    fn setup_test_env_with_streams() -> (Arc<GlobalObjectManager>, ProtocolSpecStore, Arc<EventSender>, Arc<Mutex<HashMap<ClientId, Arc<TokioUnixStream>>>>) {
+        (
+            Arc::new(GlobalObjectManager::new()),
+            mock_spec_store(),
+            Arc::new(EventSender::new()),
+            Arc::new(Mutex::new(HashMap::new())),
+        )
     }
 
     #[tokio::test]
     async fn test_process_new_client_event() {
-        let (gom, specs) = setup_test_env();
+        let (gom, specs, sender, streams) = setup_test_env_with_streams();
         let client_id = ClientId::new();
         let event = WaylandEvent::NewClient { client_id };
 
-        assert!(process_wayland_event(event, Arc::clone(&gom), &specs).await.is_ok());
+        assert!(process_wayland_event(event, Arc::clone(&gom), &specs, sender, streams).await.is_ok());
         assert!(gom.get_client_space(client_id).await.is_some(), "Client space should be created");
+        let client_space = gom.get_client_space(client_id).await.unwrap();
+        assert!(client_space.get_object(WL_DISPLAY_ID).await.is_some(), "wl_display should be registered for new client");
     }
 
     #[tokio::test]
     async fn test_process_client_disconnected_event() {
-        let (gom, specs) = setup_test_env();
+        let (gom, specs, sender, streams) = setup_test_env_with_streams();
         let client_id = ClientId::new();
         gom.add_client(client_id).await;
         assert!(gom.get_client_space(client_id).await.is_some());
@@ -368,4 +487,85 @@ mod tests {
             assert!(result.is_ok(), "Processing integrated client message failed: {:?}", result.err());
             // Further assertions would require capturing dispatcher output or side effects.
             // For now, Ok(()) means it didn't blow up on valid path.
+        }
+
+        #[tokio::test]
+        async fn test_integration_client_setup_sequence() {
+            let (gom, specs, event_sender, client_streams_map) =
+                setup_test_env_with_streams(); // Use the existing helper that provides streams map
+
+            // Create a client ID and a mock stream pair for this specific test client
+            let client_id_for_test = ClientId::new();
+            let (_client_socket_reader, server_socket_writer) = create_mock_stream_pair().await;
+            client_streams_map.lock().await.insert(client_id_for_test, server_socket_writer);
+
+
+            // 1. NewClient event (simulates client connection and wl_display registration)
+            let new_client_event = WaylandEvent::NewClient { client_id: client_id_for_test };
+            process_wayland_event(new_client_event, Arc::clone(&gom), &specs, Arc::clone(&event_sender), Arc::clone(&client_streams_map)).await.unwrap();
+
+            let client_space = gom.get_client_space(client_id_for_test).await.unwrap();
+            assert!(client_space.get_object(WL_DISPLAY_ID).await.is_some(), "wl_display not registered");
+
+            // 2. Client sends wl_display.get_registry(new_registry_id)
+            let new_registry_id_val = 2u32;
+            let mut get_registry_content = BytesMut::new();
+            get_registry_content.put_u32_le(new_registry_id_val);
+            let get_registry_msg_size = (MESSAGE_HEADER_SIZE + get_registry_content.len()) as u16;
+            let get_registry_raw_msg = RawMessage {
+                header: MessageHeader { object_id: WL_DISPLAY_ID, size: get_registry_msg_size, opcode: WL_DISPLAY_REQ_GET_REGISTRY_OPCODE },
+                content: get_registry_content.freeze(),
+                fds: vec![],
+            };
+            let get_registry_event = WaylandEvent::ClientMessage { client_id: client_id_for_test, message: get_registry_raw_msg };
+
+            let proc_result1 = process_wayland_event(get_registry_event, Arc::clone(&gom), &specs, Arc::clone(&event_sender), Arc::clone(&client_streams_map)).await;
+            assert!(proc_result1.is_ok(), "get_registry processing failed: {:?}", proc_result1.err());
+
+            let registry_obj_entry = client_space.get_object(ObjectId::new(new_registry_id_val)).await;
+            assert!(registry_obj_entry.is_some(), "wl_registry object not created");
+            assert_eq!(registry_obj_entry.unwrap().interface.as_str(), wl_registry_interface().as_str());
+            // TODO: Verify wl_registry.global events actually sent (would need to read from _client_socket_reader)
+
+            // 3. Client sends wl_registry.bind(global_name_for_compositor, new_compositor_id)
+            let server_globals = get_server_globals_list();
+            let compositor_global = server_globals.iter().find(|g| g.interface.as_str() == "wl_compositor").unwrap();
+            let new_compositor_id_val = 3u32;
+
+            let mut bind_compositor_content = BytesMut::new();
+            bind_compositor_content.put_u32_le(compositor_global.name_id);
+            bind_compositor_content.put_u32_le(new_compositor_id_val);
+            let bind_compositor_msg_size = (MESSAGE_HEADER_SIZE + bind_compositor_content.len()) as u16;
+            let bind_compositor_raw_msg = RawMessage {
+                header: MessageHeader { object_id: ObjectId::new(new_registry_id_val), size: bind_compositor_msg_size, opcode: WL_REGISTRY_REQ_BIND_OPCODE },
+                content: bind_compositor_content.freeze(),
+                fds: vec![],
+            };
+            let bind_compositor_event = WaylandEvent::ClientMessage { client_id: client_id_for_test, message: bind_compositor_raw_msg };
+
+            let proc_result2 = process_wayland_event(bind_compositor_event, Arc::clone(&gom), &specs, Arc::clone(&event_sender), Arc::clone(&client_streams_map)).await;
+            assert!(proc_result2.is_ok(), "wl_registry.bind for compositor failed: {:?}", proc_result2.err());
+
+            let compositor_obj_entry = client_space.get_object(ObjectId::new(new_compositor_id_val)).await;
+            assert!(compositor_obj_entry.is_some(), "wl_compositor object not created via bind");
+            assert_eq!(compositor_obj_entry.unwrap().interface.as_str(), wl_compositor_interface().as_str());
+
+            // 4. Client sends wl_compositor.create_surface(new_surface_id)
+            let new_surface_id_val = 4u32;
+            let mut create_surface_content = BytesMut::new();
+            create_surface_content.put_u32_le(new_surface_id_val);
+            let create_surface_msg_size = (MESSAGE_HEADER_SIZE + create_surface_content.len()) as u16;
+            let create_surface_raw_msg = RawMessage {
+                header: MessageHeader { object_id: ObjectId::new(new_compositor_id_val), size: create_surface_msg_size, opcode: WL_COMPOSITOR_REQ_CREATE_SURFACE_OPCODE },
+                content: create_surface_content.freeze(),
+                fds: vec![],
+            };
+            let create_surface_event = WaylandEvent::ClientMessage { client_id: client_id_for_test, message: create_surface_raw_msg };
+
+            let proc_result3 = process_wayland_event(create_surface_event, Arc::clone(&gom), &specs, Arc::clone(&event_sender), Arc::clone(&client_streams_map)).await;
+            assert!(proc_result3.is_ok(), "wl_compositor.create_surface failed: {:?}", proc_result3.err());
+
+            let surface_obj_entry = client_space.get_object(ObjectId::new(new_surface_id_val)).await;
+            assert!(surface_obj_entry.is_some(), "wl_surface object not created");
+            assert_eq!(surface_obj_entry.unwrap().interface.as_str(), wl_surface_interface().as_str());
         }
