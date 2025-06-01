@@ -442,4 +442,175 @@ impl FocusManager {
 impl Keyboard {
     pub fn pressed_keys(&self) -> &HashSet<u32> { &self.pressed_keys }
     pub fn modifier_state(&self) -> ModifiersState { self.modifier_state }
+    // Allow tests to see pressed keys
+    #[cfg(test)]
+    pub fn test_pressed_keys(&self) -> &HashSet<u32> { &self.pressed_keys }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::config::{InputConfig, PointerConfig as CfgPointer, KeyboardConfig as CfgKeyboard, DeviceSpecificConfigEntry};
+    use crate::wayland_server_module_placeholder::{WaylandServerHandle, SurfaceManagerHandle, StubbedSurfaceInfo, Rect};
+    use crate::input::keyboard::{Keyboard, KeyState, ModifiersState};
+    use crate::input::pointer::{Pointer, ButtonState as PtrButtonState, ScrollSource as PtrScrollSource};
+    use crate::input::touch::Touch;
+    use std::collections::HashMap;
+
+    // Helper to create a default InputConfig for tests
+    fn default_test_input_config() -> InputConfig {
+        InputConfig {
+            default_pointer_config: Some(CfgPointer {
+                acceleration_factor: Some(0.0), sensitivity: Some(1.0),
+                acceleration_curve: None, button_mapping: None,
+            }),
+            default_keyboard_config: Some(CfgKeyboard {
+                repeat_rate: Some(25), repeat_delay: Some(600),
+            }),
+            device_specific: None,
+        }
+    }
+
+    // Helper to create a FocusManager with default stubs for testing
+    fn create_test_focus_manager(config: &InputConfig) -> FocusManager {
+        let sm_handle = SurfaceManagerHandle::new(); // Uses its own stubbed surfaces
+        let wl_handle = WaylandServerHandle::new();
+        FocusManager::new(wl_handle, sm_handle, config)
+    }
+
+    #[test]
+    fn test_focus_manager_new() {
+        let config = default_test_input_config();
+        let fm = create_test_focus_manager(&config);
+        assert!(fm.keyboard_focus.is_none());
+        assert!(fm.pointer_focus.is_none());
+        assert!(fm.active_grabs.is_empty());
+    }
+
+    #[test]
+    fn test_calculate_surface_at_pointer() {
+        let config = default_test_input_config();
+        let fm = create_test_focus_manager(&config);
+        // Based on SurfaceManagerHandle stub:
+        // s1: id: 1, x: 0, y: 0, w: 800, h: 600, z:0
+        // s2: id: 2, x: 50, y: 50, w: 100, h: 100, z:1 (top)
+
+        assert_eq!(fm.calculate_surface_at_pointer(10.0, 10.0), Some(1)); // Only s1
+        assert_eq!(fm.calculate_surface_at_pointer(60.0, 60.0), Some(2)); // s2 is on top of s1
+        assert_eq!(fm.calculate_surface_at_pointer(700.0, 500.0), Some(1)); // Only s1
+        assert_eq!(fm.calculate_surface_at_pointer(900.0, 700.0), None); // Outside both
+    }
+
+    #[test]
+    fn test_set_keyboard_focus() {
+        let config = default_test_input_config();
+        let mut fm = create_test_focus_manager(&config);
+        let test_serial = 123;
+
+        fm.set_keyboard_focus(Some(1), test_serial);
+        assert_eq!(fm.keyboard_focus, Some(1));
+        assert_eq!(fm.focus_history.front(), Some(&1));
+        // TODO: Verify WaylandServerHandle logs for send_keyboard_enter (needs mock or log capture)
+
+        fm.set_keyboard_focus(Some(2), test_serial + 1);
+        assert_eq!(fm.keyboard_focus, Some(2));
+        assert_eq!(fm.focus_history.front(), Some(&2));
+        assert_eq!(fm.focus_history.get(1), Some(&1));
+        // TODO: Verify WaylandServerHandle logs for send_keyboard_leave (for s1) and send_keyboard_enter (for s2)
+
+        fm.set_keyboard_focus(None, test_serial + 2);
+        assert!(fm.keyboard_focus.is_none());
+        // TODO: Verify WaylandServerHandle logs for send_keyboard_leave (for s2)
+    }
+
+    #[test]
+    fn test_pointer_motion_focus_change() {
+        let config = default_test_input_config();
+        let mut fm = create_test_focus_manager(&config);
+
+        // Motion into surface 1 (from outside)
+        fm.handle_raw_pointer_motion(10.0, 10.0, 100); // x=10, y=10
+        assert_eq!(fm.pointer_focus, Some(1));
+        // TODO: Verify WaylandServerHandle logs: send_pointer_enter(1), send_pointer_motion(1), send_pointer_frame(1)
+
+        // Motion into surface 2 (from surface 1)
+        fm.handle_raw_pointer_motion(50.0, 50.0, 101); // dx=50, dy=50 -> total x=60, y=60
+        assert_eq!(fm.pointer_focus, Some(2));
+        // TODO: Verify WaylandServerHandle logs: send_pointer_leave(1), send_pointer_enter(2), send_pointer_motion(2), send_pointer_frame(2)
+
+        // Motion out of all surfaces
+        fm.handle_raw_pointer_motion(1000.0, 1000.0, 102); // x=1060, y=1060
+        assert!(fm.pointer_focus.is_none());
+        // TODO: Verify WaylandServerHandle logs: send_pointer_leave(2)
+    }
+
+    #[test]
+    fn test_pointer_button_click_to_focus() {
+        let config = default_test_input_config();
+        let mut fm = create_test_focus_manager(&config);
+
+        // Initial state: no focus
+        assert!(fm.keyboard_focus.is_none());
+        assert!(fm.pointer_focus.is_none());
+
+        // Click on surface 1 (coords 10,10)
+        fm.handle_raw_pointer_button(1, PtrButtonState::Pressed, 200);
+        // This raw handler calls pointer_handler.handle_button_event, which generates a ProcessedPointerButtonEvent.
+        // Then FocusManager.handle_processed_pointer_button is called.
+        // Pointer coords for button event are from pointer_handler's internal state.
+        // We need to simulate a motion first to position the pointer.
+        fm.handle_raw_pointer_motion(10.0, 10.0, 199); // Move pointer to (10,10)
+        assert_eq!(fm.pointer_focus, Some(1)); // Pointer focus updated by motion
+
+        fm.handle_raw_pointer_button(1, PtrButtonState::Pressed, 200);
+        assert_eq!(fm.keyboard_focus, Some(1)); // Keyboard focus should follow click
+        // TODO: Verify WaylandServerHandle logs: send_keyboard_enter(1), send_pointer_button(1)
+    }
+
+    #[test]
+    fn test_keyboard_event_routing_to_focus() {
+        let config = default_test_input_config();
+        let mut fm = create_test_focus_manager(&config);
+        fm.set_keyboard_focus(Some(1), 1000); // Set focus to surface 1
+
+        // Simulate 'a' key press
+        fm.handle_raw_keyboard_input(30, KeyState::Pressed, 1001);
+        // TODO: Verify WaylandServerHandle logs: send_keyboard_event_to_surface(1, ...)
+        // Check that internal raw key state is updated
+        assert!(fm.current_pressed_keys.contains(&30));
+
+        fm.handle_raw_keyboard_input(30, KeyState::Released, 1002);
+        assert!(!fm.current_pressed_keys.contains(&30));
+    }
+
+    #[test]
+    fn test_pointer_grab() {
+        let config = default_test_input_config();
+        let mut fm = create_test_focus_manager(&config);
+        let surface_grab_owner: SurfaceId = 5; // Assume this surface exists for grab
+        let grab_serial = 300;
+
+        fm.request_pointer_grab(surface_grab_owner, grab_serial);
+        assert_eq!(fm.active_grabs.len(), 1);
+        assert_eq!(fm.active_grabs[0].surface_id, surface_grab_owner);
+
+        // Motion event while grabbed - should go to grab owner, not affect pointer_focus for enter/leave
+        fm.handle_raw_pointer_motion(10.0, 10.0, 301); // Moves to (10,10) which is surface 1
+        assert_eq!(fm.pointer_focus, None); // Pointer focus should not change due to enter/leave during grab
+        // TODO: Verify WaylandServerHandle logs: send_pointer_motion(surface_grab_owner, ...)
+
+        fm.release_pointer_grab(surface_grab_owner, grab_serial);
+        assert!(fm.active_grabs.is_empty());
+    }
+     #[test]
+    fn test_touch_down_sets_keyboard_focus() {
+        let config = default_test_input_config();
+        let mut fm = create_test_focus_manager(&config);
+
+        // Touch down on surface 2 (coords 60,60)
+        fm.handle_raw_touch_down(0, 60.0, 60.0, 400);
+        assert_eq!(fm.keyboard_focus, Some(2));
+        assert_eq!(fm.touch_focus.get(&0), Some(&2));
+        // TODO: Verify WaylandServerHandle logs for touch_down and keyboard_enter
+    }
 }
