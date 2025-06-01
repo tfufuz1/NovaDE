@@ -16,7 +16,9 @@ serde = { version = "1.0", features = ["derive"] }
 toml = "0.8" # For future config file parsing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
-# libinput and udev dependencies have been completely removed.
+input = "0.7.0"
+udev = "0.7.0"
+xkbcommon = "0.7.0"
 
 [features]
 default = []

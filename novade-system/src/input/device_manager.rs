@@ -1,155 +1,202 @@
 // src/input/device_manager.rs
-use super::libinput_handler::{LibinputHandler, StubbedInputDevice, DeviceCapability as LibinputDeviceCapability};
-use super::config::{InputConfig, PointerConfig, KeyboardConfig};
-use crate::wayland_server_module_placeholder::{WaylandServerHandle, WlSeatCapability}; // For notify_seat
-use std::collections::{HashSet, HashMap}; // Added HashMap
+use crate::input::libinput_handler::LibinputUdevHandler;
+use crate::input::config::InputConfig;
+use crate::input::keyboard;
+use crate::input::pointer;
+use crate::input::touch; // Import the touch module
+use input::{Device, capability::Capability, event::device::DeviceEvent, event::Event as LibinputEvent};
+use tracing::{info, warn, debug};
+use std::collections::HashMap;
+use std::path::Path;
 
 #[derive(Debug, Clone)]
-pub struct InputDevice {
-    pub name: String,
-    pub capabilities: HashSet<DeviceCapability>,
-    pub pointer_config: Option<PointerConfig>,
-    pub keyboard_config: Option<KeyboardConfig>,
-    // Add other specific configs if needed, e.g., TouchConfig
+pub struct DeviceWrapper {
+    device: Device,
+    name: String,
+    capabilities: Vec<Capability>,
+    pub keyboard_handler: Option<keyboard::Keyboard>,
+    pub pointer_handler: Option<pointer::Pointer>,
+    pub touch_handler: Option<touch::Touch>, // Added touch handler
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)] // Added Copy
-pub enum DeviceCapability {
-    Keyboard,
-    Pointer,
-    Touch,
-    Tablet,
-    Gesture,
-}
+impl DeviceWrapper {
+    pub fn new(device: Device) -> Self {
+        let name = device.name().to_string();
+        let mut capabilities = Vec::new();
+        if device.has_capability(Capability::Keyboard) { capabilities.push(Capability::Keyboard); }
+        if device.has_capability(Capability::Pointer) { capabilities.push(Capability::Pointer); }
+        if device.has_capability(Capability::Touch) { capabilities.push(Capability::Touch); }
+        if device.has_capability(Capability::TabletTool) { capabilities.push(Capability::TabletTool); }
+        if device.has_capability(Capability::Gesture) { capabilities.push(Capability::Gesture); }
 
-fn convert_capability(lib_cap: &LibinputDeviceCapability) -> DeviceCapability {
-    match lib_cap {
-        LibinputDeviceCapability::Keyboard => DeviceCapability::Keyboard,
-        LibinputDeviceCapability::Pointer => DeviceCapability::Pointer,
-        LibinputDeviceCapability::Touch => DeviceCapability::Touch,
-        LibinputDeviceCapability::Tablet => DeviceCapability::Tablet,
-        LibinputDeviceCapability::Gesture => DeviceCapability::Gesture,
+        debug!("DeviceWrapper: Found device '{}' with capabilities: {:?}", name, capabilities);
+        Self {
+            device,
+            name,
+            capabilities,
+            keyboard_handler: None,
+            pointer_handler: None,
+            touch_handler: None, // Initialize to None
+        }
     }
+
+    pub fn name(&self) -> &str { &self.name }
+    pub fn capabilities(&self) -> &[Capability] { &self.capabilities }
+    pub fn has_capability(&self, capability: Capability) -> bool { self.capabilities.contains(&capability) }
+    pub fn get_libinput_device(&self) -> &Device { &self.device }
 }
 
-pub struct DeviceManager {
-    libinput_handler: LibinputHandler, // Keep libinput_handler for potential re-scan/refresh
-    pub devices: Vec<InputDevice>,
+pub struct InputDeviceManager {
     input_config: InputConfig,
-    // We won't store individual Keyboard/Pointer/Touch handlers here anymore.
-    // FocusManager will own them. DeviceManager provides the configurations for them.
+    devices: HashMap<String, DeviceWrapper>,
 }
 
-impl DeviceManager {
-    // Renamed from `new` and takes full config
-    pub fn new_with_config(libinput_handler: LibinputHandler, config: InputConfig) -> Self {
-        let mut dm = Self {
-            libinput_handler,
-            devices: Vec::new(),
-            input_config: config,
+impl InputDeviceManager {
+    pub fn new(libinput_handler: &mut LibinputUdevHandler, config_path: &Path) -> Self {
+        info!("InputDeviceManager: Initializing...");
+
+        let input_config = InputConfig::load_from_file(config_path).unwrap_or_else(|err| {
+            warn!("InputDeviceManager: Failed to load input configuration from '{}': {:?}. Using default config.",
+                  config_path.display(), err);
+            InputConfig::default()
+        });
+        info!("InputDeviceManager: Loaded configuration (or default): {:?}", input_config);
+
+        let mut manager = Self {
+            input_config,
+            devices: HashMap::new(),
         };
-        tracing::info!("DeviceManager: Initializing with stubbed libinput_handler and provided config.");
-        dm.refresh_devices_internal(); // Initial device scan
-        tracing::info!("DeviceManager: Initialized with {} stubbed devices. Configurations applied.", dm.devices.len());
-        for device in &dm.devices {
-            tracing::debug!("  Device: {}, Caps: {:?}, PtrCfg: {:?}, KbdCfg: {:?}",
-                device.name, device.capabilities, device.pointer_config, device.keyboard_config);
+
+        manager.update_devices(libinput_handler);
+
+        info!("InputDeviceManager: Initialization complete. Currently managing {} devices.", manager.devices.len());
+        for device_wrapper in manager.devices.values() {
+            info!("  - Initial Device: {}, Name: {}, Caps: {:?}, HasKbdH: {}, HasPtrH: {}, HasTouchH: {}",
+                  device_wrapper.get_libinput_device().sysname().unwrap_or("N/A"),
+                  device_wrapper.name(),
+                  device_wrapper.capabilities(),
+                  device_wrapper.keyboard_handler.is_some(),
+                  device_wrapper.pointer_handler.is_some(),
+                  device_wrapper.touch_handler.is_some());
         }
-        dm
+
+        manager
     }
 
-    // Internal refresh logic used by new and public refresh
-    fn refresh_devices_internal(&mut self) {
-        tracing::debug!("DeviceManager: Refreshing devices internally...");
-        self.devices.clear();
-        // Get devices from the libinput_handler stub
-        for stub_dev in self.libinput_handler.get_devices() {
-            tracing::trace!("DeviceManager: Processing stub_dev: {:?}", stub_dev);
-            let converted_caps: HashSet<DeviceCapability> =
-                stub_dev.capabilities.iter().map(|c| convert_capability(c)).collect();
+    pub fn update_devices(&mut self, libinput_handler: &mut LibinputUdevHandler) {
+        debug!("InputDeviceManager: Updating device list from libinput events...");
 
-            // Get effective configs for this specific device
-            let pointer_cfg = self.input_config.get_effective_pointer_config(&stub_dev.name);
-            let keyboard_cfg = self.input_config.get_effective_keyboard_config(&stub_dev.name);
-
-            if converted_caps.contains(&DeviceCapability::Pointer) && pointer_cfg.is_none() {
-                 tracing::warn!("DeviceManager: Pointer device '{}' has no pointer configuration.", stub_dev.name);
-            }
-            if converted_caps.contains(&DeviceCapability::Keyboard) && keyboard_cfg.is_none() {
-                 tracing::warn!("DeviceManager: Keyboard device '{}' has no keyboard configuration.", stub_dev.name);
-            }
-
-            self.devices.push(InputDevice {
-                name: stub_dev.name.clone(),
-                capabilities: converted_caps,
-                pointer_config: pointer_cfg,
-                keyboard_config: keyboard_cfg,
-            });
+        if libinput_handler.dispatch_events().is_err() {
+            warn!("InputDeviceManager: Error during libinput dispatch while updating devices.");
         }
-    }
 
-    // Public method to refresh and notify seat capabilities
-    pub fn refresh_devices_and_notify_seat(&mut self, wayland_server: &WaylandServerHandle) {
-        tracing::info!("DeviceManager: Refreshing devices and notifying seat capabilities.");
-        self.refresh_devices_internal();
-        tracing::debug!("DeviceManager: Refreshed devices. Found {} stubbed devices. Configurations applied.", self.devices.len());
+        let libinput_context = libinput_handler.context_mut();
+        let mut new_devices_to_add = Vec::new();
+        let mut devices_removed_count = 0;
+        let initial_device_count = self.devices.len();
 
-        let mut seat_capabilities = HashSet::new();
-        for device in &self.devices {
-            tracing::trace!("DeviceManager: Checking device for seat caps: {}", device.name);
-            if device.capabilities.contains(&DeviceCapability::Keyboard) {
-                seat_capabilities.insert(WlSeatCapability::Keyboard);
-            }
-            if device.capabilities.contains(&DeviceCapability::Pointer) {
-                seat_capabilities.insert(WlSeatCapability::Pointer);
-            }
-            if device.capabilities.contains(&DeviceCapability::Touch) {
-                seat_capabilities.insert(WlSeatCapability::Touch);
+        while let Some(event) = libinput_context.next() {
+            match event {
+                LibinputEvent::Device(device_event) => match device_event {
+                    DeviceEvent::Added(added_event) => {
+                        let device = added_event.device();
+                        let mut wrapper = DeviceWrapper::new(device.clone());
+                        let device_key = wrapper.name().to_string();
+
+                        if wrapper.has_capability(Capability::Keyboard) {
+                            info!("InputDeviceManager: Device '{}' has keyboard capability. Initializing Keyboard handler.", wrapper.name());
+                            match keyboard::Keyboard::new(&self.input_config.keyboard) {
+                                Ok(kb_handler) => {
+                                    wrapper.keyboard_handler = Some(kb_handler);
+                                    info!("InputDeviceManager: Successfully initialized Keyboard handler for '{}'.", wrapper.name());
+                                }
+                                Err(e) => {
+                                    error!("InputDeviceManager: Failed to initialize Keyboard handler for '{}': {}", wrapper.name(), e);
+                                }
+                            }
+                        }
+                        if wrapper.has_capability(Capability::Pointer) {
+                            info!("InputDeviceManager: Device '{}' has pointer capability. Initializing Pointer handler.", wrapper.name());
+                            let ptr_handler = pointer::Pointer::new(&self.input_config.pointer);
+                            wrapper.pointer_handler = Some(ptr_handler);
+                            info!("InputDeviceManager: Successfully initialized Pointer handler for '{}'.", wrapper.name());
+                        }
+                        if wrapper.has_capability(Capability::Touch) {
+                            info!("InputDeviceManager: Device '{}' has touch capability. Initializing Touch handler.", wrapper.name());
+                            let touch_h = touch::Touch::new(&self.input_config.touch);
+                            wrapper.touch_handler = Some(touch_h);
+                            info!("InputDeviceManager: Successfully initialized Touch handler for '{}'.", wrapper.name());
+                        }
+                        new_devices_to_add.push((device_key, wrapper));
+                    }
+                    DeviceEvent::Removed(removed_event) => {
+                        let device = removed_event.device();
+                        let device_name_key = device.name().to_string();
+
+                        if self.devices.remove(&device_name_key).is_some() {
+                            info!("InputDeviceManager: Device removed: {} (Key: {})", device_name_key, device_name_key);
+                            devices_removed_count += 1;
+                        } else {
+                            warn!("InputDeviceManager: Received Removed event for device '{}', but it was not found.", device_name_key);
+                        }
+                    }
+                },
+                _ => {}
             }
         }
-        let cap_vec: Vec<WlSeatCapability> = seat_capabilities.into_iter().collect();
-        tracing::info!("DeviceManager: Notifying Wayland server of seat capabilities: {:?}", cap_vec);
-        wayland_server.update_seat_capabilities(&cap_vec);
+
+        let mut new_devices_added_count = 0;
+        for (key, wrapper) in new_devices_to_add {
+            if self.devices.contains_key(&key) {
+                warn!("InputDeviceManager: Device '{}' (Key: {}) was already present. Overwriting.", wrapper.name(), key);
+            } else {
+                new_devices_added_count +=1;
+            }
+            info!("InputDeviceManager: Adding device to map: {} (Key: {}) - Caps: {:?}, Kbd: {}, Ptr: {}, Touch: {}",
+                  wrapper.name(), key, wrapper.capabilities(),
+                  wrapper.keyboard_handler.is_some(),
+                  wrapper.pointer_handler.is_some(),
+                  wrapper.touch_handler.is_some());
+            self.devices.insert(key, wrapper);
+        }
+
+        // After processing additions/removals, if there was any change in device count,
+        // the seat capabilities might need to be re-advertised.
+        // A more robust check would compare the actual capabilities (keyboard, pointer, touch) before and after.
+        if new_devices_added_count > 0 || devices_removed_count > 0 {
+             debug!("InputDeviceManager: Device list changed (added: {}, removed: {}). Seat capabilities might need update. (Intent logged)",
+                    new_devices_added_count, devices_removed_count);
+        } else if initial_device_count != self.devices.len() && (new_devices_added_count == 0 && devices_removed_count == 0) {
+            // This case handles if devices were overwritten but counts didn't change, less likely to change caps.
+            debug!("InputDeviceManager: Device list potentially changed (e.g. overwritten device). Total count {}. Seat capabilities might need update. (Intent logged)", self.devices.len());
+        }
+
+
+        debug!("InputDeviceManager: Device list update complete. Total devices: {}", self.devices.len());
     }
 
-    pub fn get_managed_devices(&self) -> &Vec<InputDevice> {
-        tracing::trace!("DeviceManager: get_managed_devices() called.");
-        &self.devices
+    pub fn get_device(&self, key: &str) -> Option<&DeviceWrapper> {
+        self.devices.get(key)
     }
 
-    // Method to pass ownership of libinput_handler if needed by InputManager
-    pub fn take_libinput_handler(self) -> LibinputHandler {
-        tracing::debug!("DeviceManager: take_libinput_handler() called.");
-        self.libinput_handler
+    pub fn all_devices(&self) -> Vec<&DeviceWrapper> {
+        self.devices.values().collect()
     }
 
-    // Method to get specific configurations for FocusManager to initialize its handlers
-    // This assumes one primary keyboard and pointer for simplicity in the stub.
-    // A real system might have multiple of each.
-    pub fn get_primary_keyboard_config(&self) -> Option<KeyboardConfig> {
-        tracing::debug!("DeviceManager: get_primary_keyboard_config() called.");
-        let config = self.devices.iter()
-            .find(|d| d.capabilities.contains(&DeviceCapability::Keyboard))
-            .and_then(|d| d.keyboard_config.clone())
-            .or_else(|| self.input_config.default_keyboard_config.clone());
-        tracing::trace!("DeviceManager: Primary keyboard config: {:?}", config);
-        config
+    pub fn get_input_config(&self) -> &InputConfig {
+        &self.input_config
     }
 
-    pub fn get_primary_pointer_config(&self) -> Option<PointerConfig> {
-        tracing::debug!("DeviceManager: get_primary_pointer_config() called.");
-        let config = self.devices.iter()
-            .find(|d| d.capabilities.contains(&DeviceCapability::Pointer))
-            .and_then(|d| d.pointer_config.clone())
-            .or_else(|| self.input_config.default_pointer_config.clone());
-        tracing::trace!("DeviceManager: Primary pointer config: {:?}", config);
-        config
-    }
-
-    // Stubbed method for InputManager simulation
-    pub fn get_stubbed_pointer_coords(&self) -> (f64, f64) {
-        tracing::trace!("DeviceManager: get_stubbed_pointer_coords() called.");
-        // In a real scenario, this might come from the actual pointer device state
-        (100.0, 150.0) // Arbitrary coordinates
+    // Helper to determine current capabilities based on managed devices
+    pub fn current_capabilities(&self) -> (bool, bool, bool) { // has_keyboard, has_pointer, has_touch
+        let mut has_keyboard = false;
+        let mut has_pointer = false;
+        let mut has_touch = false;
+        for wrapper in self.devices.values() {
+            if wrapper.keyboard_handler.is_some() { has_keyboard = true; }
+            if wrapper.pointer_handler.is_some() { has_pointer = true; }
+            if wrapper.touch_handler.is_some() { has_touch = true; }
+        }
+        (has_keyboard, has_pointer, has_touch)
     }
 }

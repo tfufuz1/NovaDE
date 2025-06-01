@@ -1,445 +1,400 @@
 // src/input/focus.rs
 
-use std::collections::{VecDeque, HashSet, HashMap};
-use crate::input::keyboard::{KeyState, ModifiersState, Keyboard};
-use crate::input::pointer::{Pointer, ButtonState as PointerButtonState};
-use crate::input::touch::Touch;
-use crate::input::config::{InputConfig, PointerConfig, KeyboardConfig};
-use crate::wayland_server_module_placeholder::{WaylandServerHandle, SurfaceManagerHandle, StubbedSurfaceInfo, Rect};
+use crate::wayland_server_module_placeholder::{
+    ClientId, SurfaceId, WaylandServerHandle, SurfaceManagerHandle,
+    PointerObjectId, KeyboardObjectId
+};
+use crate::input::keyboard::ModifiersState as InputModifierState;
+use tracing::{debug, info, warn};
+use std::collections::VecDeque; // Added for focus history
 
-pub type SurfaceId = u32;
+const MAX_FOCUS_HISTORY_SIZE: usize = 10;
 
-// --- Event Structs ---
-#[derive(Debug, Clone)]
-pub struct ProcessedKeyEvent {
-    pub keysym: u32,
-    pub state: KeyState,
-    pub modifiers: ModifiersState,
-    pub time: u32,
-    pub raw_keycode: u32,
-    pub serial: u32,
+#[derive(Debug, Clone, Copy, Default, PartialEq)] // Added PartialEq for history operations
+struct FocusedElements {
+    keyboard_surface: Option<SurfaceId>,
+    keyboard_client: Option<ClientId>,
+    pointer_surface: Option<SurfaceId>, // Pointer focus isn't typically part of Alt-Tab history
+    pointer_client: Option<ClientId>,   // but kept for struct consistency.
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ProcessedPointerMotionEvent {
-    pub abs_x: f64,
-    pub abs_y: f64,
-    pub rel_dx: f64,
-    pub rel_dy: f64,
-    pub time: u32,
-    pub serial: u32,
-}
-
-pub use crate::input::pointer::ButtonState;
-
-#[derive(Debug, Clone, Copy)]
-pub struct ProcessedPointerButtonEvent {
-    pub button_code: u32,
-    pub state: ButtonState,
-    pub abs_x: f64,
-    pub abs_y: f64,
-    pub time: u32,
-    pub serial: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScrollSource {
-    Wheel,
-    Finger,
-    Continuous,
+enum GrabType {
+    KeyboardOnly,
+    PointerOnly, // Typically implies keyboard focus might also follow or be managed by client
+    Full,        // Both keyboard and pointer are grabbed
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ProcessedPointerScrollEvent {
-    pub delta_x: f64,
-    pub delta_y: f64,
-    pub source: ScrollSource,
-    pub abs_x: f64,
-    pub abs_y: f64,
-    pub time: u32,
-    pub serial: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ProcessedTouchDownEvent {
-    pub id: i32,
-    pub x: f64,
-    pub y: f64,
-    pub time: u32,
-    pub serial: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ProcessedTouchMotionEvent {
-    pub id: i32,
-    pub x: f64,
-    pub y: f64,
-    pub time: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ProcessedTouchUpEvent {
-    pub id: i32,
-    pub x: f64,
-    pub y: f64,
-    pub time: u32,
-    pub serial: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct ProcessedTouchFrameEvent {
-    pub time: u32,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct GrabRequest {
-    pub surface_id: SurfaceId,
-    pub serial: u32,
+struct GrabState {
+    grabbed_surface: SurfaceId, // The surface that initiated the grab
+    grab_client: ClientId,      // The client owning the grabbed surface
+    grab_type: GrabType,
 }
 
 pub struct FocusManager {
-    keyboard_focus: Option<SurfaceId>,
-    pointer_focus: Option<SurfaceId>,
-    touch_focus: HashMap<i32, SurfaceId>,
-    active_grabs: Vec<GrabRequest>,
-    focus_history: VecDeque<SurfaceId>,
+    focused: FocusedElements,
+    previous_focus_state: Option<FocusedElements>,
+    grab_state: Option<GrabState>,
+    focus_history: VecDeque<FocusedElements>, // For Alt-Tab like cycling
 
-    wayland_server: WaylandServerHandle,
+    pointer_x: f64,
+    pointer_y: f64,
+    wayland_handle: WaylandServerHandle,
     surface_manager: SurfaceManagerHandle,
 
-    keyboard_handler: Keyboard,
-    pointer_handler: Pointer,
-    touch_handler: Touch,
-
-    // Storing current raw key state for wl_keyboard.enter
-    current_pressed_keys: HashSet<u32>,
-    current_modifiers_state: ModifiersState,
-    next_serial: u32,
+    active_pointer_obj: Option<PointerObjectId>,
+    active_keyboard_obj: Option<KeyboardObjectId>,
 }
 
 impl FocusManager {
-    pub fn new(
-        wayland_server: WaylandServerHandle,
-        surface_manager: SurfaceManagerHandle,
-        config: &InputConfig,
-    ) -> Self {
-        tracing::info!("FocusManager (Stub): Initializing (refactored)...");
-
-        let keyboard_config = config.get_effective_keyboard_config("Stubbed Keyboard");
-        let pointer_config = config.get_effective_pointer_config("Stubbed Mouse")
-            .unwrap_or_else(|| PointerConfig {
-                acceleration_factor: Some(0.0),
-                sensitivity: Some(1.0),
-                acceleration_curve: None,
-                button_mapping: None,
-            });
-
-        let keyboard_handler = Keyboard::new(keyboard_config);
-        let pointer_handler = Pointer::new(pointer_config);
-        let touch_handler = Touch::new();
-
+    pub fn new(wayland_handle: WaylandServerHandle, surface_manager: SurfaceManagerHandle) -> Self {
+        info!("FocusManager: Initializing...");
         Self {
-            keyboard_focus: None,
-            pointer_focus: None,
-            touch_focus: HashMap::new(),
-            active_grabs: Vec::new(),
-            focus_history: VecDeque::with_capacity(10),
-            wayland_server,
+            focused: FocusedElements::default(),
+            previous_focus_state: None,
+            grab_state: None,
+            focus_history: VecDeque::with_capacity(MAX_FOCUS_HISTORY_SIZE),
+            pointer_x: 0.0,
+            pointer_y: 0.0,
+            wayland_handle,
             surface_manager,
-            keyboard_handler,
-            pointer_handler,
-            touch_handler,
-            current_pressed_keys: HashSet::new(),
-            current_modifiers_state: ModifiersState::default(),
-            next_serial: 0,
+            active_pointer_obj: Some(PointerObjectId(1)),
+            active_keyboard_obj: Some(KeyboardObjectId(1)),
         }
     }
 
-    fn get_next_serial(&mut self) -> u32 {
-        self.next_serial = self.next_serial.wrapping_add(1);
-        tracing::trace!("FocusManager: Next serial: {}", self.next_serial);
-        self.next_serial
-    }
+    pub fn update_pointer_position(&mut self, new_x: f64, new_y: f64) {
+        self.pointer_x = new_x;
+        self.pointer_y = new_y;
+        // debug!("FocusManager: Pointer position updated to ({:.2}, {:.2})", new_x, new_y);
 
-    // --- Raw Event Handlers ---
-    pub fn handle_raw_keyboard_input(&mut self, raw_keycode: u32, state: KeyState, time: u32) {
-        tracing::debug!("FocusManager: Handling raw keyboard input: keycode={}, state={:?}, time={}", raw_keycode, state, time);
-        // Update internal raw key state tracking
-        match state {
-            KeyState::Pressed => self.current_pressed_keys.insert(raw_keycode),
-            KeyState::Released => self.current_pressed_keys.remove(&raw_keycode),
-        };
+        let mut target_surface_info = self.surface_manager.surface_at(new_x, new_y);
 
-        if let Some(mut processed_event) = self.keyboard_handler.handle_key_event(raw_keycode, state, time) {
-            processed_event.serial = self.get_next_serial();
-            // Modifier state is part of ProcessedKeyEvent, update self.current_modifiers_state from it
-            self.current_modifiers_state = processed_event.modifiers;
-            self.handle_processed_key_event(processed_event);
-        }
-        // Handle discrete modifier updates from keyboard_handler.update_modifier_state()
-        // This is called internally by keyboard_handler.handle_key_event and updates its internal state.
-        // If a modifier-only event needs to be sent to clients (e.g. only Ctrl pressed),
-        // keyboard_handler.update_modifier_state() returning Some(ModifiersState) is the trigger.
-        if let Some(new_mods) = self.keyboard_handler.update_modifier_state() {
-             self.current_modifiers_state = new_mods;
-             self.handle_processed_modifier_update(new_mods, self.get_next_serial());
-        }
-    }
-
-    pub fn handle_raw_pointer_motion(&mut self, dx: f64, dy: f64, time: u32) {
-        tracing::debug!("FocusManager: Handling raw pointer motion: dx={}, dy={}, time={}", dx, dy, time);
-        if let Some(mut processed_event) = self.pointer_handler.handle_motion_event(dx, dy, time) {
-            processed_event.serial = self.get_next_serial();
-            self.handle_processed_pointer_motion(processed_event);
-        }
-    }
-
-    pub fn handle_raw_pointer_button(&mut self, raw_button_code: u32, state: ButtonState, time: u32) {
-        tracing::debug!("FocusManager: Handling raw pointer button: button={}, state={:?}, time={}", raw_button_code, state, time);
-        if let Some(mut processed_event) = self.pointer_handler.handle_button_event(raw_button_code, state, time) {
-            processed_event.serial = self.get_next_serial();
-            self.handle_processed_pointer_button(processed_event);
-        }
-    }
-
-    pub fn handle_raw_pointer_scroll(&mut self, dx_discrete: f64, dy_discrete: f64, dx_continuous: f64, dy_continuous: f64, source: ScrollSource, time: u32) {
-        tracing::debug!("FocusManager: Handling raw pointer scroll: source={:?}, time={}", source, time);
-        if let Some(mut processed_event) = self.pointer_handler.handle_scroll_event(dx_discrete, dy_discrete, dx_continuous, dy_continuous, source, time) {
-            processed_event.serial = self.get_next_serial();
-            self.handle_processed_pointer_scroll(processed_event);
-        }
-    }
-
-    pub fn handle_raw_touch_down(&mut self, id: i32, x: f64, y: f64, time: u32) {
-        tracing::debug!("FocusManager: Handling raw touch down: id={}, x={}, y={}, time={}", id, x, y, time);
-        if let Some(mut processed_event) = self.touch_handler.handle_touch_down_event(id, x, y, time) {
-            processed_event.serial = self.get_next_serial();
-            self.handle_processed_touch_down(processed_event);
-        }
-    }
-
-    pub fn handle_raw_touch_motion(&mut self, id: i32, x: f64, y: f64, time: u32) {
-        tracing::debug!("FocusManager: Handling raw touch motion: id={}, x={}, y={}, time={}", id, x, y, time);
-        if let Some(processed_event) = self.touch_handler.handle_touch_motion_event(id, x, y, time) {
-            self.handle_processed_touch_motion(processed_event);
-        }
-    }
-
-    pub fn handle_raw_touch_up(&mut self, id: i32, time: u32) {
-        tracing::debug!("FocusManager: Handling raw touch up: id={}, time={}", id, time);
-        if let Some(mut processed_event) = self.touch_handler.handle_touch_up_event(id, time) {
-            processed_event.serial = self.get_next_serial();
-            self.handle_processed_touch_up(processed_event);
-        }
-    }
-
-    pub fn handle_raw_touch_frame(&mut self, time: u32) {
-        tracing::debug!("FocusManager: Handling raw touch frame: time={}", time);
-        if let Some(processed_event) = self.touch_handler.handle_touch_frame_event(time) {
-            self.handle_processed_touch_frame(processed_event);
-        }
-    }
-
-    // --- Surface Focus Calculation ---
-    fn calculate_surface_at_pointer(&self, x: f64, y: f64) -> Option<SurfaceId> {
-        tracing::debug!("FocusManager: Calculating surface at pointer: x={}, y={}", x, y);
-        let surfaces = self.surface_manager.get_surfaces_at_coords(x, y);
-        if let Some(top_surface) = surfaces.first() {
-            tracing::trace!("FocusManager: Surface found at ({}, {}): ID {}", x, y, top_surface.id);
-            return Some(top_surface.id);
-        }
-        tracing::trace!("FocusManager: No surface found at ({}, {}).", x, y);
-        None
-    }
-
-    // --- Focus Change Logic ---
-    fn set_keyboard_focus(&mut self, new_focus_id: Option<SurfaceId>, serial: u32) {
-        if self.keyboard_focus != new_focus_id {
-            if let Some(old_focus_id) = self.keyboard_focus {
-                tracing::info!("FocusManager: Keyboard focus leaving Surface ID: {}", old_focus_id);
-                self.wayland_server.send_keyboard_leave(old_focus_id, serial);
-            }
-            self.keyboard_focus = new_focus_id;
-            if let Some(id) = new_focus_id {
-                tracing::info!("FocusManager: Keyboard focus entering Surface ID: {}", id);
-                // current_pressed_keys and current_modifiers_state are updated by handle_raw_keyboard_input
-                self.wayland_server.send_keyboard_enter(id, serial, &self.current_pressed_keys, &self.current_modifiers_state);
-                if self.focus_history.contains(&id) { self.focus_history.retain(|&x| x != id); }
-                self.focus_history.push_front(id);
-                if self.focus_history.len() > 10 { self.focus_history.pop_back(); }
-                tracing::debug!("FocusManager: Focus history: {:?}", self.focus_history);
-            }
-        } else {
-            tracing::trace!("FocusManager: set_keyboard_focus called with current focus ID {:?}, no change.", new_focus_id);
-        }
-    }
-
-    // --- Input Grabbing ---
-    fn request_pointer_grab(&mut self, surface_id: SurfaceId, serial: u32) {
-        tracing::info!("FocusManager: Pointer grab requested by Surface ID: {} with serial {}", surface_id, serial);
-        self.active_grabs.clear();
-        self.active_grabs.push(GrabRequest { surface_id, serial });
-    }
-
-    fn release_pointer_grab(&mut self, surface_id: SurfaceId, serial: u32) {
-        tracing::info!("FocusManager: Pointer grab released by Surface ID: {} with serial {}", surface_id, serial);
-        self.active_grabs.retain(|grab| grab.surface_id != surface_id || grab.serial != serial);
-    }
-
-    // --- Processed Event Handlers ---
-    fn handle_processed_key_event(&mut self, event: ProcessedKeyEvent) {
-        tracing::debug!("FocusManager: Handling processed key event: {:?}", event);
-        // self.current_modifiers_state and self.current_pressed_keys already updated in raw handler
-        let target_surface = if let Some(grab) = self.active_grabs.first() {
-            Some(grab.surface_id)
-        } else {
-            self.keyboard_focus
-        };
-
-        if let Some(surface_id) = target_surface {
-            tracing::trace!("FocusManager: Forwarding ProcessedKeyEvent to Surface ID: {}", surface_id);
-            self.wayland_server.send_keyboard_event_to_surface(surface_id, &event, event.serial);
-        } else {
-            tracing::debug!("FocusManager: No keyboard focus or active grab; ProcessedKeyEvent dropped: {:?}", event);
-        }
-    }
-
-    fn handle_processed_modifier_update(&mut self, modifiers: ModifiersState, serial: u32) {
-        tracing::debug!("FocusManager: Handling processed modifier update: {:?}, serial: {}", modifiers, serial);
-        self.current_modifiers_state = modifiers;
-        if let Some(surface_id) = self.keyboard_focus {
-            tracing::trace!("FocusManager: Forwarding modifier update to Surface ID: {}", surface_id);
-            self.wayland_server.send_keyboard_modifiers(surface_id, &modifiers, serial);
-        }
-    }
-
-    fn handle_processed_pointer_motion(&mut self, event: ProcessedPointerMotionEvent) {
-        tracing::debug!("FocusManager: Handling processed pointer motion: {:?}", event);
-        let current_grab = self.active_grabs.first().copied();
-        if let Some(grab) = current_grab {
-            tracing::trace!("FocusManager: Pointer motion grabbed by Surface ID: {}", grab.surface_id);
-            self.wayland_server.send_pointer_motion(grab.surface_id, &event);
-        } else {
-            let new_focus_candidate = self.calculate_surface_at_pointer(event.abs_x, event.abs_y);
-            if self.pointer_focus != new_focus_candidate {
-                if let Some(old_focus_id) = self.pointer_focus {
-                    tracing::info!("FocusManager: Pointer leaving Surface ID: {}", old_focus_id);
-                    self.wayland_server.send_pointer_leave(old_focus_id, event.serial);
+        // If grabbed, pointer events might be restricted or redirected
+        if let Some(grab) = self.grab_state {
+            match grab.grab_type {
+                GrabType::PointerOnly | GrabType::Full => {
+                    // For simplicity in this stub: if grabbed, all pointer events go to the grabbing surface's client.
+                    // A real implementation would check if new_x, new_y is within the grab_surface or its sub-surfaces,
+                    // or if the grab is "modal" in a way that all pointer input outside is ignored or sent to the grabber.
+                    // We'll assume the pointer is now "on" the grabbed surface for event delivery purposes.
+                    debug!("FocusManager: Input grab active ({:?}). Pointer events directed to grabbed surface {:?} (client {:?})",
+                           grab.grab_type, grab.grabbed_surface, grab.grab_client);
+                    target_surface_info = Some((grab.grabbed_surface, grab.grab_client));
                 }
-                self.pointer_focus = new_focus_candidate;
-                if let Some(new_focus_id) = self.pointer_focus {
-                    tracing::info!("FocusManager: Pointer entering Surface ID: {}", new_focus_id);
-                    self.wayland_server.send_pointer_enter(new_focus_id, event.abs_x, event.abs_y, event.serial);
+                _ => {} // KeyboardOnly grab doesn't affect pointer focus directly here
+            }
+        }
+
+        let current_target_surface_id = target_surface_info.map(|(sid, _)| sid);
+        if self.focused.pointer_surface != current_target_surface_id {
+            let serial = self.wayland_handle.next_serial(); // Generate one serial for this focus change
+
+            if let (Some(old_surface), Some(old_client), Some(pointer_obj)) =
+                (self.focused.pointer_surface, self.focused.pointer_client, self.active_pointer_obj) {
+                if old_surface != current_target_surface_id.unwrap_or(SurfaceId(0)) { // Avoid leave if re-entering same
+                    info!("FocusManager: Pointer leaving surface {:?} (client {:?}), serial {}", old_surface, old_client, serial);
+                    self.wayland_handle.send_wl_pointer_leave(old_client, pointer_obj, old_surface, serial);
                 }
             }
-            if let Some(focus_id) = self.pointer_focus {
-                tracing::trace!("FocusManager: Forwarding pointer motion to Surface ID: {}", focus_id);
-                self.wayland_server.send_pointer_motion(focus_id, &event);
+
+            self.focused.pointer_surface = current_target_surface_id;
+            self.focused.pointer_client = target_surface_info.map(|(_, cid)| cid);
+
+            if let (Some(new_surface), Some(new_client), Some(pointer_obj)) =
+                (self.focused.pointer_surface, self.focused.pointer_client, self.active_pointer_obj) {
+                // TODO: sx, sy should be surface-local coordinates.
+                let surface_local_x = new_x; // Placeholder
+                let surface_local_y = new_y; // Placeholder
+                info!("FocusManager: Pointer entering surface {:?} (client {:?}) at L({:.2}, {:.2}), serial {}",
+                      new_surface, new_client, surface_local_x, surface_local_y, serial);
+                self.wayland_handle.send_wl_pointer_enter(new_client, pointer_obj, new_surface, surface_local_x, surface_local_y, serial);
             }
+            // debug!("FocusManager: Pointer focus changed to surface {:?} (client {:?})",
+            //       self.focused.pointer_surface, self.focused.pointer_client);
         }
-        let frame_target = if let Some(grab) = current_grab { Some(grab.surface_id) } else { self.pointer_focus };
-        if let Some(target_id) = frame_target { self.wayland_server.send_pointer_frame(target_id); }
     }
 
-    fn handle_processed_pointer_button(&mut self, event: ProcessedPointerButtonEvent) {
-        tracing::debug!("FocusManager: Handling processed pointer button: {:?}", event);
-        let target_surface_id_opt = if let Some(grab) = self.active_grabs.first() {
-            Some(grab.surface_id)
-        } else {
-            if event.state == ButtonState::Pressed {
-                // If no explicit grab, determine focus on press
-                let surface_under_pointer = self.calculate_surface_at_pointer(event.abs_x, event.abs_y);
-                 if self.pointer_focus != surface_under_pointer { // Update pointer focus if needed
-                    if let Some(old_focus_id) = self.pointer_focus {
-                        self.wayland_server.send_pointer_leave(old_focus_id, event.serial);
+    pub fn set_keyboard_focus(&mut self, surface_id: Option<SurfaceId>, client_id: Option<ClientId>) {
+        // If a grab is active and includes keyboard, focus is forced to the grabber.
+        if let Some(grab) = self.grab_state {
+            match grab.grab_type {
+                GrabType::KeyboardOnly | GrabType::Full => {
+                    if surface_id != Some(grab.grabbed_surface) || client_id != Some(grab.grab_client) {
+                        info!("FocusManager: Keyboard focus attempted change during grab, redirecting to grabbed surface {:?} (client {:?})",
+                              grab.grabbed_surface, grab.grab_client);
                     }
-                    self.pointer_focus = surface_under_pointer;
-                    if let Some(new_focus_id) = self.pointer_focus {
-                         self.wayland_server.send_pointer_enter(new_focus_id, event.abs_x, event.abs_y, event.serial);
-                    }
+                    // Force focus to the grabbing surface/client
+                    self._do_set_keyboard_focus(Some(grab.grabbed_surface), Some(grab.grab_client));
+                    return;
                 }
-                if let Some(target_for_kbd_focus) = surface_under_pointer {
-                    self.set_keyboard_focus(Some(target_for_kbd_focus), event.serial);
-                } else { // Click on "nothing"
-                    self.set_keyboard_focus(None, event.serial);
-                }
-                surface_under_pointer // Event goes to where pointer is now focused or was just focused
-            } else { // Button release
-                self.pointer_focus // Send release to wherever pointer currently is (if not grabbed)
+                _ => {} // PointerOnly grab doesn't force keyboard focus here.
             }
+        }
+        self._do_set_keyboard_focus(surface_id, client_id, false); // false indicates not a grab-forced focus
+    }
+
+    fn _do_set_keyboard_focus(&mut self, surface_id: Option<SurfaceId>, client_id: Option<ClientId>, is_grab_forced: bool) {
+        if self.focused.keyboard_surface == surface_id && self.focused.keyboard_client == client_id {
+            // No change in focus, but ensure modifiers are up-to-date if requested (e.g. for a new client binding kbd)
+             if let (Some(_new_surface), Some(new_client), Some(kbd_obj)) = (surface_id, client_id, self.active_keyboard_obj) {
+                let serial = self.wayland_handle.next_serial();
+                let (dummy_mods_depressed, dummy_mods_latched, dummy_mods_locked, dummy_group) = (0,0,0,0); // Placeholder
+                self.wayland_handle.send_wl_keyboard_modifiers(new_client, kbd_obj, serial, dummy_mods_depressed, dummy_mods_latched, dummy_mods_locked, dummy_group);
+             }
+            return;
+        }
+
+        let old_focused_elements = self.focused; // Capture for history if it was valid
+
+        let serial = self.wayland_handle.next_serial();
+
+        if let (Some(old_surface), Some(old_client), Some(kbd_obj)) =
+            (self.focused.keyboard_surface, self.focused.keyboard_client, self.active_keyboard_obj) {
+            info!("FocusManager: Keyboard leaving surface {:?} (client {:?}), serial {}", old_surface, old_client, serial);
+            self.wayland_handle.send_wl_keyboard_leave(old_client, kbd_obj, old_surface, serial);
+        }
+
+        self.focused.keyboard_surface = surface_id;
+        self.focused.keyboard_client = client_id;
+        // Pointer focus is not directly changed here, but could be if policy dictates (e.g. click-to-focus sets kbd focus)
+
+        if let (Some(new_surface), Some(new_client), Some(kbd_obj)) =
+            (self.focused.keyboard_surface, self.focused.keyboard_client, self.active_keyboard_obj) {
+            info!("FocusManager: Keyboard entering surface {:?} (client {:?}), serial {}", new_surface, new_client, serial);
+            let pressed_keys_on_enter: Vec<u32> = Vec::new();
+            self.wayland_handle.send_wl_keyboard_enter(new_client, kbd_obj, new_surface, &pressed_keys_on_enter, serial);
+
+            let (dummy_mods_depressed, dummy_mods_latched, dummy_mods_locked, dummy_group) = (0,0,0,0);
+            self.wayland_handle.send_wl_keyboard_modifiers(new_client, kbd_obj, serial, dummy_mods_depressed, dummy_mods_latched, dummy_mods_locked, dummy_group);
+
+            // Update focus history if this isn't a grab-forced focus and is a valid new focus target
+            if !is_grab_forced {
+                let new_focus_entry = FocusedElements {
+                    keyboard_client: Some(new_client),
+                    keyboard_surface: Some(new_surface),
+                    pointer_surface: None, // History primarily tracks keyboard focus targets
+                    pointer_client: None,
+                };
+
+                // Remove if already in history to bring to front
+                self.focus_history.retain(|x| *x != new_focus_entry);
+                self.focus_history.push_front(new_focus_entry);
+                if self.focus_history.len() > MAX_FOCUS_HISTORY_SIZE {
+                    self.focus_history.pop_back();
+                }
+                debug!("FocusManager: Updated focus history. New front: {:?}. History size: {}",
+                       self.focus_history.front(), self.focus_history.len());
+            }
+
+        } else { // Focus set to None
+             if !is_grab_forced && (old_focused_elements.keyboard_client.is_some() || old_focused_elements.keyboard_surface.is_some()) {
+                // If focus was cleared (set to None) and it previously had a value,
+                // we don't add a "None" entry to history, but the leave event is sent.
+                // The history should only contain actual focus targets.
+                 debug!("FocusManager: Keyboard focus cleared.");
+             }
+        }
+        debug!("FocusManager: Keyboard focus is now: surface {:?} (client {:?})",
+              self.focused.keyboard_surface, self.focused.keyboard_client);
+    }
+
+    // --- Input Grab Mechanism ---
+    pub fn request_grab(&mut self, surface_id: SurfaceId, client_id: ClientId, grab_type: GrabType) {
+        if self.grab_state.is_some() {
+            warn!("FocusManager: Grab already active. Ignoring new grab request for surface {:?}.", surface_id);
+            return;
+        }
+
+        self.previous_focus_state = Some(self.focused); // Store current focus state
+        self.grab_state = Some(GrabState {
+            grabbed_surface: surface_id,
+            grab_client: client_id,
+            grab_type,
+        });
+        info!("FocusManager: Input grab ({:?}) activated for surface {:?} (client {:?})", grab_type, surface_id, client_id);
+
+        // If grab includes keyboard, force keyboard focus to the grabbing surface
+        match grab_type {
+            GrabType::KeyboardOnly | GrabType::Full => {
+                info!("FocusManager: Grab includes keyboard, setting keyboard focus to grabbed surface.");
+                self._do_set_keyboard_focus(Some(surface_id), Some(client_id), true); // true: is_grab_forced
+            }
+            _ => {}
+        }
+    }
+
+    pub fn release_grab(&mut self) {
+        if self.grab_state.is_none() {
+            warn!("FocusManager: No active grab to release.");
+            return;
+        }
+        let grab_was_forcing_kbd_focus = match self.grab_state.unwrap().grab_type { // Safe unwrap due to check above
+            GrabType::KeyboardOnly | GrabType::Full => true,
+            _ => false,
         };
 
-        if let Some(target_surface_id) = target_surface_id_opt {
-            tracing::trace!("FocusManager: Forwarding pointer button to Surface ID: {}", target_surface_id);
-            self.wayland_server.send_pointer_button(target_surface_id, &event, event.serial);
-            self.wayland_server.send_pointer_frame(target_surface_id);
-        } else {
-            tracing::debug!("FocusManager: Pointer button event on no focused surface and no grab. Dropped: {:?}", event);
-        }
-    }
+        info!("FocusManager: Input grab released. Restoring previous focus if available.");
+        self.grab_state = None;
 
-    fn handle_processed_pointer_scroll(&self, event: ProcessedPointerScrollEvent) {
-        tracing::debug!("FocusManager: Handling processed pointer scroll: {:?}", event);
-        let target_surface = if let Some(grab) = self.active_grabs.first() { Some(grab.surface_id) } else { self.pointer_focus };
-        if let Some(surface_id) = target_surface {
-            tracing::trace!("FocusManager: Forwarding pointer scroll to Surface ID: {}", surface_id);
-            self.wayland_server.send_pointer_axis(surface_id, &event);
-            self.wayland_server.send_pointer_frame(surface_id);
+        if let Some(prev_focus) = self.previous_focus_state.take() {
+            self._do_set_keyboard_focus(prev_focus.keyboard_surface, prev_focus.keyboard_client, false);
+            self.update_pointer_position(self.pointer_x, self.pointer_y);
         } else {
-             tracing::debug!("FocusManager: Pointer scroll event on no focused surface and no grab. Dropped: {:?}", event);
-        }
-    }
-
-    fn handle_processed_touch_down(&mut self, event: ProcessedTouchDownEvent) {
-        tracing::debug!("FocusManager: Handling processed touch down: {:?}", event);
-        let target_surface_id = self.calculate_surface_at_pointer(event.x, event.y);
-        if let Some(surface_id) = target_surface_id {
-            self.touch_focus.insert(event.id, surface_id);
-            tracing::info!("FocusManager: Touch ID {} focused on Surface ID: {}", event.id, surface_id);
-            self.set_keyboard_focus(Some(surface_id), event.serial);
-            self.wayland_server.send_touch_down(surface_id, &event, event.serial);
-        } else {
-            tracing::debug!("FocusManager: Touch down event on no surface. Dropped. ID: {}", event.id);
-        }
-    }
-
-    fn handle_processed_touch_motion(&self, event: ProcessedTouchMotionEvent) {
-        tracing::debug!("FocusManager: Handling processed touch motion: {:?}", event);
-        if let Some(&surface_id) = self.touch_focus.get(&event.id) {
-            tracing::trace!("FocusManager: Forwarding touch motion for ID {} to Surface ID: {}", event.id, surface_id);
-            self.wayland_server.send_touch_motion(surface_id, &event);
-        } else {
-            tracing::debug!("FocusManager: Touch motion for unknown/unfocused touch ID: {}. Dropped.", event.id);
-        }
-    }
-
-    fn handle_processed_touch_up(&mut self, event: ProcessedTouchUpEvent) {
-        tracing::debug!("FocusManager: Handling processed touch up: {:?}", event);
-        if let Some(surface_id) = self.touch_focus.remove(&event.id) {
-            tracing::info!("FocusManager: Touch ID {} unfocused from Surface ID: {}", event.id, surface_id);
-            self.wayland_server.send_touch_up(surface_id, &event, event.serial);
-        } else {
-            tracing::debug!("FocusManager: Touch up for unknown/unfocused touch ID: {}. Dropped.", event.id);
-        }
-    }
-
-    fn handle_processed_touch_frame(&self, _event: ProcessedTouchFrameEvent) {
-        tracing::debug!("FocusManager: Handling processed touch frame.");
-        let mut notified_surfaces = HashSet::new();
-        for surface_id in self.touch_focus.values() {
-            if !notified_surfaces.contains(surface_id) {
-                 tracing::trace!("FocusManager: Sending touch frame to Surface ID: {}", surface_id);
-                 self.wayland_server.send_touch_frame(*surface_id);
-                 notified_surfaces.insert(*surface_id);
+            // If no specific previous state, clear keyboard focus if it was forced by grab,
+            // otherwise let it be (it might have been changed by other means during grab if not a full kbd grab).
+            if grab_was_forcing_kbd_focus {
+                 self._do_set_keyboard_focus(None, None, false);
             }
+            self.update_pointer_position(self.pointer_x, self.pointer_y);
         }
     }
-}
 
+    // --- Focus History Cycling ---
+    pub fn cycle_focus_forward(&mut self) {
+        if self.grab_state.is_some() {
+            warn!("FocusManager: Cannot cycle focus while a grab is active.");
+            return;
+        }
+        if self.focus_history.len() > 1 {
+            if let Some(current_focus_entry) = self.focus_history.pop_front() {
+                self.focus_history.push_back(current_focus_entry); // Move current to back
+                if let Some(next_focus_target) = self.focus_history.front() {
+                    info!("FocusManager: Cycling focus forward to: client {:?}, surface {:?}",
+                          next_focus_target.keyboard_client, next_focus_target.keyboard_surface);
+                    self._do_set_keyboard_focus(next_focus_target.keyboard_surface, next_focus_target.keyboard_client, false);
+                } else {
+                     // Should not happen if len > 1 and we just pushed current_focus_entry back
+                    error!("FocusManager: Focus history inconsistent during cycle_focus_forward.");
+                }
+            }
+        } else {
+            info!("FocusManager: Not enough elements in focus history to cycle forward (size: {}).", self.focus_history.len());
+        }
+    }
 
-// Public accessors for Keyboard state needed by FocusManager for wl_keyboard.enter
-// These are okay for stubs, but in real code, Keyboard might provide more direct methods.
-impl Keyboard {
-    pub fn pressed_keys(&self) -> &HashSet<u32> { &self.pressed_keys }
-    pub fn modifier_state(&self) -> ModifiersState { self.modifier_state }
+    pub fn cycle_focus_backward(&mut self) {
+        if self.grab_state.is_some() {
+            warn!("FocusManager: Cannot cycle focus while a grab is active.");
+            return;
+        }
+        if self.focus_history.len() > 1 {
+            if let Some(last_focus_entry) = self.focus_history.pop_back() {
+                self.focus_history.push_front(last_focus_entry); // Move last to front
+                 // The element that was just moved to the front is the new target.
+                if let Some(new_focus_target) = self.focus_history.front() {
+                    info!("FocusManager: Cycling focus backward to: client {:?}, surface {:?}",
+                        new_focus_target.keyboard_client, new_focus_target.keyboard_surface);
+                    self._do_set_keyboard_focus(new_focus_target.keyboard_surface, new_focus_target.keyboard_client, false);
+                } else {
+                    error!("FocusManager: Focus history inconsistent during cycle_focus_backward.");
+                }
+            }
+        } else {
+             info!("FocusManager: Not enough elements in focus history to cycle backward (size: {}).", self.focus_history.len());
+        }
+    }
+
+    // --- Event Delivery Methods (modified for grab) ---
+    pub fn deliver_pointer_motion(&self, time: u32, dx: f64, dy: f64) {
+        let (target_client, target_pointer_obj) =
+            if let Some(grab) = &self.grab_state {
+                match grab.grab_type {
+                    GrabType::PointerOnly | GrabType::Full => (Some(grab.grab_client), self.active_pointer_obj),
+                    _ => (self.focused.pointer_client, self.active_pointer_obj), // Kbd only grab, pointer acts normally
+                }
+            } else {
+                (self.focused.pointer_client, self.active_pointer_obj)
+            };
+
+        if let (Some(client), Some(pointer_obj)) = (target_client, target_pointer_obj) {
+            // sx, sy for wl_pointer.motion are surface-local.
+            // This requires transformation logic not yet in place. Using global for now.
+            let surface_x = self.pointer_x;
+            let surface_y = self.pointer_y;
+            debug!("FocusManager: Delivering pointer motion (dx={:.2}, dy={:.2}, time={}) to client {:?} via obj {:?}. Target pos ({:.2}, {:.2})",
+                  dx, dy, time, client, pointer_obj, surface_x, surface_y);
+            self.wayland_handle.send_wl_pointer_motion(client, pointer_obj, time, surface_x, surface_y);
+        } else {
+            // debug!("FocusManager: No client/surface has pointer focus or grab, dropping motion event.");
+        }
+    }
+
+    pub fn deliver_pointer_button(&self, time: u32, button: u32, state: u32) {
+        let (target_client, target_pointer_obj) =
+            if let Some(grab) = &self.grab_state {
+                match grab.grab_type {
+                    GrabType::PointerOnly | GrabType::Full => (Some(grab.grab_client), self.active_pointer_obj),
+                    _ => (self.focused.pointer_client, self.active_pointer_obj),
+                }
+            } else {
+                (self.focused.pointer_client, self.active_pointer_obj)
+            };
+
+        if let (Some(client), Some(pointer_obj)) = (target_client, target_pointer_obj) {
+            info!("FocusManager: Delivering pointer button (button={}, state={}, time={}) to client {:?}",
+                  button, state, time, client);
+            let serial = self.wayland_handle.next_serial();
+            self.wayland_handle.send_wl_pointer_button(client, pointer_obj, time, button, state, serial);
+        } else {
+            // debug!("FocusManager: No client/surface has pointer focus or grab, dropping button event.");
+        }
+    }
+
+    pub fn deliver_pointer_axis(&self, time: u32, axis: u32, value: f64) {
+        let (target_client, target_pointer_obj) =
+            if let Some(grab) = &self.grab_state {
+                match grab.grab_type {
+                    GrabType::PointerOnly | GrabType::Full => (Some(grab.grab_client), self.active_pointer_obj),
+                    _ => (self.focused.pointer_client, self.active_pointer_obj),
+                }
+            } else {
+                (self.focused.pointer_client, self.active_pointer_obj)
+            };
+
+        if let (Some(client), Some(pointer_obj)) = (target_client, target_pointer_obj) {
+            info!("FocusManager: Delivering pointer axis (axis={}, value={:.2}, time={}) to client {:?}",
+                  axis, value, time, client);
+            self.wayland_handle.send_wl_pointer_axis(client, pointer_obj, time, axis, value);
+        } else {
+            // debug!("FocusManager: No client/surface has pointer focus or grab, dropping axis event.");
+        }
+    }
+
+    pub fn deliver_keyboard_key(&self, time: u32, key: u32, state: u32, current_mods: Option<InputModifierState>) {
+        let (target_client, target_kbd_obj) =
+            if let Some(grab) = &self.grab_state {
+                match grab.grab_type {
+                    GrabType::KeyboardOnly | GrabType::Full => (Some(grab.grab_client), self.active_keyboard_obj),
+                    _ => (self.focused.keyboard_client, self.active_keyboard_obj), // Ptr only grab, kbd acts normally
+                }
+            } else {
+                (self.focused.keyboard_client, self.active_keyboard_obj)
+            };
+
+        if let (Some(client), Some(kbd_obj)) = (target_client, target_kbd_obj) {
+            let serial = self.wayland_handle.next_serial();
+            if let Some(mods) = current_mods {
+                 self.wayland_handle.send_wl_keyboard_modifiers(
+                    client, kbd_obj, serial,
+                    mods.depressed.bits(),
+                    mods.latched.bits(),
+                    mods.locked.bits(),
+                    0 // group - TODO: get from xkb_state.group()
+                );
+            }
+            info!("FocusManager: Delivering keyboard key (key={}, state={}, time={}) to client {:?}",
+                  key, state, time, client);
+            self.wayland_handle.send_wl_keyboard_key(client, kbd_obj, time, key, state, serial);
+        } else {
+            // debug!("FocusManager: No client has keyboard focus or grab, dropping key event.");
+        }
+    }
+
+    pub fn set_active_wl_objects(&mut self, pointer: Option<PointerObjectId>, keyboard: Option<KeyboardObjectId>) {
+        self.active_pointer_obj = pointer;
+        self.active_keyboard_obj = keyboard;
+        info!("FocusManager: Active Wayland objects updated: pointer={:?}, keyboard={:?}", pointer, keyboard);
+    }
 }
