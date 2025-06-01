@@ -540,7 +540,8 @@ pub enum SurfaceRole {
     /// A subsurface, part of a surface tree (`wl_subsurface`).
     Subsurface(SubsurfaceState),
     /// A hardware or software cursor image.
-    /// (Placeholder: would contain specific cursor state).
+    /// This role indicates the surface is being used as a cursor.
+    /// Hotspot information is typically managed by the pointer logic (`WlPointer`).
     Cursor,
     /// A drag-and-drop icon.
     /// (Placeholder: would contain specific DND icon state).
@@ -563,6 +564,8 @@ pub struct WlCallback {
 pub struct Surface {
     /// Unique identifier for this surface.
     pub id: SurfaceId,
+    /// Identifier of the client that owns this surface.
+    pub client_id: ClientId,
     /// Current lifecycle state of the surface.
     pub current_state: SurfaceState,
     /// Attributes pending to be applied on the next commit.
@@ -580,26 +583,31 @@ pub struct Surface {
     /// List of pending frame callbacks requested by the client.
     pub frame_callbacks: Vec<WlCallback>,
 
-    /// Pending opaque region, set by `wl_surface.set_opaque_region`. Applied on commit.
+    /// Pending opaque region for the surface, set via `wl_surface.set_opaque_region`.
     ///
-    /// A `None` value indicates that the client has not specified an opaque region,
-    /// or has explicitly set it to `NULL`. In Wayland, a `NULL` opaque region means
-    /// it's empty, implying the surface is fully transparent beyond its buffer content.
+    /// This region describes parts of the surface that are guaranteed to be opaque.
+    /// The compositor can use this information to optimize rendering (e.g., by not
+    /// rendering content obscured by an opaque region).
+    /// A `None` value signifies an empty opaque region, meaning the client considers
+    /// the surface entirely transparent beyond its explicit buffer content, or has
+    /// passed a `NULL` `wl_region`. This is the initial state.
+    /// This state is applied atomically during a `commit` operation.
     pub pending_opaque_region: Option<Region>,
-    /// Current opaque region of the surface after a commit.
+    /// Current opaque region of the surface, active after a `commit`.
     ///
-    /// `None` indicates an empty opaque region.
+    /// `None` signifies an empty opaque region.
     pub current_opaque_region: Option<Region>,
-    /// Pending input region, set by `wl_surface.set_input_region`. Applied on commit.
+    /// Pending input region for the surface, set via `wl_surface.set_input_region`.
     ///
-    /// A `None` value indicates that the client has not specified an input region,
-    /// or has explicitly set it to `NULL`. In Wayland, a `NULL` input region means
-    /// the entire surface area accepts input (effectively an infinite region clipped
-    /// to the surface bounds).
+    /// This region defines the areas of the surface that can receive pointer and touch input.
+    /// A `None` value signifies that the entire surface accepts input (effectively an
+    /// "infinite" region, clipped to the surface bounds). This is the initial state if
+    /// the client passes a `NULL` `wl_region`.
+    /// This state is applied atomically during a `commit` operation.
     pub pending_input_region: Option<Region>,
-    /// Current input region of the surface after a commit.
+    /// Current input region of the surface, active after a `commit`.
     ///
-    /// `None` indicates an infinite input region.
+    /// `None` signifies an infinite input region (the whole surface).
     pub current_input_region: Option<Region>,
 
     // Subsurface-specific fields
@@ -622,9 +630,13 @@ impl Surface {
     /// with no attached buffer or specific role.
     /// - Opaque region is initially `None` (empty), as per Wayland specification.
     /// - Input region is initially `None` (infinite/whole surface), as per Wayland specification.
-    pub fn new() -> Self {
+    ///
+    /// # Arguments
+    /// * `client_id`: The ID of the client creating this surface.
+    pub fn new(client_id: ClientId) -> Self {
         Self {
             id: SurfaceId::new_unique(),
+            client_id,
             current_state: SurfaceState::Created,
             pending_attributes: SurfaceAttributes::default(),
             current_attributes: SurfaceAttributes::default(),
@@ -1046,10 +1058,8 @@ impl Surface {
                     self.cached_pending_buffer = None; // Handles attach(NULL) case.
                 }
                 self.cached_pending_attributes = Some(self.pending_attributes);
-                // Note: Regions are also part of pending state, but they are not explicitly cached here
-                // as apply_cached_state_from_sync will use the main pending_opaque/input_region fields
-                // which are not cleared until the parent applies the state.
-                // For a stricter model, regions could also be explicitly cached.
+                // Note: Regions (opaque/input) are part of the pending state that gets cached implicitly
+                // by not clearing them here. apply_cached_state_from_sync will then apply them.
 
                 // The original self.pending_buffer is now "consumed" into the cache.
                 self.pending_buffer.take();
@@ -1120,14 +1130,15 @@ impl Surface {
     ///   it returns `Ok(())` or `Err(CommitError::InvalidState)` as appropriate, without action.
     /// - Clears the `needs_apply_on_parent_commit` flag in `SubsurfaceState`.
     /// - Moves `cached_pending_attributes` to `current_attributes`.
-    /// - Applies pending opaque and input regions to current.
+    /// - Applies pending opaque and input regions (which were part of the subsurface's state when it
+    ///   committed and cached) to the current opaque and input regions.
     /// - Releases the old `current_buffer` (if any).
     /// - Moves `cached_pending_buffer` (if any) to `current_buffer`. The reference count for this
     ///   buffer was already incremented when it was cached.
     /// - Calls `damage_tracker.commit_pending_damage()` to process any damage that was
     ///   pending in the `DamageTracker` from when the subsurface originally cached its state.
     ///   The `new_content_was_cached` flag for damage processing is determined by whether
-    ///   attributes were actually cached (indicating a content update).
+    ///   attributes or a buffer were actually cached (indicating a content update).
     ///
     /// The surface state is expected to be `Committed` (set when it originally cached its state)
     /// and generally remains `Committed` after this operation.
@@ -1165,18 +1176,22 @@ impl Surface {
         }
 
         // Apply cached attributes.
+        let had_cached_attributes = self.cached_pending_attributes.is_some();
         if let Some(cached_attrs) = self.cached_pending_attributes.take() {
             self.current_attributes = cached_attrs;
         }
+
         // Apply pending regions from when the subsurface committed its state (now being applied by parent).
+        // These were part of its "pending" state that got latched.
         self.current_opaque_region = self.pending_opaque_region.clone();
         self.current_input_region = self.pending_input_region.clone();
 
         // Apply cached buffer.
+        let had_cached_buffer = self.cached_pending_buffer.is_some();
         self.release_current_buffer(buffer_manager); // Release any existing current buffer.
         self.current_buffer = self.cached_pending_buffer.take();
 
-        let new_content_was_cached = self.current_buffer.is_some() || self.cached_pending_attributes.is_some();
+        let new_content_was_cached = had_cached_buffer || had_cached_attributes;
 
         self.damage_tracker.commit_pending_damage(&self.current_attributes, new_content_was_cached);
 
@@ -1350,6 +1365,9 @@ pub mod surface_registry {
     pub trait SurfaceRegistryAccessor {
         /// Retrieves a shared pointer to a `Surface` by its `SurfaceId`.
         fn get_surface(&self, id: SurfaceId) -> Option<Arc<Mutex<Surface>>>;
+        /// Retrieves a list of all surface IDs, potentially for iteration.
+        /// The order is not guaranteed unless specified by the implementation.
+        fn get_all_surface_ids(&self) -> Vec<SurfaceId>;
     }
 
     /// Central registry for all surfaces known to the compositor.
@@ -1363,6 +1381,10 @@ pub mod surface_registry {
     impl SurfaceRegistryAccessor for SurfaceRegistry {
         fn get_surface(&self, id: SurfaceId) -> Option<Arc<Mutex<Surface>>> {
             self.surfaces.get(&id).cloned()
+        }
+
+        fn get_all_surface_ids(&self) -> Vec<SurfaceId> {
+            self.surfaces.keys().cloned().collect()
         }
     }
 
@@ -1385,8 +1407,11 @@ pub mod surface_registry {
         /// fallible allocation (e.g., `Box::try_new`) and propagate allocation errors
         /// to the Wayland protocol layer, typically by sending a `wl_display.error`
         /// with the `no_memory` error code to the client. This is not currently implemented.
-        pub fn register_new_surface(&mut self) -> (SurfaceId, Arc<Mutex<Surface>>) {
-            let surface = Surface::new();
+        ///
+        /// # Arguments
+        /// * `client_id`: The ID of the client creating this surface.
+        pub fn register_new_surface(&mut self, client_id: ClientId) -> (SurfaceId, Arc<Mutex<Surface>>) {
+            let surface = Surface::new(client_id);
             let id = surface.id;
             let arc_surface = Arc::new(Mutex::new(surface));
             self.surfaces.insert(id, arc_surface.clone());
@@ -1481,7 +1506,10 @@ mod tests {
 
     #[test]
     fn surface_creation_defaults() {
-        let surface = Surface::new();
+        let client_id = test_client_id();
+        let surface = Surface::new(client_id);
+        assert_eq!(surface.id.0, SurfaceId::new_unique().0 -1); // Brittle if NEXT_ID changes start
+        assert_eq!(surface.client_id, client_id);
         assert_eq!(surface.current_state, SurfaceState::Created);
         assert_eq!(surface.pending_attributes, SurfaceAttributes::default());
         assert_eq!(surface.current_attributes, SurfaceAttributes::default());
@@ -1503,16 +1531,18 @@ mod tests {
 
     #[test]
     fn surface_id_uniqueness() {
-        let surface1 = Surface::new();
-        let surface2 = Surface::new();
+        let client_id = test_client_id();
+        let surface1 = Surface::new(client_id);
+        let surface2 = Surface::new(client_id); // ClientId doesn't affect SurfaceId
         assert_ne!(surface1.id, surface2.id);
     }
 
     #[test]
     fn attach_null_buffer() {
-        let mut surface = Surface::new();
-        let mut bm = test_buffer_manager();
         let client_id = test_client_id();
+        let mut surface = Surface::new(client_id);
+        let mut bm = test_buffer_manager();
+        //let client_id = test_client_id(); // client_id already defined for surface
 
         let initial_size = surface.pending_attributes.size;
         let result = surface.attach_buffer(&mut bm, None, client_id, 0, 0);
@@ -1529,7 +1559,8 @@ mod tests {
 
     #[test]
     fn test_surface_initial_regions_explicit_check() { // Renamed to avoid conflict if already tested by surface_creation_defaults
-        let surface = Surface::new();
+        let client_id = test_client_id();
+        let surface = Surface::new(client_id);
         assert!(surface.pending_opaque_region.is_none());
         assert!(surface.current_opaque_region.is_none());
         assert!(surface.pending_input_region.is_none());
@@ -1538,7 +1569,11 @@ mod tests {
 
     #[test]
     fn test_set_opaque_region_with_some_region() {
-        let mut surface = Surface::new();
+        let client_a = test_client_id();
+        let mut surface_registry = SurfaceRegistry::new(); // Needed for surface for role setting
+        let (_surface_id, surface_arc) = surface_registry.register_new_surface(client_a);
+        let mut surface = surface_arc.lock().unwrap();
+
         let mut bm = test_buffer_manager();
 
         let region_id = RegionId::new_unique();
@@ -1577,7 +1612,10 @@ mod tests {
 
     #[test]
     fn test_set_opaque_region_with_none() {
-        let mut surface = Surface::new();
+        let client_a = test_client_id();
+        let mut surface_registry = SurfaceRegistry::new();
+        let (_surface_id, surface_arc) = surface_registry.register_new_surface(client_a);
+        let mut surface = surface_arc.lock().unwrap();
         let mut bm = test_buffer_manager();
 
         // Set it to Some first, then to None
@@ -1597,7 +1635,10 @@ mod tests {
 
     #[test]
     fn test_set_input_region_with_some_region() {
-        let mut surface = Surface::new();
+        let client_a = test_client_id();
+        let mut surface_registry = SurfaceRegistry::new();
+        let (_surface_id, surface_arc) = surface_registry.register_new_surface(client_a);
+        let mut surface = surface_arc.lock().unwrap();
         let mut bm = test_buffer_manager();
 
         let region_id = RegionId::new_unique();
@@ -1617,7 +1658,10 @@ mod tests {
 
     #[test]
     fn test_set_input_region_with_none() {
-        let mut surface = Surface::new();
+        let client_a = test_client_id();
+        let mut surface_registry = SurfaceRegistry::new();
+        let (_surface_id, surface_arc) = surface_registry.register_new_surface(client_a);
+        let mut surface = surface_arc.lock().unwrap();
         let mut bm = test_buffer_manager();
 
         let region_id = RegionId::new_unique();

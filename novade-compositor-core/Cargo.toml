@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 novade-buffer-manager = { path = "../novade-buffer-manager" }
+bitflags = "2.4"
+thiserror = "1.0"
 
 # Add other dependencies as needed, e.g. wayland-server
 # For example:

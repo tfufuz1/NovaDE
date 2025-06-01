@@ -28,3 +28,4 @@
 pub mod surface;
 pub mod subcompositor;
 pub mod region;
+pub mod input;
