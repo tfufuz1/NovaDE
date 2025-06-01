@@ -200,3 +200,98 @@ impl InputDeviceManager {
         (has_keyboard, has_pointer, has_touch)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::libinput_handler::{LibinputHandler, StubbedInputDevice as LibinputStubbedDevice, DeviceCapability as LibinputCapabilityEnum};
+    use crate::input::config::{InputConfig, PointerConfig, KeyboardConfig, DeviceSpecificConfigEntry};
+    use crate::wayland_server_module_placeholder::WaylandServerHandle; // For notify_seat
+    use std::collections::HashMap;
+
+    fn create_test_input_config() -> InputConfig {
+        let mut specific_configs = HashMap::new();
+        specific_configs.insert(
+            "Stubbed Mouse".to_string(),
+            DeviceSpecificConfigEntry {
+                pointer: Some(PointerConfig {
+                    sensitivity: Some(2.0), acceleration_factor: Some(0.1), acceleration_curve: None, button_mapping: None,
+                }),
+                keyboard: None,
+            }
+        );
+        InputConfig {
+            default_pointer_config: Some(PointerConfig {
+                sensitivity: Some(1.0), acceleration_factor: Some(0.0), acceleration_curve: None, button_mapping: None,
+            }),
+            default_keyboard_config: Some(KeyboardConfig { repeat_rate: Some(25), repeat_delay: Some(600) }),
+            device_specific: Some(specific_configs),
+        }
+    }
+
+    // Mock LibinputHandler that returns a predefined set of devices
+    struct MockLibinputHandler {
+        devices_to_return: Vec<LibinputStubbedDevice>,
+    }
+    impl MockLibinputHandler {
+        fn new(devices: Vec<LibinputStubbedDevice>) -> Self { Self { devices_to_return: devices } }
+        // Implement methods that LibinputHandler has, which DeviceManager uses
+        #[allow(dead_code)] // Original new is not used in this test setup
+        fn new_stub() -> LibinputHandler { LibinputHandler::new() } // Keep the real new for take_libinput_handler
+        fn get_devices(&self) -> Vec<LibinputStubbedDevice> { self.devices_to_return.clone() }
+    }
+
+
+    #[test]
+    fn test_device_manager_new_with_config_and_device_application() {
+        // Create a LibinputHandler that DeviceManager can use (even if it's the real stub)
+        let libinput_handler_stub = LibinputHandler::new();
+        let config = create_test_input_config();
+
+        let dm = DeviceManager::new_with_config(libinput_handler_stub, config.clone());
+
+        assert_eq!(dm.devices.len(), 3); // LibinputHandler stub provides 3 devices
+
+        let mouse = dm.devices.iter().find(|d| d.name == "Stubbed Mouse").unwrap();
+        assert!(mouse.capabilities.contains(&DeviceCapability::Pointer));
+        assert_eq!(mouse.pointer_config.as_ref().unwrap().sensitivity, Some(2.0)); // Specific config
+
+        let keyboard = dm.devices.iter().find(|d| d.name == "Stubbed Keyboard").unwrap();
+        assert!(keyboard.capabilities.contains(&DeviceCapability::Keyboard));
+        assert_eq!(keyboard.keyboard_config.as_ref().unwrap().repeat_rate, Some(25)); // Default
+
+        let touchscreen = dm.devices.iter().find(|d| d.name == "Stubbed Touchscreen").unwrap();
+        assert!(touchscreen.capabilities.contains(&DeviceCapability::Touch));
+        // No specific touch config, so pointer/keyboard configs should be None
+        assert!(touchscreen.pointer_config.is_none());
+        assert!(touchscreen.keyboard_config.is_none());
+    }
+
+    #[test]
+    fn test_refresh_devices_and_notify_seat() {
+        let libinput_handler_stub = LibinputHandler::new();
+        let config = create_test_input_config();
+        let mut dm = DeviceManager::new_with_config(libinput_handler_stub, config);
+
+        let wayland_server_handle = WaylandServerHandle::new(); // Stub
+        dm.refresh_devices_and_notify_seat(&wayland_server_handle);
+        // Verification here is primarily that it runs and logs correctly.
+        // We'd need a mock WaylandServerHandle to check if update_seat_capabilities was called with correct data.
+        // For now, rely on logs and no panic.
+        // Check that devices are still there:
+        assert_eq!(dm.devices.len(), 3);
+    }
+
+    #[test]
+    fn test_get_primary_configs() {
+        let libinput_handler_stub = LibinputHandler::new();
+        let config = create_test_input_config();
+        let dm = DeviceManager::new_with_config(libinput_handler_stub, config);
+
+        let kbd_cfg = dm.get_primary_keyboard_config().unwrap();
+        assert_eq!(kbd_cfg.repeat_rate, Some(25));
+
+        let ptr_cfg = dm.get_primary_pointer_config().unwrap();
+        assert_eq!(ptr_cfg.sensitivity, Some(2.0)); // From "Stubbed Mouse" specific config
+    }
+}
