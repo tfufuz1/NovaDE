@@ -62,10 +62,11 @@ pub struct GraphicsPushConstants {
     /// A tint color applied in the shader, typically RGBA.
     pub tint_color: [f32; 4], 
     /// A scaling factor, potentially applied to vertex positions or other attributes.
-    pub scale: f32,
-    // Note: Total size is 5 * sizeof(f32) = 20 bytes.
-    // Vulkan requires the size of push constant data to be a multiple of 4, which 20 is.
-    // `maxPushConstantsSize` limit (typically >= 128 bytes) is also well above this.
+    pub scale: f32, // This might be used for overall scaling or removed if element_size handles it
+    pub offset: [f32; 2],      // To store (x, y) of the element's top-left corner
+    pub element_size: [f32; 2], // To store (width, height) of the element
+    // Note: Total size is now (4 + 1 + 2 + 2) * sizeof(f32) = 9 * 4 = 36 bytes.
+    // Vulkan requires the size of push constant data to be a multiple of 4, which 36 is.
 }
 // --- End Push Constants Definition ---
 

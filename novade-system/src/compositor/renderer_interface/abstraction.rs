@@ -45,6 +45,7 @@ pub trait RenderableTexture: Send + Sync + std::fmt::Debug {
     fn width_px(&self) -> u32;
     fn height_px(&self) -> u32;
     fn format(&self) -> Option<Fourcc>;
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 #[derive(Debug)]

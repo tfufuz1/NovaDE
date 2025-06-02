@@ -24,7 +24,7 @@ use vk_mem;
 ///
 /// The `Allocator` implements `Drop` to ensure that the underlying VMA allocator
 /// is destroyed when this struct goes out of scope.
-#[derive(Debug)]
+#[derive(Debug, Clone)] // Added Clone
 pub struct Allocator {
     /// The raw `vk_mem::Allocator` handle from the `vk-mem-rs` crate.
     raw: vk_mem::Allocator,
@@ -240,7 +240,7 @@ impl Allocator {
     /// For `Drop` implementations of other structs that need to free VMA resources,
     /// cloning the allocator handle and storing it can be a valid pattern if the main
     /// `Allocator`'s lifetime is guaranteed to exceed theirs.
-    pub fn raw_allocator(&self) -> &vk_mem::Allocator { // Changed to return & to avoid confusion about cloning ownership
+    pub fn raw_allocator(&self) -> &vk_mem::Allocator { 
         &self.raw
     }
 

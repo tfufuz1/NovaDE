@@ -4,8 +4,11 @@ use libloading; // For egl::Dynamic
 use smithay::backend::renderer::utils::Fourcc;
 use std::rc::Rc;
 use uuid::Uuid;
+use std::any::Any;
 
-use crate::compositor::renderer_interface::abstraction::{RenderableTexture, RendererError};
+use crate::compositor::renderer_interface::abstraction::{
+    RenderableTexture as AbstractionRenderableTexture, RendererError as AbstractionRendererError,
+};
 
 /// Represents a GLES2 texture, potentially backed by an EGLImage for DMABUF imports.
 ///
@@ -117,15 +120,18 @@ impl Gles2Texture {
     }
 }
 
-impl RenderableTexture for Gles2Texture {
+impl AbstractionRenderableTexture for Gles2Texture {
     fn id(&self) -> Uuid {
         self.internal_id
     }
 
-    fn bind(&self, slot: u32) -> Result<(), RendererError> {
+    fn bind(&self, slot: u32) -> Result<(), AbstractionRendererError> {
         unsafe {
             if slot > 31 { // Arbitrary safety limit
-                return Err(RendererError::Generic(format!("Texture slot {} is too high.", slot)));
+                return Err(AbstractionRendererError::Generic(format!(
+                    "Texture slot {} is too high.",
+                    slot
+                )));
             }
             self.gl.active_texture(glow::TEXTURE0 + slot);
             self.gl.bind_texture(self.gl_target(), Some(self.texture_id));
@@ -143,6 +149,10 @@ impl RenderableTexture for Gles2Texture {
 
     fn format(&self) -> Option<Fourcc> {
         self.format
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
