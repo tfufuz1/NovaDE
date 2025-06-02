@@ -315,19 +315,24 @@ impl Drop for Texture {
 // --- VulkanRenderableTexture for DMABUF/SHM imports ---
 
 use std::sync::Arc;
-use std::any::Any;
-use uuid::Uuid;
-use smithay::reexports::drm_fourcc::DrmFourcc;
-use crate::compositor::renderer_interface::abstraction::{RenderableTexture, RendererError};
-use crate::compositor::renderer::vulkan::error::VulkanError; // For error conversion
+use std::any::Any; // Ensure Any is imported
+use std::fmt; // For Debug if manual impl is chosen (though derive is used)
+use uuid::Uuid; // Ensure Uuid is imported
+use smithay::reexports::drm_fourcc::DrmFourcc; // This is our Fourcc for now
+use crate::compositor::renderer_interface::abstraction::{
+    RenderableTexture as AbstractionRenderableTexture, // Alias for clarity
+    RendererError as AbstractionRendererError
+};
+// No longer needed here as trait methods return AbstractionRendererError:
+// use crate::compositor::renderer::vulkan::error::VulkanError; 
 
 /// Represents a Vulkan texture imported from a client buffer (DMABUF or SHM).
 ///
 /// This struct manages the lifetime of Vulkan resources associated with the imported buffer,
 /// such as `vk::Image`, `vk::ImageView`, and the underlying `vk::DeviceMemory` or `vk_mem::Allocation`.
-#[derive(Debug)]
+#[derive(Debug)] // Debug is already derived, which is good.
 pub struct VulkanRenderableTexture {
-    internal_id: Uuid,
+    id: Uuid, // Renamed from internal_id
     pub image: vk::Image,
     pub image_view: vk::ImageView,
     /// Raw device memory, typically for DMABUF imports where memory is externally owned/imported.
@@ -340,39 +345,39 @@ pub struct VulkanRenderableTexture {
     pub width: u32,
     pub height: u32,
     pub current_layout: vk::ImageLayout, // Current layout of the vk::Image
-    logical_device: Arc<ash::Device>,
+    logical_device: Arc<ash::Device>, // Keep using Arc<ash::Device> for direct Vulkan calls
     /// VMA allocator instance, needed if `allocation` is Some and needs to be freed.
-    vma_allocator: Option<Arc<Allocator>>, 
+    allocator_owner: Option<Arc<Allocator>>, // New field
 }
 
 impl VulkanRenderableTexture {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new( // Changed to pub(crate) as it's mostly internal to Vulkan renderer module
         image: vk::Image,
         image_view: vk::ImageView,
-        memory: Option<vk::DeviceMemory>,
-        allocation: Option<vk_mem::Allocation>,
+        vk_memory: Option<vk::DeviceMemory>, // Renamed for clarity (was memory)
+        vma_allocation: Option<vk_mem::Allocation>, // Renamed for clarity (was allocation)
         sampler: vk::Sampler,
-        format: vk::Format,
+        vk_format: vk::Format, // Renamed for clarity (was format)
         width: u32,
         height: u32,
         initial_layout: vk::ImageLayout,
-        logical_device: Arc<ash::Device>,
-        vma_allocator: Option<Arc<Allocator>>,
+        device: Arc<ash::Device>, // Renamed from logical_device for clarity
+        allocator_owner: Option<Arc<Allocator>>, // New parameter
     ) -> Self {
         Self {
-            internal_id: Uuid::new_v4(),
+            id: Uuid::new_v4(),
             image,
             image_view,
-            memory,
-            allocation,
+            memory: vk_memory, // Store in field named memory
+            allocation: vma_allocation, // Store in field named allocation
             sampler,
-            format,
+            format: vk_format, // Store in field named format
             width,
             height,
             current_layout: initial_layout,
-            logical_device,
-            vma_allocator,
+            logical_device: device, // Store in field named logical_device
+            allocator_owner, // Store the new field
         }
     }
 
@@ -389,25 +394,31 @@ impl VulkanRenderableTexture {
             _ => DrmFourcc::Invalid, // Default for unmapped formats
         }
     }
+
+    // Renamed from get_descriptor_info_hack and signature simplified.
+    // This provides the necessary info for descriptor set updates.
+    pub(crate) fn descriptor_image_info(&self) -> vk::DescriptorImageInfo {
+        vk::DescriptorImageInfo::builder()
+            .image_layout(self.current_layout) // Current layout of the image
+            .image_view(self.image_view)
+            .sampler(self.sampler) // Sampler associated with this texture
+            .build()
+    }
 }
 
-impl RenderableTexture for VulkanRenderableTexture {
+impl AbstractionRenderableTexture for VulkanRenderableTexture {
     fn id(&self) -> Uuid {
-        self.internal_id
+        self.id // Use the new field name
     }
 
-    fn bind(&self, _texture_unit: u32) -> Result<(), RendererError> {
-        // For Vulkan, "binding" a texture is different from OpenGL.
-        // Textures are typically bound via descriptor sets.
-        // This method could:
-        // 1. Ensure the texture is in the correct layout for sampling (e.g., SHADER_READ_ONLY_OPTIMAL).
-        //    (This should ideally be handled by the render pass or commands using the texture).
-        // 2. Return information needed to update a descriptor set, like (ImageView, Sampler, Layout).
-        // For now, as a basic implementation, we'll just acknowledge the call.
-        // The actual usage will depend on how the VulkanFrameRenderer manages descriptor sets.
-        debug!("VulkanRenderableTexture::bind called for texture ID {:?}. (ImageView: {:?}, Sampler: {:?})", 
-               self.internal_id, self.image_view, self.sampler);
+    fn bind(&self, _slot: u32) -> Result<(), AbstractionRendererError> {
+        // Vulkan doesn't have explicit bind slots in the same way as GL.
+        // Binding happens via descriptor sets. This method might be a no-op
+        // or could be used to signal that the texture is ready for descriptor updates.
+        debug!("VulkanRenderableTexture::bind called for texture ID {:?} (slot {}). This is a no-op for Vulkan.", 
+               self.id, _slot);
         Ok(())
+        // Or: Err(AbstractionRendererError::Unsupported("Bind not applicable for VulkanRenderableTexture directly".to_string()))
     }
 
     fn width_px(&self) -> u32 {
@@ -418,66 +429,61 @@ impl RenderableTexture for VulkanRenderableTexture {
         self.height
     }
 
-    fn drm_format(&self) -> Option<DrmFourcc> {
+    fn format(&self) -> Option<DrmFourcc> { // Renamed from drm_format, DrmFourcc is our Fourcc
         let drm_fmt = Self::vk_format_to_drm_fourcc(self.format);
         if drm_fmt == DrmFourcc::Invalid {
+            warn!("VulkanRenderableTexture: vk_format {:?} has no mapping to DrmFourcc.", self.format);
             None
         } else {
             Some(drm_fmt)
         }
     }
 
-    fn downcast_ref<T: 'static + Any>(&self) -> Option<&T> {
-        if Any::type_id(self) == Any::type_id::<T>() {
-            unsafe { Some(&*(self as *const Self as *const T)) }
-        } else {
-            None
-        }
+    fn as_any(&self) -> &dyn Any {
+        self
     }
-     // TODO: Implement downcast_mut if mutable access to the concrete type is needed.
+    // The old downcast_ref method is removed.
 }
 
 impl Drop for VulkanRenderableTexture {
     fn drop(&mut self) {
         debug!(
-            "Dropping VulkanRenderableTexture (ID: {:?}, Image: {:?}, ImageView: {:?})",
-            self.internal_id, self.image, self.image_view
+            "Dropping VulkanRenderableTexture (ID: {}), Image: {:?}, ImageView: {:?}",
+            self.id, self.image, self.image_view
         );
         unsafe {
-            self.logical_device.destroy_image_view(self.image_view, None);
-            // Image and memory destruction depends on how they were created.
-            if let Some(allocation) = self.allocation.take() {
-                if let Some(allocator_arc) = &self.vma_allocator {
-                    // This image was created and allocated by VMA (e.g., for SHM)
-                     if let Err(e) = allocator_arc.destroy_image(self.image, &allocation) {
-                        error!("Failed to destroy VMA-allocated image {:?}: {:?}", self.image, e);
-                     } else {
-                        debug!("Destroyed VMA-allocated image {:?}", self.image);
-                     }
-                } else {
-                    // This is problematic: allocation exists but no allocator to free it.
-                    error!("VMA allocation for image {:?} present but no VMA allocator to free it.", self.image);
+            // Destroy image view 
+            if self.image_view != vk::ImageView::null() {
+                self.logical_device.destroy_image_view(self.image_view, None);
+            }
+            // Sampler is not owned by VulkanRenderableTexture in current design, so not destroyed here.
+
+            // Handle VMA allocation if present
+            if let (Some(vma_alloc), Some(allocator_owner_arc)) = (&self.allocation, &self.allocator_owner) {
+                if self.image != vk::Image::null() { 
+                    allocator_owner_arc.destroy_image(self.image, vma_alloc);
+                    debug!("VulkanRenderableTexture (ID: {}): VMA image {:?} and allocation destroyed via allocator_owner.", self.id, self.image);
                 }
-            } else if let Some(memory) = self.memory.take() {
-                // This image's memory was imported or manually bound (e.g., DMABUF)
-                // The image itself might still need to be destroyed if it wasn't solely an imported resource.
-                // If ClientVkBuffer::from_dma_buf creates the vk::Image handle for an imported memory,
-                // that vk::Image handle should be destroyed.
-                self.logical_device.destroy_image(self.image, None);
-                debug!("Destroyed vk::Image handle {:?}", self.image);
-                self.logical_device.free_memory(memory, None);
-                debug!("Freed vk::DeviceMemory for image {:?}", self.image);
-            } else {
-                // If neither allocation nor memory is set, it might be an image whose lifecycle is managed elsewhere
-                // or an error in state. For imported DMABUFs where only an image view is created for an
-                // externally managed image, only the view should be destroyed.
-                // However, our current plan for DMABUF involves creating a vk::Image via ClientVkBuffer.
-                 warn!("VulkanRenderableTexture dropped for image {:?}, but it had neither VMA allocation nor direct DeviceMemory. Ensure lifecycle is managed if this is intended.", self.image);
-                 // If the image handle itself was created by us (even for imported memory), it should be destroyed.
-                 // This path might be hit if memory was None but image was still created.
-                 // self.logical_device.destroy_image(self.image, None); // Consider if this is always safe.
+            } 
+            // Handle manually managed vk::DeviceMemory (e.g., for raw DMA-BUF import where VMA is not the owner of the memory)
+            // This runs if vma_allocation was None, and vk_memory (self.memory) is Some.
+            else if self.memory.is_some() && self.allocation.is_none() {
+                if self.image != vk::Image::null() {
+                    self.logical_device.destroy_image(self.image, None);
+                    debug!("VulkanRenderableTexture (ID: {}): vk::Image {:?} destroyed.", self.id, self.image);
+                }
+                if let Some(mem) = self.memory {
+                    if mem != vk::DeviceMemory::null() {
+                        self.logical_device.free_memory(mem, None);
+                        debug!("VulkanRenderableTexture (ID: {}): vk::DeviceMemory {:?} freed.", self.id, mem);
+                    }
+                }
+            } 
+            // Case: Image exists but no vma_allocation and no vk_memory (e.g. swapchain image, not owned by this texture)
+            else if self.image != vk::Image::null() && self.allocation.is_none() && self.memory.is_none() {
+                 debug!("VulkanRenderableTexture (ID: {}): Image {:?} was not owned by this texture wrapper (e.g. swapchain image). Not destroying.", self.id, self.image);
             }
         }
-        debug!("VulkanRenderableTexture (ID: {:?}) resources destroyed.", self.internal_id);
+        debug!("VulkanRenderableTexture (ID: {}) resources potentially destroyed.", self.id);
     }
 }
