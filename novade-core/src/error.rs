@@ -152,6 +152,10 @@ pub enum ConfigError {
     /// Error indicating that the configuration has not yet been initialized.
     #[error("Configuration has not yet been initialized.")]
     NotInitializedError,
+
+    /// Error indicating that an RwLock for configuration was poisoned.
+    #[error("Configuration lock is poisoned: {0}")]
+    PoisonedLock(String),
 }
 
 /// Specific errors related to logging.

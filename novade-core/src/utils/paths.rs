@@ -182,10 +182,45 @@ pub fn get_app_state_dir() -> Result<PathBuf, CoreError> {
         })
 }
 
+/// Retrieves the system-wide configuration file path.
+///
+/// Path is typically `/etc/novade/config.toml`.
+/// This can be overridden for testing using the `NOVADE_TEST_SYSTEM_CONFIG_PATH` environment variable.
+///
+/// # Returns
+///
+/// * `Ok(PathBuf)` containing the path to the system configuration file.
+/// * `Err(ConfigError::DirectoryUnavailable)` if the path cannot be determined (e.g. env var is invalid UTF-8).
+pub fn get_system_config_path_with_override() -> Result<PathBuf, ConfigError> {
+    match std::env::var("NOVADE_TEST_SYSTEM_CONFIG_PATH") {
+        Ok(path_str) => {
+            if path_str.is_empty() {
+                 // Treat empty string as "use default" or error, this seems like an invalid override.
+                 // For now, let's assume an empty path is not intended and fall back or error.
+                 // Falling back to default:
+                 Ok(PathBuf::from("/etc/novade/config.toml"))
+            } else {
+                Ok(PathBuf::from(path_str))
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {
+            // Environment variable not set, use the default system path
+            Ok(PathBuf::from("/etc/novade/config.toml"))
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            // Environment variable was set but contained invalid UTF-8
+            Err(ConfigError::DirectoryUnavailable { // Reusing DirectoryUnavailable, consider a new variant if more fitting
+                dir_type: "System Config Path (Invalid UTF-8 Env Var)".to_string(),
+            })
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
     // Mocking directories_next is complex. Tests will focus on:
     // 1. The constants used.
     // 2. The logic of get_app_state_dir if get_state_base_dir and ProjectDirs work.
@@ -370,4 +405,58 @@ mod tests {
             std::env::remove_var("XDG_STATE_HOME");
         }
     }
+
+    #[test]
+    fn test_get_system_config_path_default() {
+        let original_env = env::var("NOVADE_TEST_SYSTEM_CONFIG_PATH").ok();
+        env::remove_var("NOVADE_TEST_SYSTEM_CONFIG_PATH");
+
+        assert_eq!(
+            get_system_config_path_with_override().unwrap(),
+            PathBuf::from("/etc/novade/config.toml")
+        );
+
+        if let Some(val) = original_env {
+            env::set_var("NOVADE_TEST_SYSTEM_CONFIG_PATH", val);
+        }
+    }
+
+    #[test]
+    fn test_get_system_config_path_override_valid() {
+        let original_env = env::var("NOVADE_TEST_SYSTEM_CONFIG_PATH").ok();
+        let test_path = "/tmp/custom_system_config.toml";
+        env::set_var("NOVADE_TEST_SYSTEM_CONFIG_PATH", test_path);
+
+        assert_eq!(
+            get_system_config_path_with_override().unwrap(),
+            PathBuf::from(test_path)
+        );
+
+        if let Some(val) = original_env {
+            env::set_var("NOVADE_TEST_SYSTEM_CONFIG_PATH", val);
+        } else {
+            env::remove_var("NOVADE_TEST_SYSTEM_CONFIG_PATH");
+        }
+    }
+
+    #[test]
+    fn test_get_system_config_path_override_empty_falls_back_to_default() {
+        let original_env = env::var("NOVADE_TEST_SYSTEM_CONFIG_PATH").ok();
+        env::set_var("NOVADE_TEST_SYSTEM_CONFIG_PATH", "");
+
+        assert_eq!(
+            get_system_config_path_with_override().unwrap(),
+            PathBuf::from("/etc/novade/config.toml") // Falls back to default
+        );
+
+        if let Some(val) = original_env {
+            env::set_var("NOVADE_TEST_SYSTEM_CONFIG_PATH", val);
+        } else {
+            env::remove_var("NOVADE_TEST_SYSTEM_CONFIG_PATH");
+        }
+    }
+
+    // Test for NotUnicode is harder as it requires setting non-UTF8 env var,
+    // which is platform-specific and not straightforward with Rust's env::set_var.
+    // This case is less common for paths but good to be aware of.
 }

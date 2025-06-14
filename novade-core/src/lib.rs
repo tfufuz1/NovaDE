@@ -74,6 +74,10 @@ pub mod types;
 pub mod config;
 pub mod logging;
 pub mod utils;
+pub mod performance_monitoring;
+pub mod error_tracking;
+pub mod metrics_export;
+pub mod debug_interface;
 
 // Re-export key types for convenience
 pub use error::{CoreError, ConfigError, ColorParseError}; // LoggingError removed, ColorParseError added
