@@ -78,3 +78,140 @@ impl OutputHandler for NovadeCompositorState {
         tracing::info!("Output {} unmapped from space and removed from state.", destroyed_output.name());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compositor::core::state::DesktopState; // Assuming NovadeCompositorState is DesktopState
+    use smithay::{
+        reexports::calloop::EventLoop,
+        reexports::wayland_server::Display,
+        output::{Output, Mode, PhysicalProperties, Scale},
+        utils::{Point, Transform},
+    };
+    use std::sync::Arc;
+
+    // Helper to create a DesktopState for testing.
+    // This is a simplified setup and might need adjustments based on DesktopState's evolution.
+    fn create_test_desktop_state() -> DesktopState {
+        let event_loop: EventLoop<DesktopState> = EventLoop::try_new().expect("Failed to create event loop for test");
+        let display: Display<DesktopState> = Display::new().expect("Failed to create display for test");
+        DesktopState::new(event_loop.handle(), display.handle()).expect("Failed to create DesktopState for test")
+    }
+
+    // Helper to create a dummy Smithay Output for testing.
+    fn create_dummy_output(name: &str, mode: Mode) -> Output {
+        let physical_props = PhysicalProperties {
+            size: (345, 194).into(), // Example physical size in mm
+            subpixel: smithay::output::Subpixel::Unknown,
+            make: "TestMake".to_string(),
+            model: "TestModel".to_string(),
+        };
+        let output = Output::new(name.to_string(), physical_props, None);
+        output.add_mode(mode);
+        output.set_preferred_mode(mode); // Set preferred before current
+        assert!(output.set_current_mode(mode), "Failed to set current mode on dummy output");
+        output
+    }
+
+    fn get_default_mode() -> Mode {
+        Mode { size: (1920, 1080).into(), refresh: 60000 / 1000 } // 60Hz
+    }
+
+    #[test]
+    fn test_new_output_adds_to_state_and_space() {
+        let mut state = create_test_desktop_state();
+        let output_mode = get_default_mode();
+        let dummy_output = create_dummy_output("test-output-1", output_mode);
+
+        assert_eq!(state.outputs.len(), 0, "Outputs list should be empty initially");
+        assert!(state.space.outputs().next().is_none(), "Space should have no outputs initially");
+
+        state.new_output(dummy_output.clone()); // Clone because new_output takes ownership
+
+        assert_eq!(state.outputs.len(), 1, "Output should be added to the state's outputs list");
+        assert_eq!(state.outputs[0].name(), "test-output-1");
+
+        let space_outputs: Vec<_> = state.space.outputs().collect();
+        assert_eq!(space_outputs.len(), 1, "Output should be mapped to the space");
+        assert_eq!(space_outputs[0].name(), "test-output-1");
+
+        // Check if it's positioned (default logic positions first output at (0,0))
+        if let Some(geom) = state.space.output_geometry(&dummy_output) {
+            assert_eq!(geom.loc, Point::from((0,0)), "First output should be at (0,0)");
+        } else {
+            panic!("Output not found in space after new_output");
+        }
+    }
+
+    #[test]
+    fn test_new_output_positions_multiple_outputs_side_by_side() {
+        let mut state = create_test_desktop_state();
+        let output_mode1 = Mode { size: (800, 600).into(), refresh: 60000/1000 };
+        let output_mode2 = Mode { size: (1024, 768).into(), refresh: 60000/1000 };
+
+        let output1 = create_dummy_output("output1", output_mode1);
+        let output2 = create_dummy_output("output2", output_mode2);
+
+        state.new_output(output1.clone());
+        state.new_output(output2.clone());
+
+        assert_eq!(state.outputs.len(), 2);
+        if let Some(geom1) = state.space.output_geometry(&output1) {
+            assert_eq!(geom1.loc, Point::from((0,0)));
+            assert_eq!(geom1.size, output_mode1.size);
+        } else {
+            panic!("Output1 not found in space");
+        }
+        if let Some(geom2) = state.space.output_geometry(&output2) {
+            // output_handlers.rs logic: current_max_x = geom.loc.x + geom.size.w
+            assert_eq!(geom2.loc, Point::from((output_mode1.size.w, 0)), "Output2 should be positioned after Output1");
+        } else {
+            panic!("Output2 not found in space");
+        }
+    }
+
+    #[test]
+    fn test_output_mode_updated_reflects_in_space() {
+        let mut state = create_test_desktop_state();
+        let initial_mode = Mode { size: (800, 600).into(), refresh: 60000/1000 };
+        let updated_mode = Mode { size: (1024, 768).into(), refresh: 60000/1000 };
+        let dummy_output = create_dummy_output("test-output-mode", initial_mode);
+
+        state.new_output(dummy_output.clone());
+
+        // Manually update the output's current mode, as if Smithay did it via a backend
+        assert!(dummy_output.set_current_mode(updated_mode), "Failed to set current mode on output for test");
+
+        // Call the handler
+        state.output_mode_updated(&dummy_output, updated_mode);
+
+        if let Some(geom) = state.space.output_geometry(&dummy_output) {
+            assert_eq!(geom.size, updated_mode.size, "Space geometry should reflect the updated mode size");
+        } else {
+            panic!("Output not found in space after mode update");
+        }
+    }
+
+    #[test]
+    fn test_output_destroyed_removes_from_state_and_space() {
+        let mut state = create_test_desktop_state();
+        let output_mode = get_default_mode();
+        let dummy_output_to_destroy = create_dummy_output("test-output-destroy", output_mode);
+        let dummy_output_to_keep = create_dummy_output("test-output-keep", output_mode);
+
+        state.new_output(dummy_output_to_destroy.clone());
+        state.new_output(dummy_output_to_keep.clone());
+
+        assert_eq!(state.outputs.len(), 2, "Two outputs should be present initially");
+        assert_eq!(state.space.outputs().count(), 2, "Space should have two outputs initially");
+
+        state.output_destroyed(&dummy_output_to_destroy);
+
+        assert_eq!(state.outputs.len(), 1, "Destroyed output should be removed from state list");
+        assert_eq!(state.outputs[0].name(), "test-output-keep", "Kept output should remain in state list");
+
+        assert_eq!(state.space.outputs().count(), 1, "Destroyed output should be unmapped from space");
+        assert_eq!(state.space.outputs().next().unwrap().name(), "test-output-keep", "Kept output should remain in space");
+    }
+}

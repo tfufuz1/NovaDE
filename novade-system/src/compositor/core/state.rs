@@ -45,6 +45,7 @@ use crate::input::input_dispatcher::InputDispatcher;
 use crate::input::keyboard_layout::KeyboardLayoutManager;
 use crate::renderer::wgpu_renderer::NovaWgpuRenderer;
 use crate::compositor::renderer_interface::abstraction::FrameRenderer; // Added FrameRenderer import
+use crate::display_management::WaylandDisplayManager;
 
 mod input_handlers; // Added module declaration
 mod output_handlers; // Added module declaration for output handlers
@@ -130,16 +131,21 @@ pub struct DesktopState {
     // pub wgpu_renderer: Option<Arc<Mutex<NovaWgpuRenderer>>>, // Removed specific WGPU field
     // Adding concrete WGPU renderer for commit path as a temporary solution
     pub wgpu_renderer_concrete: Option<Arc<Mutex<NovaWgpuRenderer>>>,
+    pub display_manager: Arc<WaylandDisplayManager>,
 }
+
+use crate::error::SystemResult; // For WaylandDisplayManager::new()
 
 impl DesktopState {
     // #[allow(clippy::too_many_arguments)] // No longer needed
     pub fn new(
         loop_handle: LoopHandle<'static, Self>, // Changed from event_loop
         display_handle: DisplayHandle,
-    ) -> Self {
+    ) -> SystemResult<Self> { // Return SystemResult
         // let loop_handle = event_loop.handle(); // loop_handle is now passed directly
         let clock = Clock::new(None).expect("Failed to create clock");
+
+        let display_manager = Arc::new(WaylandDisplayManager::new()?);
 
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, vec![]);
@@ -230,7 +236,8 @@ impl DesktopState {
             active_input_surface: None,
             keyboard_data_map,
             touch_focus_per_slot: HashMap::new(),
-        }
+            display_manager,
+        })
     }
 }
 

@@ -19,6 +19,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt"] }
 input = "0.7.0"
 udev = "0.7.0"
 xkbcommon = "0.7.0"
+drm = "0.11.0"
+gbm = "0.11.0"
+nix = { version = "0.27.1", features = ["fs"] }
 
 [features]
 default = []

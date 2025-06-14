@@ -8,6 +8,7 @@
 pub mod app_identifier;
 pub mod color;
 // pub mod enums; // enums.rs is now empty after Orientation was moved
+pub mod display;
 pub mod geometry;
 pub mod status;
 pub mod orientation; // Declare the orientation module
@@ -15,6 +16,7 @@ pub mod orientation; // Declare the orientation module
 // Re-export public types for easier access
 pub use app_identifier::AppIdentifier;
 pub use color::Color; // ColorParseError is now in crate::error
+pub use display::*;
 pub use crate::error::ColorParseError; // Re-export ColorParseError from crate::error
 pub use orientation::{Orientation, Direction}; // Added Direction
 pub use geometry::{Point, Rect, RectInt, Size};

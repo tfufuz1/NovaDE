@@ -11,6 +11,7 @@ pub mod user_centric_services;
 pub mod window_management_policy;
 pub mod workspaces;
 pub mod notification_service;
+pub mod display_configuration;
 // pub mod entities; // Example, if you have a top-level entities module
 // pub mod error; // Example, for a general DomainError if used
 
@@ -136,6 +137,7 @@ pub struct DomainServices {
     pub ai_interaction_service: Arc<dyn AIInteractionLogicService>,
     pub notification_rules_engine: Arc<dyn NotificationRulesEngine>,
     pub notification_service: Arc<dyn NotificationService>,
+    pub display_configuration_service: Arc<dyn display_configuration::DisplayConfigService>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -152,6 +154,8 @@ pub enum DomainInitializationError {
     NotificationRulesInitError(#[from] NotificationRulesError),
     #[error("Failed to initialize notification service: {0}")]
     NotificationServiceInitError(#[from] NotificationError),
+    #[error("Failed to initialize display configuration service: {0}")]
+    DisplayConfigurationInitError(#[from] display_configuration::DisplayConfigurationError),
     #[error("Core configuration error during domain initialization: {0}")]
     CoreConfigError(#[from] CoreError),
     #[error("User directory not found for default paths: {0}")]
@@ -198,6 +202,9 @@ pub async fn initialize_domain_layer(
     );
     let fs_rules_provider = Arc::new(
         notifications_rules::FilesystemNotificationRulesProvider::new(core_config_service.clone(), domain_config_path.join("notification_rules.json").to_string_lossy().into_owned())
+    );
+    let fs_display_persistence = Arc::new(
+        display_configuration::FileSystemDisplayPersistence::new(domain_config_path.join("display_configuration.json"))
     );
 
     // --- Services Initialization ---
@@ -276,9 +283,15 @@ pub async fn initialize_domain_layer(
     );
     tracing::info!("NotificationService initialized.");
 
+    let display_configuration_service = Arc::new(
+        display_configuration::DefaultDisplayConfigService::new(fs_display_persistence).await?
+    );
+    tracing::info!("DisplayConfigurationService initialized.");
+
     tracing::info!("NovaDE Domain Layer Initialized Successfully.");
     Ok(DomainServices {
         settings_service, theming_engine, workspace_manager, window_management_policy_service,
         ai_interaction_service, notification_rules_engine, notification_service,
+        display_configuration_service,
     })
 }
