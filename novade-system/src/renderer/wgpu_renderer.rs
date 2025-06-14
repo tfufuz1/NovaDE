@@ -289,7 +289,23 @@ impl NovaWgpuRenderer {
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_config.format, // Use the surface's format
-                    blend: Some(wgpu::BlendState::REPLACE), // Simple replace blend
+                    // MVP: Using BlendState::REPLACE for simple opaque compositing.
+                    // TODO Post-MVP: Enable alpha blending for transparency:
+                    // blend: Some(wgpu::BlendState::ALPHA_BLENDING), // or wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING
+                    // which are shorthand for:
+                    // blend: Some(wgpu::BlendState {
+                    //     color: wgpu::BlendComponent {
+                    //         src_factor: wgpu::BlendFactor::SrcAlpha,
+                    //         dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    //         operation: wgpu::BlendOperation::Add,
+                    //     },
+                    //     alpha: wgpu::BlendComponent { // Or use PREMULTIPLIED_ALPHA_BLENDING defaults
+                    //         src_factor: wgpu::BlendFactor::One,
+                    //         dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    //         operation: wgpu::BlendOperation::Add,
+                    //     },
+                    // }),
+                    blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -531,31 +547,48 @@ impl FrameRenderer for NovaWgpuRenderer {
             for element in elements {
                 match element {
                     RenderElement::WaylandSurface { surface_data_arc, geometry, .. } => {
-                        let surface_data = surface_data_arc.lock().unwrap();
-                        if let Some(renderable_texture) = surface_data.texture_handle.as_ref() {
-                            // Assumes texture_handle is Arc<WgpuRenderableTexture>
-                            // due to changes in SurfaceData
-                            let wgpu_tex = renderable_texture; // No downcast needed if type is concrete
+                        let surface_data = surface_data_mutex_arc.lock().unwrap(); // Corrected variable name from abstraction.rs
+                        if let Some(renderable_texture_arc) = surface_data.texture_handle.as_ref() {
+                            // Downcast Arc<dyn RenderableTexture> to &WgpuRenderableTexture
+                            if let Some(wgpu_tex) = renderable_texture_arc.as_any().downcast_ref::<WgpuRenderableTexture>() {
+                                // Create a new bind group for this texture
+                                let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                    layout: &self.texture_bind_group_layout,
+                                    entries: &[
+                                        wgpu::BindGroupEntry {
+                                            binding: 0,
+                                            resource: wgpu::BindingResource::TextureView(wgpu_tex.view()),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 1,
+                                            resource: wgpu::BindingResource::Sampler(wgpu_tex.sampler()),
+                                        },
+                                    ],
+                                    label: Some("Wayland Surface Texture Bind Group"),
+                                });
+                                render_pass.set_bind_group(0, &texture_bind_group, &[]);
+                            } else {
+                                // Fallback or error if downcast fails: render a magenta placeholder using solid_color_pipeline
+                                tracing::warn!("Failed to downcast RenderableTexture to WgpuRenderableTexture for WaylandSurface. Rendering placeholder.");
+                                render_pass.set_pipeline(&self.solid_color_pipeline); // Switch to solid color
+                                let color = [1.0f32, 0.0, 1.0, 1.0]; // Magenta
+                                let color_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: Some("Fallback Color Uniform Buffer"),
+                                    contents: bytemuck::cast_slice(&color),
+                                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                                });
+                                let fallback_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                    layout: &self.solid_color_bind_group_layout,
+                                    entries: &[wgpu::BindGroupEntry { binding: 0, resource: color_buffer.as_entire_binding() }],
+                                    label: Some("Fallback Color Bind Group"),
+                                });
+                                render_pass.set_bind_group(0, &fallback_bind_group, &[]);
+                                // Ensure pipeline is reset for next element if it was changed
+                                // This draw call will use the solid_color_pipeline.
+                                // Need to reset to self.render_pipeline if next element is textured.
+                            }
 
-                            // Create a new bind group for each texture
-                            let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                layout: &self.texture_bind_group_layout,
-                                entries: &[
-                                    wgpu::BindGroupEntry {
-                                        binding: 0,
-                                        resource: wgpu::BindingResource::TextureView(wgpu_tex.view()),
-                                    },
-                                    wgpu::BindGroupEntry {
-                                        binding: 1,
-                                        resource: wgpu::BindingResource::Sampler(wgpu_tex.sampler()),
-                                    },
-                                ],
-                                label: Some("Wayland Surface Texture Bind Group"),
-                            });
-
-                            render_pass.set_bind_group(0, &texture_bind_group, &[]);
-
-                            // Transformation for WaylandSurface
+                            // Transformation for WaylandSurface (common for textured or placeholder)
                             let screen_w = self.screen_size_physical.w as f32;
                             let screen_h = self.screen_size_physical.h as f32;
                             let quad_width = geometry.size.w as f32;
@@ -593,85 +626,71 @@ impl FrameRenderer for NovaWgpuRenderer {
 
                             render_pass.set_bind_group(1, &transform_bind_group_group1, &[]); // Set transform for group 1
                             render_pass.draw_indexed(0..self.quad_num_indices, 0, 0..1);
-                            tracing::trace!("Rendered WaylandSurface (texture id: {:?}), geom: {:?}, NDC tr: ({:.2},{:.2}), scale: ({:.2},{:.2})",
-                                            wgpu_tex.id(), geometry, final_translate_x_ndc, final_translate_y_ndc, scale_x_ndc, scale_y_ndc);
+
+                            // Reset to textured pipeline if it was changed by fallback
+                            render_pass.set_pipeline(&self.render_pipeline);
                         } else {
-                            tracing::trace!("WaylandSurface element has no texture_handle or failed downcast, skipping render.");
+                            tracing::trace!("WaylandSurface element (geom {:?}) has no texture_handle, skipping render.", geometry);
                         }
                     }
                     RenderElement::SolidColor { color, geometry } => {
-                        // For solid color, we don't use the textured pipeline's bind group.
-                        // We need a new bind group for the color uniform.
-                        // The geometry will need to be applied to the vertices or via a transform uniform.
-                        // For simplicity, assuming the Vertex::desc() is okay for a unit quad,
-                        // and we'd need to scale/translate it. This example will just render a full-screen quad
-                        // with the color, not respecting geometry yet.
-                        // TODO: Implement proper geometry transformation for solid color quads.
-
+                        render_pass.set_pipeline(&self.solid_color_pipeline);
                         let color_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                             label: Some("Solid Color Uniform Buffer"),
-                            contents: bytemuck::cast_slice(&color), // color is [f32; 4]
+                            contents: bytemuck::cast_slice(&color),
                             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         });
-
                         let solid_color_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                             layout: &self.solid_color_bind_group_layout,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: color_buffer.as_entire_binding(),
-                                },
-                            ],
+                            entries: &[wgpu::BindGroupEntry { binding: 0, resource: color_buffer.as_entire_binding() }],
                             label: Some("Solid Color Bind Group"),
                         });
-
-                        render_pass.set_pipeline(&self.solid_color_pipeline);
                         render_pass.set_bind_group(0, &solid_color_bind_group, &[]);
-                        // Assuming quad_vertex_buffer and quad_index_buffer define a unit quad
-                        // that fills the screen or is transformed by vertex shader if geometry is complex.
-                        // For now, draws a full quad with that color.
+
+                        // Transformation for SolidColor
+                        let screen_w = self.screen_size_physical.w as f32;
+                        let screen_h = self.screen_size_physical.h as f32;
+                        let quad_width = geometry.size.w as f32;
+                        let quad_height = geometry.size.h as f32;
+                        let scale_x_ndc = quad_width / screen_w;
+                        let scale_y_ndc = quad_height / screen_h;
+                        let top_left_x_logical = geometry.loc.x as f32;
+                        let top_left_y_logical = geometry.loc.y as f32;
+                        let pos_x_ndc = (top_left_x_logical / screen_w) * 2.0 - 1.0;
+                        let pos_y_ndc = (top_left_y_logical / screen_h) * -2.0 + 1.0;
+                        let final_translate_x_ndc = pos_x_ndc + scale_x_ndc;
+                        let final_translate_y_ndc = pos_y_ndc - scale_y_ndc;
+                        let transform_matrix_col_major = [
+                            scale_x_ndc, 0.0, 0.0, 0.0, scale_y_ndc, 0.0, final_translate_x_ndc, final_translate_y_ndc, 1.0,
+                        ];
+                        let transform_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("SolidColor Transform Uniform Buffer"),
+                            contents: bytemuck::cast_slice(&transform_matrix_col_major),
+                            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                        });
+                        let transform_bind_group_solid = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            layout: &self.transform_bind_group_layout,
+                            entries: &[wgpu::BindGroupEntry { binding: 0, resource: transform_buffer.as_entire_binding() }],
+                            label: Some("SolidColor Transform Bind Group (Group 1)"),
+                        });
+                        render_pass.set_bind_group(1, &transform_bind_group_solid, &[]);
                         render_pass.draw_indexed(0..self.quad_num_indices, 0, 0..1);
-                        tracing::trace!("Rendered SolidColor element with color {:?}, (geometry {}x{} at {},{} not yet fully applied).",
-                                        color, geometry.size.w, geometry.size.h, geometry.loc.x, geometry.loc.y);
+                        // Reset to textured pipeline for next element
+                        render_pass.set_pipeline(&self.render_pipeline);
                     }
-                    RenderElement::Cursor { texture_arc, position_logical, hotspot, .. } => {
-                        // Attempt to downcast the texture
-                        // Assuming WgpuRenderableTexture is the concrete type stored in the Box.
-                        // This requires WgpuRenderableTexture to be public or accessible.
-                        // And RenderableTexture trait needs to support Any + Display + Debug + Send + Sync for downcasting.
-                        // Let's assume a method like `as_wgpu_texture()` exists on the trait or can be added,
-                        // or we use a direct downcast if RenderableTexture is `dyn Any`.
-                        // For now, let's simulate getting the WgpuRenderableTexture.
-                        // This is a simplification. A real downcast or type-specific handling is needed.
+                    RenderElement::Cursor { texture_arc, position_logical, hotspot_logical, .. } => {
+                        // hotspot_logical is relative to the cursor image's top-left.
+                        // position_logical is the desired top-left position of the cursor on screen.
+                        // The actual rendering position of the quad needs to be adjusted by the hotspot.
+                        let render_pos_x = position_logical.x - hotspot_logical.x;
+                        let render_pos_y = position_logical.y - hotspot_logical.y;
 
-                        // Placeholder for actual downcast.
-                        // This is a critical point that needs a robust solution for trait object downcasting.
-                        // For this subtask, we'll proceed as if we can get WgpuRenderableTexture.
-                        // One way: if texture_arc was Arc<WgpuRenderableTexture> initially, this would be easier.
-                        // Since it's Box<dyn RenderableTexture>, a downcast is necessary.
-                        // We'll assume `texture_arc.as_any().downcast_ref::<WgpuRenderableTexture>()` could work
-                        // if RenderableTexture was `pub trait RenderableTexture: std::any::Any ...`
-
-                        // Simplified: Assume we have a WgpuRenderableTexture.
-                        // This part will need adjustment based on how RenderableTexture trait object is structured.
-                        // For the purpose of this diff, let's assume `texture_arc` can be used as if it's `WgpuRenderableTexture`.
-                        // This is NOT correct Rust but helps illustrate the WGPU calls.
-                        // A real implementation would need `texture_arc.as_any().downcast_ref::<WgpuRenderableTexture>()`
-                        // and the trait to support `Any`.
-
-                        // Let's refine this to be more realistic with a downcast.
-                        // The RenderableTexture trait in compositor/state.rs would need to be `pub trait RenderableTexture: std::fmt::Debug + Send + Sync + std::any::Any { ... }`
-                        // And WgpuRenderableTexture would need to implement it.
-
-                        // For now, let's assume the downcast works conceptually.
-                        // The actual texture access will be commented out if it prevents compilation without trait changes.
-                        let cursor_texture_ref: &dyn RenderableTexture = &**texture_arc; // Deref Box to &dyn Trait
                         let (tex_view, tex_sampler, tex_width_u32, tex_height_u32) =
-                            if let Some(wgpu_tex) = cursor_texture_ref.as_any().downcast_ref::<WgpuRenderableTexture>() {
-                                (wgpu_tex.view(), wgpu_tex.sampler(), wgpu_tex.width(), wgpu_tex.height())
+                            if let Some(wgpu_tex) = texture_arc.as_any().downcast_ref::<WgpuRenderableTexture>() {
+                                (wgpu_tex.view(), wgpu_tex.sampler(), wgpu_tex.width_px(), wgpu_tex.height_px())
                             } else {
                                 tracing::warn!("Failed to downcast RenderableTexture to WgpuRenderableTexture for cursor. Using dummy texture.");
-                                (self.dummy_white_texture.view(), self.dummy_white_texture.sampler(), self.dummy_white_texture.width(), self.dummy_white_texture.height())
+                                (self.dummy_white_texture.view(), self.dummy_white_texture.sampler(), self.dummy_white_texture.width_px(), self.dummy_white_texture.height_px())
                             };
 
                         let tex_width = tex_width_u32 as f32;
@@ -686,7 +705,10 @@ impl FrameRenderer for NovaWgpuRenderer {
                             label: Some("Cursor Texture Bind Group"),
                         });
 
-                        // Transformation for cursor
+                        render_pass.set_pipeline(&self.render_pipeline); // Ensure textured pipeline
+                        render_pass.set_bind_group(0, &cursor_tex_bind_group, &[]);
+
+                        // Transformation for cursor quad
                         let screen_w = self.screen_size_physical.w as f32;
                         let screen_h = self.screen_size_physical.h as f32;
 

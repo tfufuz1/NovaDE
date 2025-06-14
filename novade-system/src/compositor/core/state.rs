@@ -79,7 +79,29 @@ pub enum ActiveRendererType {
     Wgpu,
 }
 
-// Main compositor state
+/// # DesktopState - The Central Compositor State
+///
+/// `DesktopState` is the primary struct holding all state information for the Novade compositor.
+/// It consolidates various Smithay helper states (e.g., `CompositorState`, `ShmState`, `SeatState`,
+/// `OutputManagerState`, `XdgShellState`, etc.) and manages system-wide resources like
+/// the display handle, event loop handle, rendering components, and registered Wayland globals.
+///
+/// This struct implements numerous `*Handler` traits from Smithay (e.g., `CompositorHandler`,
+/// `ShmHandler`, `SeatHandler`) and uses Smithay's delegation macros (`delegate_*`) to
+/// correctly dispatch Wayland protocol requests to the appropriate handlers and state components.
+///
+/// Its responsibilities include:
+/// - Initializing and storing core Wayland protocol states.
+/// - Managing client data and surface-specific data (`ClientCompositorData`, `SurfaceData`).
+/// - Handling input events via `InputDispatcher` and `SeatState`.
+/// - Orchestrating rendering through the `active_renderer` (a `FrameRenderer` trait object).
+/// - Managing Wayland globals and their lifetimes.
+/// - Storing application-specific state like window lists (`ManagedWindow`), output configurations,
+///   and connections to domain services.
+// TODO MVP: Review if all necessary MVP core protocol states (wl_display, wl_registry, wl_compositor,
+// TODO MVP: wl_surface, wl_shm, wl_buffer, wl_callback) are fully initialized and handled.
+// TODO MVP: Current assessment is that they are, via Smithay's state types and the
+// TODO MVP: GlobalDispatch implementations in `globals.rs`.
 pub struct DesktopState {
     pub display_handle: DisplayHandle,
     pub loop_handle: LoopHandle<'static, Self>,
@@ -104,13 +126,14 @@ pub struct DesktopState {
     pub screencopy_state: ScreencopyState, // Added screencopy_state
 
     // Vulkan Renderer Components - REMOVED
-    // pub vulkan_instance: Option<Arc<VulkanInstance>>,
+    // pub vulkan_instance: Option<Arc<VulkanInstance>>, // TODO Post-MVP: Re-evaluate Vulkan direct integration if needed.
     // pub vulkan_physical_device_info: Option<Arc<PhysicalDeviceInfo>>,
     // pub vulkan_logical_device: Option<Arc<LogicalDevice>>,
     // pub vulkan_allocator: Option<Arc<Allocator>>,
     // pub vulkan_frame_renderer: Option<Arc<Mutex<VulkanFrameRenderer>>>,
     
     /// Specifies which renderer is currently active.
+    /// TODO: This should ideally be dynamically determined or configured rather than defaulting to GLES.
     pub active_renderer_type: ActiveRendererType,
     pub active_renderer: Option<Arc<Mutex<dyn FrameRenderer>>>, // Unified active renderer
 
@@ -128,9 +151,9 @@ pub struct DesktopState {
     pub touch_focus_per_slot: HashMap<TouchSlotId, Weak<WlSurface>>,
 
     // --- WGPU Renderer ---
-    // pub wgpu_renderer: Option<Arc<Mutex<NovaWgpuRenderer>>>, // Removed specific WGPU field
+    // pub wgpu_renderer: Option<Arc<Mutex<NovaWgpuRenderer>>>, // TODO: Consolidate wgpu_renderer_concrete into active_renderer.
     // Adding concrete WGPU renderer for commit path as a temporary solution
-    pub wgpu_renderer_concrete: Option<Arc<Mutex<NovaWgpuRenderer>>>,
+    pub wgpu_renderer_concrete: Option<Arc<Mutex<NovaWgpuRenderer>>>, // TODO: Remove this if active_renderer fully suffices.
     pub display_manager: Arc<WaylandDisplayManager>,
 
     // --- Cursor Rendering State ---
@@ -141,8 +164,21 @@ pub struct DesktopState {
     // --- Layer Shell State (Placeholder for Smithay 0.3.0) ---
     // Smithay 0.3.0 does not have built-in LayerShellState. This is a placeholder.
     // A full implementation would require manual protocol handling or a newer Smithay.
+    // TODO Post-MVP: Implement layer shell support if required.
     pub layer_shell_data: MyCustomLayerShellData,
 }
+// TODO MVP: Ensure all core protocol handlers (wl_display, wl_registry, wl_compositor,
+// TODO MVP: wl_surface, wl_shm, wl_buffer, wl_callback) are adequately stubbed or implemented.
+// TODO MVP: Review `globals.rs` for `GlobalDispatch` implementations and ensure they cover client binding
+// TODO MVP: for all MVP-required globals.
+// TODO MVP: Current assessment:
+// TODO MVP: - wl_display: Implicitly handled by Smithay's Display.
+// TODO MVP: - wl_registry: Client binding handled by GlobalDispatch in `globals.rs` for registered globals.
+// TODO MVP: - wl_compositor, wl_subcompositor: Handled by `CompositorHandler` and `GlobalDispatch` in `globals.rs`.
+// TODO MVP: - wl_surface: Handled by `CompositorHandler`.
+// TODO MVP: - wl_shm: Handled by `ShmHandler`, `BufferHandler` (for destruction), and `GlobalDispatch` in `globals.rs`.
+// TODO MVP: - wl_buffer: Attachment handled in `CompositorHandler::commit`, destruction in `BufferHandler`.
+// TODO MVP: - wl_callback: Handled in `CompositorHandler::commit` via `surface_data.frame_callbacks`.
 
 /// Placeholder for custom layer shell data management.
 /// In a real scenario with manual protocol implementation, this would store
