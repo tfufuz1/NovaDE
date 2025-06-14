@@ -1,9 +1,13 @@
 // novade-system/src/renderer/wgpu_texture.rs
 
-use crate::compositor::renderer_interface::abstraction::{RenderableTexture, RendererError};
+// Use the RenderableTexture trait from compositor::state
+use crate::compositor::state::RenderableTexture;
+// Keep RendererError if it's defined in renderer_interface::abstraction and used by other parts of WgpuRenderer
+use crate::compositor::renderer_interface::abstraction::RendererError;
 use smithay::backend::renderer::utils::Fourcc; // For pixel format
 use uuid::Uuid;
-use std::sync::Arc; // If WGPU resources need to be shared
+use std::sync::Arc;
+use std::any::Any; // For as_any()
 
 #[derive(Debug)]
 pub struct WgpuRenderableTexture {
@@ -63,27 +67,16 @@ impl RenderableTexture for WgpuRenderableTexture {
         self.id
     }
 
-    fn bind(&self, _slot: u32) -> Result<(), RendererError> {
-        // For WGPU, binding is typically handled by creating BindGroups
-        // with the texture view and sampler. This method might not be directly
-        // used in the same way as it is in OpenGL.
-        // The renderer will use the view() and sampler() methods to set up BindGroups.
-        tracing::trace!("WgpuRenderableTexture::bind called (slot {}), but actual binding is via BindGroups.", _slot);
-        Ok(())
-    }
-
-    fn width_px(&self) -> u32 {
+    fn width(&self) -> u32 {
         self.width
     }
 
-    fn height_px(&self) -> u32 {
+    fn height(&self) -> u32 {
         self.height
     }
 
-    fn format(&self) -> Option<Fourcc> {
-        self.fourcc_format
-        // Or convert self.format (wgpu::TextureFormat) back to Fourcc if needed,
-        // but storing the original Fourcc is more direct if available.
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

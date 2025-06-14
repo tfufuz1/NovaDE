@@ -34,6 +34,188 @@ impl OutputHandler for DesktopState {
     }
 }
 
+// --- Layer Shell Handler (Placeholder for Smithay 0.3.0) ---
+// Smithay 0.3.0 does not provide a LayerShellHandler trait or LayerSurface type directly.
+// This is a custom trait and implementation to represent the intended logic.
+// A full implementation would require manual protocol message handling based on
+// code generated from the wlr-layer-shell-unstable-v1.xml protocol file.
+
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::desktop::Window; // Used to map layer surfaces into the space
+
+// Define placeholder types that would normally come from Smithay or generated code
+// if the protocol was directly supported or code generation was run.
+
+/// Placeholder for the kind of layer (top, bottom, overlay, background).
+#[derive(Debug, Clone, Copy)]
+pub enum MyLayer {
+    Background,
+    Bottom,
+    Top,
+    Overlay,
+}
+
+/// Placeholder for keyboard interactivity options for a layer surface.
+#[deriveDebug, Clone, Copy, PartialEq, Eq)]
+pub enum MyKeyboardInteractivity {
+    None,
+    Exclusive, // Capture all keyboard input
+    OnDemand,  // Take focus when requested (e.g. text input)
+}
+
+
+/// Placeholder for LayerSurface. In a real scenario with generated code,
+/// this would be a struct representing the `zwlr_layer_surface_v1` object.
+#[derive(Debug)]
+pub struct MyLayerSurface {
+    // This would typically hold the wl_resource object for the layer surface,
+    // and potentially associated data like desired anchor, margins, size, etc.
+    // For this placeholder, it's empty or has minimal identifying info.
+    pub wl_surface: WlSurface, // The underlying wl_surface
+    // pub resource_id: String, // Example: surface.resource().id().to_string()
+}
+
+impl MyLayerSurface {
+    // Helper to get the underlying WlSurface, similar to Smithay's LayerSurface::wl_surface()
+    pub fn wl_surface(&self) -> &WlSurface {
+        &self.wl_surface
+    }
+    // Placeholder for resource_id if needed for logging
+    pub fn resource_id_placeholder(&self) -> String {
+        format!("placeholder_layer_surface_for_wl_surface_{:?}", self.wl_surface.id())
+    }
+}
+
+
+/// Placeholder for configuration data sent by the client for a layer surface.
+#[derive(Debug)]
+pub struct MyLayerSurfaceConfigure {
+    pub size: Option<(u32, u32)>,
+    pub anchor: Option<u32>, // Using u32 as a placeholder for anchor flags
+    pub exclusive_zone: Option<i32>,
+    pub margin_top: Option<i32>,
+    pub margin_bottom: Option<i32>,
+    pub margin_left: Option<i32>,
+    pub margin_right: Option<i32>,
+    pub keyboard_interactivity: Option<MyKeyboardInteractivity>,
+}
+
+
+pub trait MyLayerShellHandler {
+    // fn layer_shell_state(&mut self) -> &mut MyCustomLayerShellData; // If state was more complex
+
+    fn new_layer_surface(
+        &mut self,
+        surface: MyLayerSurface, // Placeholder for actual LayerSurface type
+        // wl_surface: &WlSurface, // Already in MyLayerSurface
+        layer: MyLayer,        // Placeholder for actual Layer enum
+        namespace: String,
+    );
+
+    fn layer_surface_destroyed(
+        &mut self,
+        surface: MyLayerSurface, // Placeholder
+    );
+
+    fn layer_surface_configure(
+        &mut self,
+        surface: MyLayerSurface, // Placeholder
+        configure: MyLayerSurfaceConfigure, // Placeholder
+        // serial: u32, // Configure events usually have a serial for ack_configure
+    );
+}
+
+impl MyLayerShellHandler for DesktopState {
+    // fn layer_shell_state(&mut self) -> &mut MyCustomLayerShellData {
+    //     &mut self.layer_shell_data
+    // }
+
+    fn new_layer_surface(
+        &mut self,
+        surface: MyLayerSurface,
+        layer: MyLayer,
+        namespace: String,
+    ) {
+        tracing::info!(
+            "MyLayerShellHandler: New layer surface created: placeholder_id {:?}, actual wl_surface_id {:?}, layer: {:?}, namespace: {}",
+            surface.resource_id_placeholder(),
+            surface.wl_surface().id(),
+            layer,
+            namespace
+        );
+
+        // TODO: Create a Window element or a specific LayerWindow element.
+        // For now, using smithay::desktop::Window for simplicity.
+        // The MyLayerSurface itself might be a good candidate for the 'toplevel handle'
+        // if it were a proper Smithay Resource wrapper.
+        // Since it's a placeholder, we directly use its wl_surface.
+        // A more robust solution would involve the MyLayerSurface being clonable or providing Rc access.
+        let window = Window::new_wayland_window(surface.wl_surface().clone(), None::<MyLayerSurface>); // Pass None as toplevel_handle for now
+                                                                                                     // A proper LayerSurface would be a ToplevelSurface.
+
+        // TODO: Store layer-specific data, e.g., in wl_surface.data_map() or in MyCustomLayerShellData.
+        // Example: surface.wl_surface().data_map().insert_if_missing(|| RefCell::new(ActualLayerSurfaceData { ... }));
+
+        // Add to space. Stacking order and precise layout (anchors, margins) are complex
+        // and would be managed by dedicated layout logic for layer shell, not just mapping to (0,0).
+        self.space.map_element(window.clone(), (0, 0), true); // Initial position (0,0), activate.
+        tracing::info!("Mapped layer surface {:?} to space at (0,0). Actual layout pending.", surface.wl_surface().id());
+
+        // TODO: Apply initial configuration or wait for a configure event.
+        // The client is expected to send a configure request after creating the surface.
+        // The initial state (anchor, margins, etc.) should be applied upon commit or configure.
+
+        self.space.damage_all_outputs(); // Trigger a redraw
+    }
+
+    fn layer_surface_destroyed(&mut self, surface: MyLayerSurface) {
+        tracing::info!("MyLayerShellHandler: Layer surface destroyed: placeholder_id {:?}, wl_surface_id {:?}",
+            surface.resource_id_placeholder(),
+            surface.wl_surface().id()
+        );
+
+        // Find and unmap the window associated with this layer surface's wl_surface.
+        // This relies on Window::wl_surface() or a similar way to identify the window.
+        if let Some(window) = self.space.elements().find(|w| w.wl_surface().as_ref() == Some(surface.wl_surface())).cloned() {
+            self.space.unmap_elem(&window);
+            tracing::info!("Unmapped layer surface {:?} from space.", surface.wl_surface().id());
+        } else {
+            tracing::warn!("Could not find window for destroyed layer surface {:?} in space for unmapping.", surface.wl_surface().id());
+        }
+
+        self.space.damage_all_outputs(); // Trigger a redraw
+    }
+
+    fn layer_surface_configure(
+        &mut self,
+        surface: MyLayerSurface,
+        configure: MyLayerSurfaceConfigure,
+        // serial: u32, // Configure events usually have a serial for ack_configure
+    ) {
+        tracing::info!(
+            "MyLayerShellHandler: Layer surface configure request: placeholder_id {:?}, wl_surface_id {:?}, config: {:?}",
+            surface.resource_id_placeholder(),
+            surface.wl_surface().id(),
+            configure
+        );
+
+        // TODO: Apply the configuration (size, anchor, margins) to the surface/window.
+        // This involves:
+        // 1. Storing the new desired state (e.g., in data associated with the wl_surface or MyLayerSurface).
+        // 2. Recalculating the window's geometry based on the new state, screen size, and other layers.
+        // 3. Updating the window's position and size in `self.space`.
+        // 4. Sending `ack_configure` back to the client with the actual serial.
+        // surface.send_configure(serial); // This would be on the actual LayerSurface resource object.
+
+        tracing::warn!("Layer surface configuration logic is a TODO. Configure data: {:?}", configure);
+
+        // For now, just acknowledge conceptually. A real implementation needs to send ack_configure.
+        // If the actual LayerSurface object (from generated code) was available, it would have a method like:
+        // surface.resource().send_event(zwlr_layer_surface_v1::Event::Configure { serial, width, height });
+        // Or Smithay's LayerSurface would have an ack_configure(serial) method.
+    }
+}
+
 // --- SeatHandler Implementation ---
 use smithay::input::{SeatHandler, SeatState, Seat, pointer::CursorImageStatus};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
