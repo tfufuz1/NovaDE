@@ -5,6 +5,7 @@
 //! the configuration file.
 
 use crate::config::{LoggingConfig, FeatureFlags}; // Use types from config::mod
+use crate::types::system_health::SystemHealthDashboardConfig;
 use std::path::PathBuf;
 
 /// Returns the default `LoggingConfig`.
@@ -54,6 +55,13 @@ pub(super) fn default_bool_false() -> bool {
     false
 }
 
+/// Returns the default `SystemHealthDashboardConfig`.
+///
+/// Used by `CoreConfig` if the `system_health` section is missing.
+pub(super) fn default_system_health_config() -> SystemHealthDashboardConfig {
+    SystemHealthDashboardConfig::default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,10 +95,21 @@ mod tests {
         // This relies on FeatureFlags::default() being correct.
         // If FeatureFlags::default() is derived, its fields will use their own defaults.
         assert_eq!(ff, FeatureFlags { experimental_feature_x: false });
+        // Note: If CoreConfig::default() is used, it will also include SystemHealthDashboardConfig::default()
+        // due to the #[serde(default)] attributes.
     }
 
     #[test]
     fn test_default_bool_false() {
         assert_eq!(default_bool_false(), false);
+    }
+
+    #[test]
+    fn test_default_system_health_config_values() {
+        let shc = default_system_health_config();
+        // Check against SystemHealthDashboardConfig::default()
+        assert_eq!(shc, SystemHealthDashboardConfig::default());
+        // Example check for a specific default value within SystemHealthDashboardConfig
+        assert_eq!(shc.metric_refresh_interval_ms, 1000);
     }
 }

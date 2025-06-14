@@ -52,6 +52,7 @@ use once_cell::sync::OnceCell;
 use serde::Deserialize;
 // std::fs and std::path::PathBuf are no longer directly used here for ConfigLoader logic
 use std::path::PathBuf; // Still used by LoggingConfig
+use crate::types::system_health::SystemHealthDashboardConfig;
 
 pub mod defaults;
 pub mod loader; // Import the loader module
@@ -73,6 +74,10 @@ pub struct CoreConfig {
     /// Feature flags for enabling/disabling experimental or optional features.
     #[serde(default = "defaults::default_feature_flags")]
     pub feature_flags: FeatureFlags,
+
+    /// System Health Dashboard configuration.
+    #[serde(default = "defaults::default_system_health_config")]
+    pub system_health: SystemHealthDashboardConfig,
 }
 
 /// Configuration for the logging subsystem.

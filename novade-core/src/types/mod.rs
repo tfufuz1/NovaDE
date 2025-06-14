@@ -12,6 +12,7 @@ pub mod display;
 pub mod geometry;
 pub mod status;
 pub mod orientation; // Declare the orientation module
+pub mod system_health;
 
 // Re-export public types for easier access
 pub use app_identifier::AppIdentifier;
@@ -21,6 +22,7 @@ pub use crate::error::ColorParseError; // Re-export ColorParseError from crate::
 pub use orientation::{Orientation, Direction}; // Added Direction
 pub use geometry::{Point, Rect, RectInt, Size};
 pub use status::Status;
+pub use system_health::*;
 
 // Note on RectInt:
 // The re-export `pub use geometry::{Point, Size, Rect, RectInt};` assumes `RectInt` is a public type in `geometry.rs`.
