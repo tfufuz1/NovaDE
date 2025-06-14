@@ -46,6 +46,16 @@ pub enum DomainError {
     /// Other error.
     #[error("Domain error: {0}")]
     Other(String),
+
+    // Errors for AI Interaction Service
+    #[error("Feature not implemented: {0}")]
+    NotImplemented(String),
+    #[error("NLP processing failed: {0}")]
+    NlpError(String),
+    #[error("Skill execution failed: {0}")]
+    SkillError(String),
+    #[error("Configuration error related to AI/Assistant: {0}")]
+    AssistantConfigError(String),
 }
 
 /// Workspace error type.

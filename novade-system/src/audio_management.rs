@@ -98,6 +98,10 @@ impl AudioDevice {
     }
 }
 
+// TODO: Assistant Integration: This module's functionality (e.g., set_device_volume, set_device_mute, get_devices)
+// might be exposed through the SystemSettingsService or a direct D-Bus interface
+// for the Smart Assistant to control audio settings.
+
 /// Audio stream.
 #[derive(Debug, Clone)]
 pub struct AudioStream {

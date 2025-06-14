@@ -88,7 +88,33 @@ pub trait WindowManager: Send + Sync {
     ///
     /// `Ok(())` if the window was closed, or an error if it doesn't exist.
     async fn close_window(&self, id: WindowId) -> SystemResult<()>;
+
+    // TODO: Assistant Integration: The Smart Assistant will need to interact with
+    // this service to control windows based on user commands like
+    // "Maximize the current window" or "Switch to Firefox".
+    // The existing `get_windows` can be used to list windows.
+    // `focus_window`, `set_window_state`, `close_window` are good primitives.
+    // We might need to add:
+    //   - fn get_active_window_details(&self) -> SystemResult<Option<AssistantWindowDetails>>;
+    //   - More specific state controls if the existing `WindowState` enum is not sufficient,
+    //     though it seems comprehensive (Normal, Maximized, Minimized, Fullscreen, Tiled).
+    //   - Potentially, methods that find windows by title or app_id if `WindowId` is not known.
+    //     (e.g., `async fn find_windows_by_title(&self, title_query: &str) -> SystemResult<Vec<AssistantWindowDetails>>;`)
 }
+
+// #[derive(Debug, Clone)]
+// pub struct AssistantWindowDetails {
+//     pub id: WindowId, // Use existing novade_domain::workspaces::core::WindowId
+//     pub title: String,
+//     pub app_id: Option<String>, // Application ID (e.g., from .desktop file)
+//     // pub workspace_id: Option<String>, // If accessible
+//     // pub position: Point,
+//     // pub size: Size,
+// }
+
+// The existing novade_domain::workspaces::core::WindowState seems suitable.
+// pub enum AssistantWindowState { Minimized, Maximized, Fullscreen, Normal, Closed }
+
 
 /// X11 window manager implementation.
 pub struct X11WindowManager {

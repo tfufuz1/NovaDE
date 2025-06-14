@@ -241,6 +241,16 @@ pub trait PowerManager: Send + Sync {
     ///
     /// The current brightness level (0.0-1.0).
     async fn get_screen_brightness(&self) -> SystemResult<f64>;
+
+    // TODO: Assistant Integration: The Smart Assistant might need to trigger actions like
+    // "shutdown", "reboot", "suspend". The existing `perform_action` method with the
+    // `PowerAction` enum (Shutdown, Reboot, Suspend, Hibernate) seems to cover these commands.
+    // Ensure this service is accessible, e.g., via D-Bus or an internal API from a
+    // privileged domain service that the assistant can call.
+    //
+    // Additional queries the assistant might make (some might be better via SystemSettingsService):
+    // - "What is the current power profile?"
+    // - "Is the screen set to turn off automatically?" (related to idle timeout, often a global setting)
 }
 
 /// System power manager implementation.
