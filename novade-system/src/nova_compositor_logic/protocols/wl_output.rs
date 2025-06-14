@@ -41,49 +41,16 @@ impl GlobalDispatch<wl_output::WlOutput, GlobalData, CompositorState> for Compos
         _global_data: &GlobalData,   // UserData for this global, specified in make_global_with_data.
         data_init: &mut DataInit<'_, CompositorState>, // Utility to initialize resource data.
     ) {
-        println!("Client bound to wl_output global. Initializing wl_output resource {:?}.", resource.id());
+        tracing::info!("Client bound to wl_output global. Initializing wl_output resource {:?}.", resource.id());
 
         // Initialize the client's wl_output resource with OutputData.
-        let output_resource = data_init.init_resource(resource, OutputData::default());
-
-        // Send static output information.
-        // These values represent a virtual 1080p display.
-        // TODO: Make these configurable or derive from a backend (e.g., DRM).
-
-        // Geometry event: physical properties of the output.
-        output_resource.send_event(wl_output::Event::Geometry {
-            x: 0, // Position on the global compositor space (if applicable)
-            y: 0,
-            physical_width: 345,  // Example physical width in mm (e.g., for a 15.6" 16:9 display)
-            physical_height: 194, // Example physical height in mm
-            subpixel: wl_output::Subpixel::Unknown, // Subpixel layout
-            make: "NovaCorp".to_string(),           // Manufacturer
-            model: "VirtualDisplay-1".to_string(),  // Model name
-            transform: wl_output::Transform::Normal, // Output transform (e.g., rotation)
-        });
-        println!("Sent Geometry for wl_output {:?}", output_resource.id());
-
-        // Mode event: resolution, refresh rate, and flags.
-        // Flags indicate if this mode is current and/or preferred.
-        let flags = wl_output::Mode::Current | wl_output::Mode::Preferred;
-        output_resource.send_event(wl_output::Event::Mode {
-            flags,
-            width: 1920,        // Width in pixels
-            height: 1080,       // Height in pixels
-            refresh: 60000,     // Refresh rate in mHz (e.g., 60Hz)
-        });
-        println!("Sent Mode for wl_output {:?}", output_resource.id());
-
-        // Scale event (requires wl_output version 2+).
-        // Used for HiDPI scaling. A factor of 1 means no scaling.
-        output_resource.send_event(wl_output::Event::Scale { factor: 1 });
-        println!("Sent Scale for wl_output {:?}", output_resource.id());
+        // Smithay's OutputManagerState, when an output is added to it via `output_manager_state.add_output()`,
+        // will handle sending the geometry, mode, scale, and done events to the client
+        // based on the current state of the smithay::output::Output object.
+        // Therefore, we no longer need to manually send these events here.
+        data_init.init_resource(resource, OutputData::default());
         
-        // Done event (requires wl_output version 2+).
-        // Signals the end of the initial burst of output properties.
-        // For wl_output v3 (which includes scale), 'done' is part of the initial sequence.
-        output_resource.send_event(wl_output::Event::Done);
-        println!("Sent Done for wl_output {:?}", output_resource.id());
+        tracing::info!("wl_output resource {:?} initialized. OutputManagerState will send current state.", resource.id());
     }
 
     /// Checks if the requested version of `wl_output` is supported.
@@ -91,7 +58,11 @@ impl GlobalDispatch<wl_output::WlOutput, GlobalData, CompositorState> for Compos
         // We send events up to version 3 (scale, done).
         // Client must support at least this version if they want all info.
         // Allowing any version for now, client handles what it understands.
-        true 
+        // Smithay's OutputManagerState will typically send events compatible with wl_output v3 (done, scale).
+        // If a client requests a lower version, Smithay might omit newer events or the client might ignore them.
+        // For robust behavior, one might check if the client's version is >= some minimum (e.g., 2 or 3).
+        // However, returning true is generally safe as Smithay handles version negotiation for its managed globals.
+        true
     }
 }
 
