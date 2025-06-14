@@ -97,38 +97,6 @@ pub type ProtocolSpecStore = HashMap<(String, u16), MessageSignature>;
 
 pub fn mock_spec_store() -> ProtocolSpecStore {
     let mut store = HashMap::new();
-    store.insert(("wl_compositor".to_string(), 0), MessageSignature {
-        interface_name: "wl_compositor".to_string(),
-        message_name: "create_surface".to_string(),
-        opcode: 0,
-        since_version: 1,
-        arg_types: vec![WaylandWireType::NewId],
-    });
-    store.insert(("wl_surface".to_string(), 0), MessageSignature {
-        interface_name: "wl_surface".to_string(),
-        message_name: "attach".to_string(),
-        opcode: 0,
-        since_version: 1,
-        arg_types: vec![WaylandWireType::Object, WaylandWireType::Int, WaylandWireType::Int],
-    });
-    store.insert(("wl_surface".to_string(), 1), MessageSignature {
-        interface_name: "wl_surface".to_string(),
-        message_name: "damage".to_string(),
-        opcode: 1,
-        since_version: 1,
-        arg_types: vec![WaylandWireType::Int, WaylandWireType::Int, WaylandWireType::Int, WaylandWireType::Int],
-    });
-    store.insert(("wl_shm_pool".to_string(), 0), MessageSignature {
-        interface_name: "wl_shm_pool".to_string(),
-        message_name: "create_buffer".to_string(),
-        opcode: 0,
-        since_version: 1,
-        arg_types: vec![
-            WaylandWireType::NewId, WaylandWireType::Fd, WaylandWireType::Int, WaylandWireType::Int,
-            WaylandWireType::Int, WaylandWireType::Int, WaylandWireType::Uint,
-        ],
-    });
-
     // wl_display.sync (opcode 0): new_id (callback)
     store.insert(("wl_display".to_string(), 0), MessageSignature {
         interface_name: "wl_display".to_string(), message_name: "sync".to_string(),
@@ -140,37 +108,145 @@ pub fn mock_spec_store() -> ProtocolSpecStore {
         opcode: 1, since_version: 1, arg_types: vec![WaylandWireType::NewId],
     });
 
-    // wl_compositor.create_surface (opcode 0): new_id (surface)
-    store.insert(("wl_compositor".to_string(), 0), MessageSignature {
-        interface_name: "wl_compositor".to_string(),
-        message_name: "create_surface".to_string(),
-        opcode: 0, // REQ_CREATE_SURFACE_OPCODE from wl_compositor.rs
-        since_version: 1, // Assuming version 1 for this core functionality
-        arg_types: vec![WaylandWireType::NewId], // Expects one argument: new_id for the wl_surface
-    });
-
-    // wl_registry.bind (opcode 0): uint (name), new_id (id)
-    store.insert(("wl_registry".to_string(), 0), MessageSignature {
+    // wl_registry.bind (opcode 0): uint (name), string (interface), uint (version), new_id (id)
+    // The spec says bind(name, id<interface>), where id is new_id.
+    // The string interface and uint version are implicit in the new_id type in some protocol descriptions,
+    // but for parsing, they are actual arguments *before* the new_id.
+    // However, the wire format for new_id itself doesn't carry interface string/version.
+    // The dispatcher uses context. For wl_registry.bind, the arguments are:
+    // name (uint32), interface_name (string), version (uint32), id (new_id)
+    // Let's assume our parser will provide these if they were on the wire.
+    // For now, sticking to a simplified view where bind takes (name, new_id object)
+    // and the dispatcher resolves the interface and version for the new_id from context.
+    // Re-evaluating wl_registry.bind: The actual arguments on the wire for bind are:
+    // name (uint), id (new_id). The interface and version for the new_id are *associated* with the
+    // global 'name' being bound, not sent as separate arguments for bind itself.
+    // The client *requests* to bind a global (name) to a new object (id), and it *tells* the server
+    // what interface and version it expects for that new object id.
+    // The XML has: <request name="bind"> <arg name="name" type="uint"/> <arg name="id" type="new_id" interface="wl_foo"/> </request>
+    // This means the `id` itself is typed with an interface.
+    // Our current `ArgumentValue::NewId(NewId)` only stores the u32 ID.
+    // The dispatcher needs to know which interface to assign to this new ID.
+    // This is often handled by the dispatcher knowing that `wl_registry.bind` for a certain `name`
+    // corresponds to a specific interface.
+    // For the signature store, we only list arguments that are simple types on the wire.
+    // The `interface` attribute on `new_id` in XML is crucial for code generation but not an extra wire arg for bind.
+    store.insert(("wl_registry".to_string(), 0), MessageSignature { // REQ_BIND_OPCODE
         interface_name: "wl_registry".to_string(),
         message_name: "bind".to_string(),
-        opcode: 0, // REQ_BIND_OPCODE from wl_registry.rs
+        opcode: 0,
         since_version: 1,
-        arg_types: vec![WaylandWireType::Uint, WaylandWireType::NewId], // name, id<interface>
-                                                                    // Note: The 'interface' (string) and 'version' (uint)
-                                                                    // that are conceptually part of 'new_id<interface>'
-                                                                    // are *not* separate arguments for wl_registry.bind.
-                                                                    // Client libraries handle this. Our parser gives NewId(numeric_id).
-                                                                    // The dispatcher uses context (the global being bound) for interface/version.
+        // arg_types: vec![WaylandWireType::Uint, WaylandWireType::String, WaylandWireType::Uint, WaylandWireType::NewId],
+        // Simplified: name, id. Dispatcher resolves interface for new_id.
+        arg_types: vec![WaylandWireType::Uint, WaylandWireType::NewId],
     });
 
+
+    // wl_compositor.create_surface (opcode 0): new_id (surface)
+    store.insert(("wl_compositor".to_string(), 0), MessageSignature { // REQ_CREATE_SURFACE_OPCODE
+        interface_name: "wl_compositor".to_string(),
+        message_name: "create_surface".to_string(),
+        opcode: 0,
+        since_version: 1,
+        arg_types: vec![WaylandWireType::NewId],
+    });
+    // wl_compositor.create_region (opcode 1): new_id (region)
+    // TODO: Add if/when wl_region is handled.
+
+    // wl_surface.destroy (opcode 0)
+    store.insert(("wl_surface".to_string(), 0), MessageSignature { // REQ_DESTROY_OPCODE
+        interface_name: "wl_surface".to_string(),
+        message_name: "destroy".to_string(),
+        opcode: 0,
+        since_version: 1,
+        arg_types: vec![], // No arguments
+    });
+    // wl_surface.attach (opcode 1): object (buffer), int (x), int (y)
+    store.insert(("wl_surface".to_string(), 1), MessageSignature { // REQ_ATTACH_OPCODE
+        interface_name: "wl_surface".to_string(),
+        message_name: "attach".to_string(),
+        opcode: 1,
+        since_version: 1,
+        arg_types: vec![WaylandWireType::Object, WaylandWireType::Int, WaylandWireType::Int],
+    });
+    // wl_surface.damage (opcode 2): int (x), int (y), int (width), int (height)
+    store.insert(("wl_surface".to_string(), 2), MessageSignature { // REQ_DAMAGE_OPCODE
+        interface_name: "wl_surface".to_string(),
+        message_name: "damage".to_string(),
+        opcode: 2,
+        since_version: 1,
+        arg_types: vec![WaylandWireType::Int, WaylandWireType::Int, WaylandWireType::Int, WaylandWireType::Int],
+    });
+    // wl_surface.frame (opcode 3): new_id (callback)
+    store.insert(("wl_surface".to_string(), 3), MessageSignature { // REQ_FRAME_OPCODE
+        interface_name: "wl_surface".to_string(),
+        message_name: "frame".to_string(),
+        opcode: 3,
+        since_version: 1,
+        arg_types: vec![WaylandWireType::NewId],
+    });
+    // wl_surface.commit (opcode 6)
+    store.insert(("wl_surface".to_string(), 6), MessageSignature { // REQ_COMMIT_OPCODE
+        interface_name: "wl_surface".to_string(),
+        message_name: "commit".to_string(),
+        opcode: 6,
+        since_version: 1,
+        arg_types: vec![], // No arguments
+    });
+
+
     // wl_shm.create_pool (opcode 0): new_id (pool_id), fd (fd), int (size)
-    store.insert(("wl_shm".to_string(), 0), MessageSignature {
+    store.insert(("wl_shm".to_string(), 0), MessageSignature { // REQ_CREATE_POOL_OPCODE
         interface_name: "wl_shm".to_string(),
         message_name: "create_pool".to_string(),
-        opcode: 0, // REQ_CREATE_POOL_OPCODE from wl_shm.rs
+        opcode: 0,
         since_version: 1,
         arg_types: vec![WaylandWireType::NewId, WaylandWireType::Fd, WaylandWireType::Int],
     });
+
+    // wl_shm_pool.create_buffer (opcode 0): new_id, int (offset), int (width), int (height), int (stride), uint (format)
+    // Note: The FD is associated with the pool, not passed per buffer creation.
+    store.insert(("wl_shm_pool".to_string(), 0), MessageSignature {
+        interface_name: "wl_shm_pool".to_string(),
+        message_name: "create_buffer".to_string(),
+        opcode: 0,
+        since_version: 1,
+        arg_types: vec![
+            WaylandWireType::NewId, // id
+            WaylandWireType::Int,   // offset
+            WaylandWireType::Int,   // width
+            WaylandWireType::Int,   // height
+            WaylandWireType::Int,   // stride
+            WaylandWireType::Uint,  // format
+        ],
+    });
+    // wl_shm_pool.destroy (opcode 1)
+    store.insert(("wl_shm_pool".to_string(), 1), MessageSignature { // REQ_DESTROY_OPCODE
+        interface_name: "wl_shm_pool".to_string(),
+        message_name: "destroy".to_string(),
+        opcode: 1,
+        since_version: 1,
+        arg_types: vec![],
+    });
+    // wl_shm_pool.resize (opcode 2): int (size)
+    store.insert(("wl_shm_pool".to_string(), 2), MessageSignature { // REQ_RESIZE_OPCODE
+        interface_name: "wl_shm_pool".to_string(),
+        message_name: "resize".to_string(),
+        opcode: 2,
+        since_version: 1,
+        arg_types: vec![WaylandWireType::Int],
+    });
+
+    // Add more interface and message signatures here as they are implemented.
+    // For example, wl_buffer.destroy:
+    store.insert(("wl_buffer".to_string(), 0), MessageSignature { // REQ_DESTROY_OPCODE
+        interface_name: "wl_buffer".to_string(),
+        message_name: "destroy".to_string(),
+        opcode: 0,
+        since_version: 1,
+        arg_types: vec![],
+    });
+
 
     store
 }

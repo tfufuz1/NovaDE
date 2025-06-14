@@ -43,6 +43,17 @@ pub async fn process_wayland_event(
             REQ_CREATE_POOL_OPCODE as WL_SHM_REQ_CREATE_POOL_OPCODE,
             // send_initial_format_events function will be called elsewhere (e.g. on wl_shm bind)
         },
+        wl_surface::{
+            handle_destroy as handle_surface_destroy,
+            handle_attach as handle_surface_attach,
+            handle_damage as handle_surface_damage,
+            handle_commit as handle_surface_commit,
+            REQ_DESTROY_OPCODE as WL_SURFACE_REQ_DESTROY_OPCODE,
+            REQ_ATTACH_OPCODE as WL_SURFACE_REQ_ATTACH_OPCODE,
+            REQ_DAMAGE_OPCODE as WL_SURFACE_REQ_DAMAGE_OPCODE,
+            REQ_COMMIT_OPCODE as WL_SURFACE_REQ_COMMIT_OPCODE,
+            // REQ_FRAME_OPCODE will be handled later
+        },
     };
 
     match event {
@@ -182,7 +193,28 @@ pub async fn process_wayland_event(
                                             }
                                         }
                                     }
-                                    // TODO: Add cases for other interfaces like wl_surface, wl_shm_pool, etc.
+                                    "wl_surface" => {
+                                        match signature.opcode {
+                                            WL_SURFACE_REQ_DESTROY_OPCODE => {
+                                                handle_surface_destroy(client_id, object_entry.id, object_entry.version, parsed_args, Arc::clone(&client_space)).await?;
+                                            }
+                                            WL_SURFACE_REQ_ATTACH_OPCODE => {
+                                                handle_surface_attach(client_id, object_entry.id, object_entry.version, parsed_args, Arc::clone(&client_space)).await?;
+                                            }
+                                            WL_SURFACE_REQ_DAMAGE_OPCODE => {
+                                                handle_surface_damage(client_id, object_entry.id, object_entry.version, parsed_args, Arc::clone(&client_space)).await?;
+                                            }
+                                            WL_SURFACE_REQ_COMMIT_OPCODE => {
+                                                handle_surface_commit(client_id, object_entry.id, object_entry.version, parsed_args, Arc::clone(&client_space)).await?;
+                                            }
+                                            // TODO: Add wl_surface.frame handler
+                                            _ => {
+                                                error!("Dispatcher: Unhandled opcode {} for wl_surface object {}", signature.opcode, object_entry.id.value());
+                                                return Err(WaylandServerError::Protocol(format!("Unhandled opcode {} for wl_surface", signature.opcode)));
+                                            }
+                                        }
+                                    }
+                                    // TODO: Add cases for other interfaces like wl_shm_pool, etc.
                                     _ => {
                                         warn!("Dispatcher: Received message for unhandled interface '{}' on object {}",
                                             object_entry.interface.as_str(), object_entry.id.value());

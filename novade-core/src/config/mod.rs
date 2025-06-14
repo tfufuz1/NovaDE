@@ -48,13 +48,14 @@
 
 use crate::error::{ConfigError, CoreError};
 use crate::utils; // For utils::paths and utils::fs
-use once_cell::sync::OnceCell;
+use once_cell::sync::Lazy; // Changed from OnceCell
 use serde::Deserialize;
-// std::fs and std::path::PathBuf are no longer directly used here for ConfigLoader logic
+use std::sync::RwLock; // Added for RwLock
 use std::path::PathBuf; // Still used by LoggingConfig
 
 pub mod defaults;
 pub mod loader; // Import the loader module
+pub mod watcher; // Add watcher module
 pub use loader::ConfigLoader; // Re-export ConfigLoader
 
 // --- Configuration Data Structures ---
@@ -73,6 +74,102 @@ pub struct CoreConfig {
     /// Feature flags for enabling/disabling experimental or optional features.
     #[serde(default = "defaults::default_feature_flags")]
     pub feature_flags: FeatureFlags,
+
+    /// Compositor configuration settings.
+    #[serde(default = "defaults::default_compositor_config")]
+    pub compositor: CompositorConfig,
+}
+
+/// Configuration for the NovaDE Compositor.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CompositorConfig {
+    /// Performance-related settings for the compositor.
+    #[serde(default = "defaults::default_performance_config")]
+    pub performance: PerformanceConfig,
+
+    /// Input device and mapping configuration.
+    #[serde(default = "defaults::default_input_config")]
+    pub input: InputConfig,
+
+    /// Visual appearance and theming settings.
+    #[serde(default = "defaults::default_visual_config")]
+    pub visual: VisualConfig,
+}
+
+/// Compositor performance settings.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PerformanceConfig {
+    /// Preferred GPU or "auto" for automatic detection.
+    #[serde(default = "defaults::default_gpu_preference")]
+    pub gpu_preference: String,
+
+    /// Quality preset (e.g., "low", "medium", "high", "custom").
+    #[serde(default = "defaults::default_quality_preset")]
+    pub quality_preset: String,
+
+    /// Optional memory limit for GPU resources (in MB).
+    #[serde(default)]
+    pub memory_limit_mb: Option<u32>,
+
+    /// Power management mode (e.g., "balanced", "performance", "power-saver").
+    #[serde(default = "defaults::default_power_management_mode")]
+    pub power_management_mode: String,
+
+    /// Enable or disable adaptive tuning of performance settings.
+    #[serde(default = "defaults::default_bool_true")] // Assuming true is a sensible default
+    pub adaptive_tuning: bool,
+}
+
+/// Compositor input settings.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct InputConfig {
+    /// Keyboard layout (e.g., "us", "de", "fr").
+    #[serde(default = "defaults::default_keyboard_layout")]
+    pub keyboard_layout: String,
+
+    /// Pointer acceleration profile or factor.
+    #[serde(default = "defaults::default_pointer_acceleration")]
+    pub pointer_acceleration: String, // Could be a float or an enum-like string
+
+    /// Enable or disable common touch gestures.
+    #[serde(default = "defaults::default_bool_true")]
+    pub enable_touch_gestures: bool,
+
+    /// Configuration for multi-device support (e.g., "auto", "manual").
+    #[serde(default = "defaults::default_multi_device_support")]
+    pub multi_device_support: String,
+
+    /// List of input profile names or paths.
+    #[serde(default)]
+    pub input_profiles: Vec<String>,
+}
+
+/// Compositor visual settings.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct VisualConfig {
+    /// Current theme name.
+    #[serde(default = "defaults::default_theme_name")]
+    pub theme_name: String,
+
+    /// Active color scheme (e.g., "light", "dark", "custom").
+    #[serde(default = "defaults::default_color_scheme")]
+    pub color_scheme: String,
+
+    /// Default font name or family.
+    #[serde(default = "defaults::default_font_settings")] // Assuming a struct or string for fonts
+    pub font_settings: String, // Placeholder, might become a struct FontConfig
+
+    /// Enable or disable UI animations.
+    #[serde(default = "defaults::default_bool_true")]
+    pub enable_animations: bool,
+
+    /// List of paths to custom shader files.
+    #[serde(default)]
+    pub custom_shaders: Vec<String>,
 }
 
 /// Configuration for the logging subsystem.
@@ -113,14 +210,18 @@ pub struct FeatureFlags {
 }
 
 // --- Global Config Access ---
-// ConfigLoader struct and its impl block are removed from here.
-// They are now in config/loader.rs and re-exported.
 
-static CORE_CONFIG: OnceCell<CoreConfig> = OnceCell::new();
+/// Global configuration, initialized lazily with a default and protected by an RwLock.
+static CORE_CONFIG: Lazy<RwLock<CoreConfig>> = Lazy::new(|| {
+    // Initialize with a default configuration.
+    // `initialize_core_config` will be used to set the first "real" configuration.
+    RwLock::new(CoreConfig::default())
+});
 
-/// Initializes the global `CoreConfig`.
+/// Initializes or updates the global `CoreConfig`.
 ///
-/// This function should be called once at application startup with the loaded configuration.
+/// This function acquires a write lock on the global configuration and replaces
+/// the existing `CoreConfig` with the new one.
 ///
 /// # Arguments
 ///
@@ -128,90 +229,123 @@ static CORE_CONFIG: OnceCell<CoreConfig> = OnceCell::new();
 ///
 /// # Returns
 ///
-/// * `Ok(())` if the configuration was successfully initialized.
-/// * `Err(CoreConfig)` if the global configuration has already been initialized,
-///   returning the passed config.
-pub fn initialize_core_config(config: CoreConfig) -> Result<(), CoreConfig> {
-    CORE_CONFIG.set(config)
+/// * `Ok(())` if the configuration was successfully set.
+/// * `Err(ConfigError::PoisonedLock)` if the `RwLock` was poisoned.
+pub fn initialize_core_config(config: CoreConfig) -> Result<(), ConfigError> {
+    match CORE_CONFIG.write() {
+        Ok(mut guard) => {
+            *guard = config;
+            Ok(())
+        }
+        Err(poisoned) => {
+            Err(ConfigError::PoisonedLock(poisoned.to_string()))
+        }
+    }
 }
 
-/// Retrieves a reference to the globally initialized `CoreConfig`.
+/// Updates the global `CoreConfig` with a new configuration.
+///
+/// This is intended for use by the configuration watcher or other internal mechanisms
+/// that need to reload and apply a new configuration.
+///
+/// # Arguments
+///
+/// * `new_config`: The new `CoreConfig` instance.
+///
+/// # Returns
+///
+/// * `Ok(())` if the global configuration was successfully updated.
+/// * `Err(ConfigError::PoisonedLock)` if the `RwLock` was poisoned.
+pub(crate) fn update_global_config(new_config: CoreConfig) -> Result<(), ConfigError> {
+    match CORE_CONFIG.write() {
+        Ok(mut guard) => {
+            *guard = new_config;
+            Ok(())
+        }
+        Err(poisoned) => {
+            Err(ConfigError::PoisonedLock(poisoned.to_string()))
+        }
+    }
+}
+
+/// Retrieves a clone of the globally initialized `CoreConfig`.
+///
+/// This function acquires a read lock on the global configuration and returns
+/// a clone of the `CoreConfig`.
 ///
 /// # Panics
 ///
-/// Panics if `initialize_core_config()` has not been called before this function.
-/// It's crucial to ensure the configuration is loaded and initialized at application startup.
-pub fn get_core_config() -> &'static CoreConfig {
-    CORE_CONFIG
-        .get()
-        .expect("CoreConfig wurde nicht initialisiert. initialize_core_config() muss zuerst aufgerufen werden.")
+/// Panics if the `RwLock` holding the configuration is poisoned. This indicates
+/// a previous write attempt failed catastrophically.
+pub fn get_cloned_core_config() -> CoreConfig {
+    match CORE_CONFIG.read() {
+        Ok(guard) => guard.clone(),
+        Err(poisoned) => {
+            // This panic is consistent with the previous `expect` on OnceCell.get()
+            // if the config wasn't initialized. Here, it means the lock is broken.
+            panic!("CORE_CONFIG RwLock is poisoned: {}", poisoned);
+        }
+    }
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    // crate::utils::paths and std::env are used by TestEnv, which will be moved to loader.rs tests.
-    // tempfile::TempDir is used by TestEnv.
-    // std::fs is used by create_temp_config_file, which will be moved/replicated.
-
-    // Tests for ConfigLoader (load, validate_config) will be moved to loader.rs.
-    // Tests for global config access (initialize_core_config, get_core_config) remain here.
+    // Tests for ConfigLoader (load, validate_config) are in loader.rs.
+    // Tests for global config access (initialize_core_config, get_cloned_core_config) are here.
 
     #[test]
-    fn test_global_config_access() {
-        // Reset OnceCell for this test (important if tests run in parallel or share state)
-        // This is tricky. OnceCell is global. Tests should not depend on order.
-        // For this test, we assume it's the first one to set CORE_CONFIG or that it's been reset.
-        // In a real test suite, use a mutex or ensure `initialize` is only called once.
-        // For now, we'll try and see. If it fails due to already set, that's a test interaction issue.
+    fn test_initialize_and_get_cloned_core_config() {
+        let initial_default_config = get_cloned_core_config();
+        assert_eq!(initial_default_config, CoreConfig::default(), "Initial config should be default from Lazy init");
+
+        let mut test_config = CoreConfig::default();
+        test_config.logging.level = "debug_test".to_string();
+        test_config.feature_flags.experimental_feature_x = true;
+
+        initialize_core_config(test_config.clone()).expect("Failed to initialize core config");
         
-        let test_config = CoreConfig {
-            logging: LoggingConfig {
-                level: "test".to_string(),
-                ..Default::default()
-            },
+        let retrieved_config = get_cloned_core_config();
+        assert_eq!(retrieved_config, test_config);
+        assert_eq!(retrieved_config.logging.level, "debug_test");
+        assert_eq!(retrieved_config.feature_flags.experimental_feature_x, true);
+
+        // Test re-initialization (update)
+        let mut updated_config = CoreConfig::default();
+        updated_config.logging.level = "trace_updated".to_string();
+        initialize_core_config(updated_config.clone()).expect("Failed to update core config");
+
+        let retrieved_updated_config = get_cloned_core_config();
+        assert_eq!(retrieved_updated_config, updated_config);
+        assert_eq!(retrieved_updated_config.logging.level, "trace_updated");
+    }
+
+    #[test]
+    fn test_update_global_config() {
+        // Ensure a known initial state (can be default or set by initialize_core_config)
+        let initial_config = CoreConfig {
+            logging: LoggingConfig { level: "initial_for_update".to_string(), ..Default::default()},
             ..Default::default()
         };
-
-        // To ensure this test doesn't fail due to other tests initializing CORE_CONFIG,
-        // we can't easily reset a static OnceCell. This test is inherently a bit fragile
-        // for `initialize_core_config` success case if run with others.
-        // We can test `get_core_config`'s panic if we ensure it's not set. (Hard to ensure)
-        // We can test that if set, we get the value.
-
-        // Attempt to initialize - this might fail if another test already set it.
-        match initialize_core_config(test_config.clone()) {
-            Ok(_) => { // Successfully initialized
-                let retrieved_config = get_core_config();
-                assert_eq!(retrieved_config, &test_config);
-                assert_eq!(retrieved_config.logging.level, "test");
-
-                // Test trying to initialize again fails
-                let another_config = CoreConfig::default();
-                assert!(initialize_core_config(another_config).is_err());
-            }
-            Err(_returned_config) => {
-                // Config was already initialized by another test. We can still test get_core_config.
-                println!("Warning: CORE_CONFIG was already initialized. Testing get_core_config only.");
-                let retrieved_config = get_core_config(); // Should not panic if already set
-                assert!(!retrieved_config.logging.level.is_empty()); // Check it's a valid CoreConfig
-            }
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "CoreConfig wurde nicht initialisiert")]
-    fn test_get_core_config_panics_if_not_initialized() {
-        // This test MUST run in a context where CORE_CONFIG is guaranteed not to be set.
-        // Cargo runs tests in threads, but statics are shared.
-        // If this test runs after another test has set CORE_CONFIG, it will fail to panic.
-        // One way to somewhat isolate this for testing the panic is to use a feature flag
-        // to gate the actual static OnceCell, and use a different one for this test.
-        // Or, run this test in a separate process/test binary.
-        // For now, we acknowledge this limitation. If other tests set it, this test will fail.
+        initialize_core_config(initial_config.clone()).unwrap();
+        assert_eq!(get_cloned_core_config().logging.level, "initial_for_update");
         
-        // Create a new, empty OnceCell for this test only to simulate uninitialized state.
-        let local_once_cell: OnceCell<CoreConfig> = OnceCell::new();
-        local_once_cell.get().expect("CoreConfig wurde nicht initialisiert. initialize_core_config() muss zuerst aufgerufen werden.");
+        let mut new_config_for_update = CoreConfig::default();
+        new_config_for_update.logging.level = "updated_by_watcher_sim".to_string();
+        new_config_for_update.feature_flags.experimental_feature_x = true;
+
+        update_global_config(new_config_for_update.clone()).expect("update_global_config failed");
+
+        let retrieved_config = get_cloned_core_config();
+        assert_eq!(retrieved_config, new_config_for_update);
+        assert_eq!(retrieved_config.logging.level, "updated_by_watcher_sim");
+        assert_eq!(retrieved_config.feature_flags.experimental_feature_x, true);
     }
+
+    // The panic test for uninitialized get_core_config is no longer relevant
+    // because `Lazy<RwLock<CoreConfig>>` ensures CORE_CONFIG is always initialized
+    // with a default value (CoreConfig::default()).
+    // `get_cloned_core_config` will panic if the lock is poisoned, but that's harder
+    // to reliably trigger in a unit test without complex threading scenarios.
 }
