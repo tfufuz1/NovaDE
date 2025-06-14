@@ -22,6 +22,7 @@ pub mod styles;
 pub mod assets;
 pub mod shell;
 pub mod theming_gtk;
+pub mod system_health_dashboard;
 
 // Re-export key types for convenience
 pub use error::UiError;
