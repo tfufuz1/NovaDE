@@ -1,45 +1,83 @@
-use novade_system::system_health_collectors::{SystemMetricCollector, SystemLogHarvester, SystemDiagnosticRunner};
-use novade_domain::system_health_service::service::{SystemHealthService, SystemHealthServiceTrait}; // Corrected path
-use novade_core::types::system_health::SystemHealthDashboardConfig;
-use novade_ui::system_health_dashboard::{SystemHealthViewModel, metrics_panel::MetricsPanel}; // Assuming metrics_panel is pub
+use gtk4 as gtk;
+use gtk::{prelude::*, Application, ApplicationWindow};
+use libadwaita as adw;
+use adw::prelude::*;
+
+use novade_core::config::CoreConfig;
+use novade_domain::system_health_service::{DefaultSystemHealthService, SystemHealthService};
+use novade_system::system_health_collectors::{
+    LinuxCpuMetricsCollector, LinuxMemoryMetricsCollector, LinuxDiskMetricsCollector,
+    LinuxNetworkMetricsCollector, LinuxTemperatureMetricsCollector, JournaldLogHarvester,
+    BasicDiagnosticsRunner,
+};
+use novade_ui::system_health_dashboard::main_view::SystemHealthDashboardView; // Adjusted path
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio::time::{sleep, Duration};
-// use log::LevelFilter; // Example for env_logger
 
-#[tokio::main]
-async fn main() {
-    // Initialize logging (e.g., simple_logger or env_logger)
-    // env_logger::Builder::new().filter_level(LevelFilter::Debug).init();
-    // For this test, direct println might be okay, but for robust debugging, proper logging is better.
-    println!("UI Prototype: Initializing...");
+const APP_ID: &str = "org.novade.SystemHealthDashboard";
 
-    let metric_collector = Arc::new(SystemMetricCollector::new());
-    // Create dummy instances for other adapters as they are required by SystemHealthService::new
-    let log_harvester = Arc::new(SystemLogHarvester::new());
-    let diagnostic_runner = Arc::new(SystemDiagnosticRunner::new());
+fn main() {
+    // Initialize CoreConfig (using default for now)
+    // In a real app, this would be loaded from a file.
+    let core_config = Arc::new(CoreConfig::default());
 
-    let config = SystemHealthDashboardConfig::default();
-    // SystemHealthService::new now returns Arc<SystemHealthService> and starts its own polling
-    let service = SystemHealthService::new(config, metric_collector, log_harvester, diagnostic_runner);
-    
-    // SystemHealthViewModel::new now returns Arc<Mutex<SystemHealthViewModel>> and starts its own subscriptions
-    let view_model = SystemHealthViewModel::new(service.clone());
-    
-    // Instantiate the panel that has the display method
-    let metrics_panel = MetricsPanel::new(view_model.clone());
+    // Instantiate system layer collectors
+    let cpu_collector = Arc::new(LinuxCpuMetricsCollector);
+    let memory_collector = Arc::new(LinuxMemoryMetricsCollector);
+    let disk_collector = Arc::new(LinuxDiskMetricsCollector);
+    let network_collector = Arc::new(LinuxNetworkMetricsCollector);
+    let temperature_collector = Arc::new(LinuxTemperatureMetricsCollector);
+    let log_harvester = Arc::new(JournaldLogHarvester);
+    // BasicDiagnosticsRunner needs a ping target
+    // TODO: Get this from core_config.system_health.diagnostic_ping_target once that field is added to SystemHealthDashboardConfig
+    let diagnostic_runner = Arc::new(BasicDiagnosticsRunner::new(Some("8.8.8.8".to_string())));
 
-    println!("UI Prototype: Starting display loop. Memory metrics should update via println from MetricsPanel.");
-    
-    for i in 0..20 { // Run for a few iterations (e.g., 20 iterations * 2 secs = 40 secs)
-        println!("\n--- Iteration {} ---", i + 1);
-        metrics_panel.display_memory_metrics().await;
-        sleep(Duration::from_secs(2)).await;
-    }
+    // Instantiate Domain Layer SystemHealthService
+    let system_health_service: Arc<dyn SystemHealthService> = Arc::new(DefaultSystemHealthService::new(
+        core_config.clone(), // Pass the config Arc
+        cpu_collector,
+        memory_collector,
+        disk_collector,
+        network_collector,
+        temperature_collector,
+        log_harvester,
+        diagnostic_runner,
+    ));
 
-    println!("UI Prototype: Finished display loop.");
+    // Create a new GTK application
+    let app = Application::builder().application_id(APP_ID).build();
 
-    // Keep the main thread alive for a bit longer if background tasks in VM need to print more.
-    // sleep(Duration::from_secs(5)).await;
-    // println!("UI Prototype: Terminating.");
+    // Clone the service Arc to move into the connect_activate callback
+    let service_for_ui = system_health_service.clone();
+
+    // Connect to "activate" signal of the application
+    app.connect_activate(move |app| {
+        // Create the SystemHealthDashboardView (main UI for the dashboard)
+        // Pass the SystemHealthService to it.
+        let dashboard_view = SystemHealthDashboardView::new(service_for_ui.clone());
+
+        // Create a new window
+        let window = ApplicationWindow::builder()
+            .application(app)
+            .title("NovaDE System Health Dashboard")
+            .default_width(800)
+            .default_height(600)
+            .child(&dashboard_view) // Add the dashboard view as a child of the window
+            .build();
+
+        // Use adw::ApplicationWindow if available and preferred for libadwaita styling
+        // let window = adw::ApplicationWindow::builder()
+        //     .application(app)
+        //     .title("NovaDE System Health Dashboard")
+        //     .default_width(800)
+        //     .default_height(600)
+        //     .content(&dashboard_view)
+        //     .build();
+
+
+        // Present the window
+        window.present();
+    });
+
+    // Run the application
+    std::process::exit(app.run_with_args::<&str>(&[]));
 }

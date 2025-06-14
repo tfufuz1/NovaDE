@@ -1,322 +1,499 @@
-// novade-domain/src/system_health_service/service.rs
-
-use async_trait::async_trait;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::{broadcast, Mutex as TokioMutex}; // Using TokioMutex for active_alerts if needed for async operations. RwLock is also fine.
-use tokio::time::{interval, Duration};
-use log::{error, info, debug}; // Assuming log crate is setup
+//! # System Health Service Module
+//!
+//! This module defines the domain-level service for system health monitoring.
+//! It provides a unified API for accessing various system metrics, logs, diagnostics,
+//! and alerts, abstracting away the underlying data collection and system interactions.
+//!
+//! The main components are:
+//! - `SystemHealthService` trait: Defines the public contract of the service.
+//! - `DefaultSystemHealthService`: The default implementation of the service trait,
+//!   which orchestrates data collection from various system-layer collectors and runners.
 
 use novade_core::types::system_health::{
-    CpuMetrics, MemoryMetrics, DiskActivityMetrics, DiskSpaceMetrics, NetworkActivityMetrics, TemperatureMetric,
-    LogEntry, LogFilter, LogSourceIdentifier, DiagnosticTestId, DiagnosticTestInfo, DiagnosticTestResult, Alert, AlertId, SystemHealthDashboardConfig,
+    Alert, CpuMetrics, DiagnosticTestId, DiagnosticTestInfo, DiagnosticTestResult,
+    DiskActivityMetrics, DiskSpaceMetrics, LogEntry, LogFilter, MemoryMetrics,
+    NetworkActivityMetrics, SystemHealthDashboardConfig, TemperatureMetric, TimeRange,
 };
-// use novade_core::types::EntityId; // Assuming a generic EntityId type exists - Removed for now as not used directly in this snippet
-use crate::system_health_service::error::SystemHealthError;
+use novade_core::config::CoreConfig;
+use novade_system::error::SystemError as NovaSystemError; // Alias to avoid naming conflicts
+use novade_system::system_health_collectors::{
+    CpuMetricsCollector, DiagnosticRunner, DiskMetricsCollector, LogHarvester,
+    MemoryMetricsCollector, NetworkMetricsCollector, TemperatureMetricsCollector,
+};
+use crate::error::SystemHealthError;
+use std::sync::Arc;
+use futures_core::Stream;
+use async_trait::async_trait;
+use futures_util::TryStreamExt; // For mapping stream errors
+use tokio::sync::Mutex; // For ActiveAlerts
+use std::collections::HashMap; // For ActiveAlerts
+use uuid::Uuid; // For generating unique alert IDs
 
-// Dependencies from System Layer (to be defined in Step 4)
-// These are conceptual traits that the System Layer will implement.
-// The SystemHealthService will depend on these abstractions.
+// Represents the internal store of active alerts.
+// Key: A unique identifier for the alert condition (e.g., "cpu_usage_high", "disk_space_low_/dev/sda1").
+//      This key helps in updating or removing existing alerts.
+// Value: The `Alert` object itself.
+type ActiveAlertsMap = HashMap<String, Alert>;
 
-#[async_trait]
-pub trait MetricCollectorAdapter: Send + Sync {
-    async fn collect_cpu_metrics(&self) -> Result<CpuMetrics, SystemHealthError>;
-    async fn collect_memory_metrics(&self) -> Result<MemoryMetrics, SystemHealthError>;
-    async fn collect_disk_activity_metrics(&self) -> Result<Vec<DiskActivityMetrics>, SystemHealthError>; // One per monitored disk/activity group
-    async fn collect_disk_space_metrics(&self) -> Result<Vec<DiskSpaceMetrics>, SystemHealthError>; // One per monitored partition
-    async fn collect_network_activity_metrics(&self) -> Result<Vec<NetworkActivityMetrics>, SystemHealthError>; // One per interface
-    async fn collect_temperature_metrics(&self) -> Result<Vec<TemperatureMetric>, SystemHealthError>;
-}
+/// Trait defining the public API for the System Health Service.
+///
+/// This service aggregates data from various collectors and runners, evaluates alerts,
+/// and provides a comprehensive view of the system's health.
+#[async_trait::async_trait]
+pub trait SystemHealthService: Send + Sync {
+    /// Retrieves the latest CPU metrics.
+    /// Returns a `Result` with `CpuMetrics` or a `SystemHealthError`.
+    async fn get_cpu_metrics(&self) -> Result<CpuMetrics, SystemHealthError>;
 
-#[async_trait]
-pub trait LogHarvesterAdapter: Send + Sync {
-    // Streams live logs. `LogFilter` could specify which sources to stream from.
-    async fn stream_logs(&self, filter: LogFilter) -> Result<tokio::sync::mpsc::Receiver<Result<LogEntry, SystemHealthError>>, SystemHealthError>;
-    // Queries historical logs.
-    async fn query_logs(&self, filter: LogFilter) -> Result<Vec<LogEntry>, SystemHealthError>;
-    async fn list_log_sources(&self) -> Result<Vec<LogSourceIdentifier>, SystemHealthError>;
-}
+    /// Retrieves the latest memory metrics.
+    /// Returns a `Result` with `MemoryMetrics` or a `SystemHealthError`.
+    async fn get_memory_metrics(&self) -> Result<MemoryMetrics, SystemHealthError>;
 
-#[async_trait]
-pub trait DiagnosticRunnerAdapter: Send + Sync {
-    async fn list_available_diagnostics(&self) -> Result<Vec<DiagnosticTestInfo>, SystemHealthError>;
-    async fn run_diagnostic(&self, test_id: DiagnosticTestId, params: Option<serde_json::Value>) -> Result<DiagnosticTestResult, SystemHealthError>; // params could be JSON for flexibility
-}
+    /// Retrieves the latest disk I/O activity metrics for all monitored disks.
+    /// Returns a `Result` with a vector of `DiskActivityMetrics` or a `SystemHealthError`.
+    async fn get_disk_activity_metrics(&self) -> Result<Vec<DiskActivityMetrics>, SystemHealthError>;
 
-// Placeholder for a potential Alert Dispatcher interface if alerts need to go beyond just the UI
-// For now, alerts will be part of the SystemHealthService's broadcast.
-// #[async_trait]
-// pub trait AlertDispatcherAdapter: Send + Sync {
-//     async fn dispatch_alert(&self, alert: Alert) -> Result<(), SystemHealthError>;
-// }
+    /// Retrieves the latest disk space usage metrics for all monitored filesystems.
+    /// Returns a `Result` with a vector of `DiskSpaceMetrics` or a `SystemHealthError`.
+    async fn get_disk_space_metrics(&self) -> Result<Vec<DiskSpaceMetrics>, SystemHealthError>;
 
+    /// Retrieves the latest network activity metrics for all relevant interfaces.
+    /// Returns a `Result` with a vector of `NetworkActivityMetrics` or a `SystemHealthError`.
+    async fn get_network_activity_metrics(&self) -> Result<Vec<NetworkActivityMetrics>, SystemHealthError>;
 
-/// `SystemHealthServiceTrait` defines the public API of the System Health Service.
-/// This service is responsible for aggregating system health data, managing diagnostic tests,
-/// and generating alerts.
-#[async_trait]
-pub trait SystemHealthServiceTrait: Send + Sync {
-    // Metric Retrieval
-    async fn get_current_cpu_metrics(&self) -> Result<CpuMetrics, SystemHealthError>;
-    async fn get_current_memory_metrics(&self) -> Result<MemoryMetrics, SystemHealthError>;
-    async fn get_current_disk_activity_metrics(&self) -> Result<Vec<DiskActivityMetrics>, SystemHealthError>;
-    async fn get_current_disk_space_metrics(&self) -> Result<Vec<DiskSpaceMetrics>, SystemHealthError>;
-    async fn get_current_network_activity_metrics(&self) -> Result<Vec<NetworkActivityMetrics>, SystemHealthError>;
-    async fn get_current_temperature_metrics(&self) -> Result<Vec<TemperatureMetric>, SystemHealthError>;
+    /// Retrieves the latest temperature metrics from available system sensors.
+    /// Returns a `Result` with a vector of `TemperatureMetric` or a `SystemHealthError`.
+    async fn get_temperature_metrics(&self) -> Result<Vec<TemperatureMetric>, SystemHealthError>;
 
-    // Log Retrieval
-    async fn stream_log_entries(&self, filter: LogFilter) -> Result<tokio::sync::mpsc::Receiver<Result<LogEntry, SystemHealthError>>, SystemHealthError>;
-    async fn query_log_entries(&self, filter: LogFilter) -> Result<Vec<LogEntry>, SystemHealthError>;
-    async fn get_available_log_sources(&self) -> Result<Vec<LogSourceIdentifier>, SystemHealthError>;
+    /// Queries historical log entries based on specified criteria.
+    ///
+    /// # Arguments
+    /// * `filter`: Optional filter for log level, keywords, etc.
+    /// * `time_range`: Optional time range to constrain the query.
+    /// * `limit`: Optional maximum number of log entries to return.
+    /// Returns a `Result` with a vector of `LogEntry` items or a `SystemHealthError`.
+    async fn query_logs(&self, filter: Option<LogFilter>, time_range: Option<TimeRange>, limit: Option<usize>) -> Result<Vec<LogEntry>, SystemHealthError>;
 
-    // Diagnostic Tests
-    async fn list_diagnostics(&self) -> Result<Vec<DiagnosticTestInfo>, SystemHealthError>;
-    async fn run_diagnostic_test(&self, test_id: DiagnosticTestId, params: Option<serde_json::Value>) -> Result<DiagnosticTestResult, SystemHealthError>; // Returns final result after completion
-    async fn stream_diagnostic_test_progress(&self, test_id: DiagnosticTestId) -> Result<tokio::sync::mpsc::Receiver<Result<DiagnosticTestResult, SystemHealthError>>, SystemHealthError>; // For long-running tests
+    /// Streams live log entries, applying an optional filter.
+    /// Returns a `Result` with a stream of `LogEntry` results or a `SystemHealthError`.
+    async fn stream_logs(&self, filter: Option<LogFilter>) -> Result<Box<dyn Stream<Item = Result<LogEntry, SystemHealthError>> + Send + Unpin>, SystemHealthError>;
 
-    // Alerts
+    /// Lists all available diagnostic tests that can be run.
+    /// Returns a `Result` with a vector of `DiagnosticTestInfo` or a `SystemHealthError`.
+    fn list_available_diagnostic_tests(&self) -> Result<Vec<DiagnosticTestInfo>, SystemHealthError>;
+
+    /// Runs a specific diagnostic test by its ID.
+    /// Returns a `Result` with `DiagnosticTestResult` or a `SystemHealthError`.
+    async fn run_diagnostic_test(&self, test_id: &DiagnosticTestId) -> Result<DiagnosticTestResult, SystemHealthError>;
+
+    /// Retrieves a list of currently active system alerts.
+    /// Alerts are evaluated based on configured thresholds and current metrics.
+    /// Returns a `Result` with a vector of `Alert` items or a `SystemHealthError`.
     async fn get_active_alerts(&self) -> Result<Vec<Alert>, SystemHealthError>;
-    async fn acknowledge_alert(&self, alert_id: AlertId) -> Result<(), SystemHealthError>;
-    // async fn get_alert_history(&self, limit: Option<u32>) -> Result<Vec<Alert>, SystemHealthError>;
 
-    // Subscription to real-time updates (e.g., for UI)
-    // These would broadcast new values as they are processed/generated internally.
-    fn subscribe_to_cpu_metrics_updates(&self) -> broadcast::Receiver<CpuMetrics>;
-    fn subscribe_to_memory_metrics_updates(&self) -> broadcast::Receiver<MemoryMetrics>;
-    // TODO: Add subscriptions for other metric types (DiskActivity, DiskSpace, Network, Temperature)
-    fn subscribe_to_disk_activity_updates(&self) -> broadcast::Receiver<Vec<DiskActivityMetrics>>;
-    fn subscribe_to_disk_space_updates(&self) -> broadcast::Receiver<Vec<DiskSpaceMetrics>>;
-    fn subscribe_to_network_activity_updates(&self) -> broadcast::Receiver<Vec<NetworkActivityMetrics>>;
-    fn subscribe_to_temperature_updates(&self) -> broadcast::Receiver<Vec<TemperatureMetric>>;
-    fn subscribe_to_alert_updates(&self) -> broadcast::Receiver<Alert>;
-    // Log updates are typically handled by stream_log_entries, but a general "new log available" event could exist.
-
-    // Configuration
-    async fn get_current_configuration(&self) -> Result<SystemHealthDashboardConfig, SystemHealthError>;
-    async fn update_configuration(&self, config: SystemHealthDashboardConfig) -> Result<(), SystemHealthError>;
+    // /// Updates the configuration for the system health dashboard, particularly alert thresholds.
+    // /// (Placeholder for future implementation)
+    // async fn update_configuration(&self, config: SystemHealthDashboardConfig) -> Result<(), SystemHealthError>;
 }
 
-pub struct SystemHealthService {
-    config: Arc<tokio::sync::RwLock<SystemHealthDashboardConfig>>,
-    metric_collector: Arc<dyn MetricCollectorAdapter>,
-    log_harvester: Arc<dyn LogHarvesterAdapter>,
-    diagnostic_runner: Arc<dyn DiagnosticRunnerAdapter>,
-    // alert_dispatcher: Option<Arc<dyn AlertDispatcherAdapter>>, // If external dispatch needed
-
-    // Broadcasters for real-time UI updates
-    cpu_metrics_tx: broadcast::Sender<CpuMetrics>,
-    memory_metrics_tx: broadcast::Sender<MemoryMetrics>,
-    disk_activity_tx: broadcast::Sender<Vec<DiskActivityMetrics>>,
-    disk_space_tx: broadcast::Sender<Vec<DiskSpaceMetrics>>,
-    network_activity_tx: broadcast::Sender<Vec<NetworkActivityMetrics>>,
-    temperature_tx: broadcast::Sender<Vec<TemperatureMetric>>,
-    alert_tx: broadcast::Sender<Alert>,
-
-    // Internal state for alerts, etc.
-    active_alerts: Arc<tokio::sync::RwLock<HashMap<AlertId, Alert>>>,
-    // Background task handles
-    // metric_polling_task: Option<tokio::task::JoinHandle<()>>,
-    // log_processing_task: Option<tokio::task::JoinHandle<()>>,
-    // alert_evaluation_task: Option<tokio::task::JoinHandle<()>>,
-    // For tasks that might need to be joined or cancelled:
-    // background_tasks: Vec<tokio::task::JoinHandle<()>>,
+/// Default implementation of the `SystemHealthService`.
+///
+/// This struct holds `Arc` references to various system-layer collectors and runners,
+/// an `Arc` to the `CoreConfig` for accessing configuration (like alert thresholds),
+/// and an internal store for managing active alerts.
+pub struct DefaultSystemHealthService {
+    /// Shared reference to the application's core configuration.
+    core_config: Arc<CoreConfig>,
+    /// Collector for CPU metrics.
+    cpu_collector: Arc<dyn CpuMetricsCollector + Send + Sync>,
+    /// Collector for memory metrics.
+    memory_collector: Arc<dyn MemoryMetricsCollector + Send + Sync>,
+    /// Collector for disk metrics (activity and space).
+    disk_collector: Arc<dyn DiskMetricsCollector + Send + Sync>,
+    /// Collector for network activity metrics.
+    network_collector: Arc<dyn NetworkMetricsCollector + Send + Sync>,
+    /// Collector for temperature metrics.
+    temperature_collector: Arc<dyn TemperatureMetricsCollector + Send + Sync>,
+    /// Harvester for system logs.
+    log_harvester: Arc<dyn LogHarvester + Send + Sync>,
+    /// Runner for diagnostic tests.
+    diagnostic_runner: Arc<dyn DiagnosticRunner + Send + Sync>,
+    /// Internal store for currently active alerts, protected by a Mutex.
+    active_alerts: Arc<Mutex<ActiveAlertsMap>>,
 }
 
-impl SystemHealthService {
+impl DefaultSystemHealthService {
+    /// Creates a new `DefaultSystemHealthService`.
+    ///
+    /// # Arguments
+    /// * `core_config`: Shared access to the application's `CoreConfig`.
+    /// * `cpu_collector`: An implementation of `CpuMetricsCollector`.
+    /// * `memory_collector`: An implementation of `MemoryMetricsCollector`.
+    /// * `disk_collector`: An implementation of `DiskMetricsCollector`.
+    /// * `network_collector`: An implementation of `NetworkMetricsCollector`.
+    /// * `temperature_collector`: An implementation of `TemperatureMetricsCollector`.
+    /// * `log_harvester`: An implementation of `LogHarvester`.
+    /// * `diagnostic_runner`: An implementation of `DiagnosticRunner`.
     pub fn new(
-        initial_config: SystemHealthDashboardConfig,
-        metric_collector: Arc<dyn MetricCollectorAdapter>,
-        log_harvester: Arc<dyn LogHarvesterAdapter>,
-        diagnostic_runner: Arc<dyn DiagnosticRunnerAdapter>,
-        // alert_dispatcher: Option<Arc<dyn AlertDispatcherAdapter>>,
-    ) -> Arc<Self> { // Return Arc<Self> to make it easy to start tasks that need Arc<Self>
-        // Initialize broadcasters
-        let (cpu_metrics_tx, _) = broadcast::channel(16);
-        let (memory_metrics_tx, _) = broadcast::channel(16);
-        let (disk_activity_tx, _) = broadcast::channel(16);
-        let (disk_space_tx, _) = broadcast::channel(16);
-        let (network_activity_tx, _) = broadcast::channel(16);
-        let (temperature_tx, _) = broadcast::channel(16);
-        let (alert_tx, _) = broadcast::channel(32);
-
-        let service_arc = Arc::new(Self {
-            config: Arc::new(tokio::sync::RwLock::new(initial_config)),
-            metric_collector: metric_collector.clone(), // Clone Arcs for the struct
-            log_harvester: log_harvester.clone(),
-            diagnostic_runner: diagnostic_runner.clone(),
-            cpu_metrics_tx: cpu_metrics_tx.clone(),
-            memory_metrics_tx: memory_metrics_tx.clone(),
-            disk_activity_tx: disk_activity_tx.clone(),
-            disk_space_tx: disk_space_tx.clone(),
-            network_activity_tx: network_activity_tx.clone(),
-            temperature_tx: temperature_tx.clone(),
-            alert_tx: alert_tx.clone(),
-            active_alerts: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
-            // background_tasks: Vec::new(), // Initialize if using this pattern
-        });
-
-        // Start background tasks
-        // SystemHealthService::start_cpu_metric_polling(service_arc.clone()); // Example for CPU
-        SystemHealthService::start_memory_metric_polling(service_arc.clone());
-        // SystemHealthService::start_alert_evaluation_task(service_arc.clone()); // etc.
-
-        service_arc
-    }
-
-    // Method to start memory metric polling task
-    fn start_memory_metric_polling(self_arc: Arc<Self>) {
-        tokio::spawn(async move {
-            // Read initial interval from config. In a more complex system, this might need to react to config changes.
-            let initial_interval_ms = self_arc.config.read().await.metric_refresh_interval_ms;
-            let mut tick_interval = interval(Duration::from_millis(initial_interval_ms));
-
-            info!("Starting memory metric polling task with interval: {}ms", initial_interval_ms);
-
-            loop {
-                tick_interval.tick().await;
-                // Potentially re-read interval if config can change dynamically
-                // let current_interval_ms = self_arc.config.read().await.metric_refresh_interval_ms;
-                // if tick_interval.period().as_millis() as u64 != current_interval_ms {
-                //     tick_interval = interval(Duration::from_millis(current_interval_ms));
-                //     info!("Updated memory metric polling interval to: {}ms", current_interval_ms);
-                // }
-
-                match self_arc.metric_collector.collect_memory_metrics().await {
-                    Ok(metrics) => {
-                        debug!("Collected memory metrics: {:?}", metrics);
-                        if let Err(e) = self_arc.memory_metrics_tx.send(metrics.clone()) {
-                            error!("Failed to broadcast memory metrics: {}", e);
-                        } else {
-                            // info!("Successfully broadcasted memory metrics."); // Can be too verbose
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to collect memory metrics: {:?}", e);
-                    }
-                }
-            }
-        });
-    }
-
-    // Similarly, other polling tasks could be added here:
-    // fn start_cpu_metric_polling(self_arc: Arc<Self>) { /* ... */ }
-    // fn start_disk_activity_polling(self_arc: Arc<Self>) { /* ... */ }
-    // ... etc. ...
-    // fn start_alert_evaluation_task(self_arc: Arc<Self>) { /* ... */ }
-}
-
-#[async_trait]
-impl SystemHealthServiceTrait for SystemHealthService {
-    async fn get_current_cpu_metrics(&self) -> Result<CpuMetrics, SystemHealthError> {
-        self.metric_collector.collect_cpu_metrics().await
-    }
-
-    async fn get_current_memory_metrics(&self) -> Result<MemoryMetrics, SystemHealthError> {
-        self.metric_collector.collect_memory_metrics().await
-    }
-
-    async fn get_current_disk_activity_metrics(&self) -> Result<Vec<DiskActivityMetrics>, SystemHealthError> {
-        self.metric_collector.collect_disk_activity_metrics().await
-    }
-
-    async fn get_current_disk_space_metrics(&self) -> Result<Vec<DiskSpaceMetrics>, SystemHealthError> {
-        self.metric_collector.collect_disk_space_metrics().await
-    }
-
-    async fn get_current_network_activity_metrics(&self) -> Result<Vec<NetworkActivityMetrics>, SystemHealthError> {
-        self.metric_collector.collect_network_activity_metrics().await
-    }
-
-    async fn get_current_temperature_metrics(&self) -> Result<Vec<TemperatureMetric>, SystemHealthError> {
-        self.metric_collector.collect_temperature_metrics().await
-    }
-
-    async fn stream_log_entries(&self, filter: LogFilter) -> Result<tokio::sync::mpsc::Receiver<Result<LogEntry, SystemHealthError>>, SystemHealthError> {
-        self.log_harvester.stream_logs(filter).await
-    }
-
-    async fn query_log_entries(&self, filter: LogFilter) -> Result<Vec<LogEntry>, SystemHealthError> {
-        self.log_harvester.query_logs(filter).await
-    }
-
-    async fn get_available_log_sources(&self) -> Result<Vec<LogSourceIdentifier>, SystemHealthError> {
-        self.log_harvester.list_log_sources().await
-    }
-
-    async fn list_diagnostics(&self) -> Result<Vec<DiagnosticTestInfo>, SystemHealthError> {
-        self.diagnostic_runner.list_available_diagnostics().await
-    }
-
-    async fn run_diagnostic_test(&self, test_id: DiagnosticTestId, params: Option<serde_json::Value>) -> Result<DiagnosticTestResult, SystemHealthError> {
-        self.diagnostic_runner.run_diagnostic(test_id, params).await
-    }
-
-    async fn stream_diagnostic_test_progress(&self, _test_id: DiagnosticTestId) -> Result<tokio::sync::mpsc::Receiver<Result<DiagnosticTestResult, SystemHealthError>>, SystemHealthError> {
-        // Placeholder: The DiagnosticRunnerAdapter would need to support streaming progress.
-        // This might involve the adapter returning an mpsc::Receiver directly for a given test run.
-        Err(SystemHealthError::Unexpected("Streaming diagnostic progress not yet implemented".to_string()))
-    }
-
-    async fn get_active_alerts(&self) -> Result<Vec<Alert>, SystemHealthError> {
-        let alerts_map = self.active_alerts.read().await;
-        Ok(alerts_map.values().cloned().collect())
-    }
-
-    async fn acknowledge_alert(&self, alert_id: AlertId) -> Result<(), SystemHealthError> {
-        let mut alerts_map = self.active_alerts.write().await;
-        if let Some(alert) = alerts_map.get_mut(&alert_id) {
-            if !alert.acknowledged {
-                alert.acknowledged = true;
-                // Rebroadcast the updated alert
-                let _ = self.alert_tx.send(alert.clone());
-            }
-            Ok(())
-        } else {
-            Err(SystemHealthError::Unexpected(format!("Alert with ID {:?} not found for acknowledgement.", alert_id)))
+        core_config: Arc<CoreConfig>,
+        cpu_collector: Arc<dyn CpuMetricsCollector + Send + Sync>,
+        memory_collector: Arc<dyn MemoryMetricsCollector + Send + Sync>,
+        disk_collector: Arc<dyn DiskMetricsCollector + Send + Sync>,
+        network_collector: Arc<dyn NetworkMetricsCollector + Send + Sync>,
+        temperature_collector: Arc<dyn TemperatureMetricsCollector + Send + Sync>,
+        log_harvester: Arc<dyn LogHarvester + Send + Sync>,
+        diagnostic_runner: Arc<dyn DiagnosticRunner + Send + Sync>,
+    ) -> Self {
+        Self {
+            core_config,
+            cpu_collector,
+            memory_collector,
+            disk_collector,
+            network_collector,
+            temperature_collector,
+            log_harvester,
+            diagnostic_runner,
+            active_alerts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    fn subscribe_to_cpu_metrics_updates(&self) -> broadcast::Receiver<CpuMetrics> {
-        self.cpu_metrics_tx.subscribe()
-    }
+    // Helper to access the specific config
+    // TODO: Uncomment and use when SystemHealthDashboardConfig is integrated into CoreConfig
+    // fn get_dashboard_config(&self) -> Option<&SystemHealthDashboardConfig> {
+    //    self.core_config.system_health_dashboard.as_ref()
+    // }
 
-    fn subscribe_to_memory_metrics_updates(&self) -> broadcast::Receiver<MemoryMetrics> {
-        self.memory_metrics_tx.subscribe()
-    }
+    /// Evaluates current system metrics against configured alert thresholds and updates
+    /// the internal `active_alerts` map.
+    ///
+    /// This method is called internally by `get_active_alerts` to ensure the
+    /// alert list is up-to-date before being returned.
+    ///
+    /// It fetches CPU, memory, and disk space metrics, then compares them against
+    /// thresholds defined in `self.core_config.system_health.alert_thresholds`.
+    /// - If a metric breaches a threshold, an `Alert` is created or updated in `active_alerts`.
+    /// - If a metric no longer breaches a previously active threshold, the corresponding alert is removed.
+    ///
+    /// Error handling for metric collection failures is basic (prints to stderr); a more robust
+    /// system might generate specific "metric collection failed" alerts.
+    ///
+    /// Note: Duration-based alerting (e.g., "CPU above X% for Y duration") is simplified
+    /// in this implementation to only check the current value. True duration-based alerting
+    /// would require more state management, potentially tracking breach start times.
+    async fn evaluate_alerts(&self) -> Result<(), SystemHealthError> {
+        // TODO: Unit test alert generation logic with mock metrics and config.
+        // TODO: Unit test alert clearing logic.
+        let config = if let Some(sh_config) = &self.core_config.system_health { // Corrected field name
+            sh_config
+        } else {
+            // If no specific system_health_dashboard config in CoreConfig, no alerts can be evaluated.
+            // This might happen if the config file is missing the [system_health] section
+            // or if SystemHealthDashboardConfig is not yet integrated into CoreConfig defaults.
+            let mut alerts_map = self.active_alerts.lock().await;
+            if !alerts_map.is_empty() {
+                // If there were pre-existing alerts, clear them as their config is gone.
+                alerts_map.clear();
+                 // Optionally, log a warning that system health config is missing for alerting.
+                eprintln!("Warning: SystemHealthDashboardConfig not found in CoreConfig. Alerts disabled/cleared.");
+            }
+            return Ok(());
+        };
 
-    fn subscribe_to_disk_activity_updates(&self) -> broadcast::Receiver<Vec<DiskActivityMetrics>> {
-        self.disk_activity_tx.subscribe()
-    }
+        let mut current_alerts = self.active_alerts.lock().await; // Lock the mutex for the duration of evaluation
 
-    fn subscribe_to_disk_space_updates(&self) -> broadcast::Receiver<Vec<DiskSpaceMetrics>> {
-        self.disk_space_tx.subscribe()
-    }
+        // --- CPU Usage Alert ---
+        if let Some(cpu_threshold_config) = &config.alert_thresholds.high_cpu_usage_percent {
+            let cpu_alert_key = "high_cpu_usage";
+            match self.get_cpu_metrics().await {
+                Ok(metrics) => {
+                    if metrics.total_usage_percent >= cpu_threshold_config.threshold_percent {
+                        // If alert doesn't exist or needs update (e.g., timestamp), create/update it.
+                        // For simplicity, we just insert/replace.
+                        // A more complex system might check if the existing alert differs before replacing.
+                        if !current_alerts.contains_key(cpu_alert_key) { // Only add if new
+                            let alert = Alert {
+                                id: Uuid::new_v4().to_string(), // Generate a new unique ID for each alert instance
+                                name: "High CPU Usage".to_string(),
+                                description: format!(
+                                    "CPU usage is at {:.2}%, exceeding threshold of {}%.",
+                                    metrics.total_usage_percent, cpu_threshold_config.threshold_percent
+                                ),
+                                severity: novade_core::types::system_health::AlertSeverity::Warning, // Could be configurable
+                                source: "system_health_service".to_string(),
+                                timestamp: std::time::SystemTime::now(),
+                                acknowledged: false,
+                                details: Some(format!("Current CPU Metrics: {:?}", metrics)),
+                            };
+                            current_alerts.insert(cpu_alert_key.to_string(), alert);
+                        }
+                    } else {
+                        // If usage is below threshold, remove the alert if it exists.
+                        current_alerts.remove(cpu_alert_key);
+                    }
+                }
+                Err(e) => {
+                    // Failed to get CPU metrics. Consider how to handle this.
+                    // Option 1: Log error and do nothing about existing CPU alert.
+                    // Option 2: Create a specific "CPU metric collection failed" alert.
+                    // Option 3: Remove existing CPU alert as its status is unknown.
+                    eprintln!("Failed to get CPU metrics for alert evaluation: {:?}", e);
+                    // For now, we don't change the existing alert state on metric error.
+                }
+            }
+        } else {
+            // If this specific alert configuration is removed from CoreConfig, ensure the alert is cleared.
+            current_alerts.remove("high_cpu_usage");
+        }
 
-    fn subscribe_to_network_activity_updates(&self) -> broadcast::Receiver<Vec<NetworkActivityMetrics>> {
-        self.network_activity_tx.subscribe()
-    }
+        // --- Low Memory Available Alert ---
+        if let Some(mem_threshold_config) = &config.alert_thresholds.low_memory_available_percent {
+            let mem_alert_key = "low_memory_available";
+            match self.get_memory_metrics().await {
+                Ok(metrics) => {
+                    let available_percent = if metrics.total_bytes > 0 {
+                        (metrics.available_bytes as f32 / metrics.total_bytes as f32) * 100.0
+                    } else {
+                        100.0 // Avoid division by zero if total_bytes is 0
+                    };
 
-    fn subscribe_to_temperature_updates(&self) -> broadcast::Receiver<Vec<TemperatureMetric>> {
-        self.temperature_tx.subscribe()
-    }
+                    if available_percent < mem_threshold_config.threshold_percent {
+                        if !current_alerts.contains_key(mem_alert_key) {
+                             let alert = Alert {
+                                id: Uuid::new_v4().to_string(),
+                                name: "Low Memory Available".to_string(),
+                                description: format!(
+                                    "Available memory is at {:.2}%, below threshold of {}%.",
+                                    available_percent, mem_threshold_config.threshold_percent
+                                ),
+                                severity: novade_core::types::system_health::AlertSeverity::Warning,
+                                source: "system_health_service".to_string(),
+                                timestamp: std::time::SystemTime::now(),
+                                acknowledged: false,
+                                details: Some(format!("Current Memory Metrics: {:?}", metrics)),
+                            };
+                            current_alerts.insert(mem_alert_key.to_string(), alert);
+                        }
+                    } else {
+                        current_alerts.remove(mem_alert_key);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to get Memory metrics for alert evaluation: {:?}", e);
+                }
+            }
+        } else {
+            current_alerts.remove("low_memory_available");
+        }
 
-    fn subscribe_to_alert_updates(&self) -> broadcast::Receiver<Alert> {
-        self.alert_tx.subscribe()
-    }
+        // --- Low Disk Space Alerts ---
+        // This section needs to handle multiple disk alerts and their configurations.
+        // We iterate through configured thresholds and then through actual disk metrics.
 
-    async fn get_current_configuration(&self) -> Result<SystemHealthDashboardConfig, SystemHealthError> {
-        Ok(self.config.read().await.clone())
-    }
+        // Critical Thresholds
+        if let Some(disk_critical_configs) = &config.alert_thresholds.low_disk_space_criticals {
+            match self.get_disk_space_metrics().await { // This fetches all disk metrics
+                Ok(disk_metrics_vec) => {
+                    for metrics in &disk_metrics_vec { // Iterate over actual disk metrics
+                        for critical_config in disk_critical_configs { // Check against each critical config
+                            // Match config to metric (e.g., by mount_point or wildcard)
+                            let path_matches = critical_config.device_path_or_mount_point == "*" ||
+                                               critical_config.device_path_or_mount_point == metrics.mount_point;
+                                               // Add || critical_config.device_path_or_mount_point == metrics.filesystem_type if needed
 
-    async fn update_configuration(&self, config: SystemHealthDashboardConfig) -> Result<(), SystemHealthError> {
-        let mut current_config = self.config.write().await;
-        *current_config = config;
-        // TODO: Notify background tasks about config changes (e.g., refresh interval, alert thresholds).
-        // This might involve sending a specific signal or message to the tasks,
-        // or the tasks themselves could periodically check the config Arc.
-        // For instance, a metric polling task would need to adjust its sleep duration.
-        // An alert evaluation task would need to reload alert thresholds.
-        println!("SystemHealthService configuration updated. Background tasks may need to be signaled to reload settings."); // Placeholder
+                            if path_matches {
+                                let free_percent = if metrics.total_bytes > 0 {
+                                    (metrics.free_bytes as f32 / metrics.total_bytes as f32) * 100.0
+                                } else { 100.0 };
+
+                                let alert_key = format!("low_disk_space_critical_{}", metrics.mount_point.replace(|c: char| !c.is_alphanumeric(), "_"));
+                                if free_percent < critical_config.threshold_percent {
+                                    if !current_alerts.contains_key(&alert_key) {
+                                        let alert = Alert {
+                                            id: Uuid::new_v4().to_string(),
+                                            name: format!("Critical Low Disk Space on {}", metrics.mount_point),
+                                            description: format!(
+                                                "Free disk space on {} is at {:.2}%, below critical threshold of {}%.",
+                                                metrics.mount_point, free_percent, critical_config.threshold_percent
+                                            ),
+                                            severity: novade_core::types::system_health::AlertSeverity::Critical,
+                                            source: "system_health_service".to_string(),
+                                            timestamp: std::time::SystemTime::now(),
+                                            acknowledged: false,
+                                            details: Some(format!("Disk Space Metrics for {}: {:?}", metrics.mount_point, metrics)),
+                                        };
+                                        current_alerts.insert(alert_key.clone(), alert);
+                                    }
+                                } else {
+                                    current_alerts.remove(&alert_key);
+                                }
+                                // Found a matching config for this metric, move to next metric
+                                // This assumes only one config (critical or warning) should apply per disk.
+                                // If multiple configs could apply (e.g. wildcard and specific), behavior might need adjustment.
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                     eprintln!("Failed to get Disk Space metrics for critical alert evaluation: {:?}", e);
+                }
+            }
+        } // If no critical_configs, existing critical disk alerts would persist unless cleared by more general logic.
+
+        // Warning Thresholds (similar logic)
+        if let Some(disk_warning_configs) = &config.alert_thresholds.low_disk_space_warnings {
+             match self.get_disk_space_metrics().await {
+                Ok(disk_metrics_vec) => {
+                    for metrics in &disk_metrics_vec {
+                        for warning_config in disk_warning_configs {
+                            let path_matches = warning_config.device_path_or_mount_point == "*" ||
+                                               warning_config.device_path_or_mount_point == metrics.mount_point;
+
+                            if path_matches {
+                                let free_percent = if metrics.total_bytes > 0 {
+                                    (metrics.free_bytes as f32 / metrics.total_bytes as f32) * 100.0
+                                } else { 100.0 };
+
+                                let critical_alert_key = format!("low_disk_space_critical_{}", metrics.mount_point.replace(|c: char| !c.is_alphanumeric(), "_"));
+                                let warning_alert_key = format!("low_disk_space_warning_{}", metrics.mount_point.replace(|c: char| !c.is_alphanumeric(), "_"));
+
+                                // Only add/check warning if no critical alert for the same disk is active
+                                if !current_alerts.contains_key(&critical_alert_key) {
+                                    if free_percent < warning_config.threshold_percent {
+                                        if !current_alerts.contains_key(&warning_alert_key) {
+                                             let alert = Alert {
+                                                id: Uuid::new_v4().to_string(),
+                                                name: format!("Low Disk Space Warning on {}", metrics.mount_point),
+                                                description: format!(
+                                                    "Free disk space on {} is at {:.2}%, below warning threshold of {}%.",
+                                                    metrics.mount_point, free_percent, warning_config.threshold_percent
+                                                ),
+                                                severity: novade_core::types::system_health::AlertSeverity::Warning,
+                                                source: "system_health_service".to_string(),
+                                                timestamp: std::time::SystemTime::now(),
+                                                acknowledged: false,
+                                                details: Some(format!("Disk Space Metrics for {}: {:?}", metrics.mount_point, metrics)),
+                                            };
+                                            current_alerts.insert(warning_alert_key.clone(), alert);
+                                        }
+                                    } else {
+                                         current_alerts.remove(&warning_alert_key); // Clear warning if above threshold
+                                    }
+                                } else {
+                                    // If a critical alert is active, ensure any warning for the same disk is cleared.
+                                    current_alerts.remove(&warning_alert_key);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to get Disk Space metrics for warning alert evaluation: {:?}", e);
+                }
+            }
+        }
+        // TODO: Add logic to remove disk alerts if their specific configurations (critical or warning) are removed from CoreConfig.
+        // This would involve iterating `current_alerts` for keys matching disk alert patterns and checking
+        // if a corresponding configuration (e.g., in `disk_critical_configs` or `disk_warning_configs`) still exists.
+
         Ok(())
     }
+}
+
+#[async_trait::async_trait]
+impl SystemHealthService for DefaultSystemHealthService {
+    async fn get_cpu_metrics(&self) -> Result<CpuMetrics, SystemHealthError> {
+        // TODO: Integration test this service method with mock system collectors/harvesters/runners.
+        // TODO: Test error propagation from system layer mock to SystemHealthError.
+        self.cpu_collector.collect_cpu_metrics().await.map_err(Into::into)
+    }
+
+    async fn get_memory_metrics(&self) -> Result<MemoryMetrics, SystemHealthError> {
+        // TODO: Integration test this service method with mock system collectors/harvesters/runners.
+        // TODO: Test error propagation from system layer mock to SystemHealthError.
+        self.memory_collector.collect_memory_metrics().await.map_err(Into::into)
+    }
+
+    async fn get_disk_activity_metrics(&self) -> Result<Vec<DiskActivityMetrics>, SystemHealthError> {
+        // TODO: Integration test this service method with mock system collectors/harvesters/runners.
+        // TODO: Test error propagation from system layer mock to SystemHealthError.
+        self.disk_collector.collect_disk_activity_metrics().await.map_err(Into::into)
+    }
+
+    async fn get_disk_space_metrics(&self) -> Result<Vec<DiskSpaceMetrics>, SystemHealthError> {
+        // TODO: Integration test this service method with mock system collectors/harvesters/runners.
+        // TODO: Test error propagation from system layer mock to SystemHealthError.
+        self.disk_collector.collect_disk_space_metrics().await.map_err(Into::into)
+    }
+
+    async fn get_network_activity_metrics(&self) -> Result<Vec<NetworkActivityMetrics>, SystemHealthError> {
+        // TODO: Integration test this service method with mock system collectors/harvesters/runners.
+        // TODO: Test error propagation from system layer mock to SystemHealthError.
+        self.network_collector.collect_network_activity_metrics().await.map_err(Into::into)
+    }
+
+    async fn get_temperature_metrics(&self) -> Result<Vec<TemperatureMetric>, SystemHealthError> {
+        // TODO: Integration test this service method with mock system collectors/harvesters/runners.
+        // TODO: Test error propagation from system layer mock to SystemHealthError.
+        self.temperature_collector.collect_temperature_metrics().await.map_err(Into::into)
+    }
+
+    async fn query_logs(&self, filter: Option<LogFilter>, time_range: Option<TimeRange>, limit: Option<usize>) -> Result<Vec<LogEntry>, SystemHealthError> {
+        // TODO: Integration test this service method with mock system collectors/harvesters/runners.
+        // TODO: Test error propagation from system layer mock to SystemHealthError.
+        self.log_harvester.query_logs(filter, time_range, limit).await.map_err(Into::into)
+    }
+
+    async fn stream_logs(&self, filter: Option<LogFilter>) -> Result<Box<dyn Stream<Item = Result<LogEntry, SystemHealthError>> + Send + Unpin>, SystemHealthError> {
+        // TODO: Integration test this service method with mock system collectors/harvesters/runners.
+        // TODO: Test error propagation from system layer mock to SystemHealthError.
+        let system_stream = self.log_harvester.stream_logs(filter).await?;
+        // Map the error type within the stream items from novade_system::Error to SystemHealthError
+        let domain_stream = system_stream.map_err(SystemHealthError::from);
+        Ok(Box::pin(domain_stream))
+    }
+
+    fn list_available_diagnostic_tests(&self) -> Result<Vec<DiagnosticTestInfo>, SystemHealthError> {
+        // TODO: Integration test this service method with mock system collectors/harvesters/runners.
+        // TODO: Test error propagation from system layer mock to SystemHealthError.
+        self.diagnostic_runner.list_available_tests().map_err(Into::into)
+    }
+
+    async fn run_diagnostic_test(&self, test_id: &DiagnosticTestId) -> Result<DiagnosticTestResult, SystemHealthError> {
+        // TODO: Integration test this service method with mock system collectors/harvesters/runners.
+        // TODO: Test error propagation from system layer mock to SystemHealthError.
+        self.diagnostic_runner.run_test(test_id).await.map_err(Into::into)
+    }
+
+    async fn get_active_alerts(&self) -> Result<Vec<Alert>, SystemHealthError> {
+        // TODO: Integration test this service method with mock system collectors/harvesters/runners.
+        // TODO: Test error propagation from system layer mock to SystemHealthError.
+        // Placeholder implementation.
+        // TODO: Implement actual alert logic based on self.core_config.system_health_dashboard thresholds.
+        // This would involve:
+        // 1. Fetching relevant metrics.
+        // 2. Comparing them against thresholds in self.get_dashboard_config().
+        // 3. Generating alerts if thresholds are breached.
+        // 4. Storing and managing these active_alerts (e.g., in an Arc<Mutex<Vec<Alert>>>).
+        // For now, returning an empty Vec.
+        if self.core_config.system_health.is_none() { // Corrected field name
+            // This check is a placeholder for when SystemHealthDashboardConfig is properly part of CoreConfig
+            // It indicates that the config required for evaluating alerts is not available.
+             return Ok(Vec::new()); // Or perhaps an error SystemHealthError::ConfigError("Dashboard config missing".to_string())
+        }
+        // Call evaluate_alerts to update the store before returning.
+        // self.evaluate_alerts().await?; // This will be added in the next step.
+        let alerts_map = self.active_alerts.lock().await;
+        // Call evaluate_alerts to update the store before returning.
+        self.evaluate_alerts().await?;
+        let alerts_map = self.active_alerts.lock().await;
+        Ok(alerts_map.values().cloned().collect())
+    }
+
+    // TODO: Implement update_configuration if/when CoreConfig supports dynamic updates
+    // and SystemHealthDashboardConfig is part of it.
+    // async fn update_configuration(&self, config: SystemHealthDashboardConfig) -> Result<(), SystemHealthError> {
+    //     Err(SystemHealthError::ConfigError("Updating dashboard configuration not yet implemented.".to_string()))
+    // }
 }

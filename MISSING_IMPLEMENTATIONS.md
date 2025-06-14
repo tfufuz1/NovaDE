@@ -7,6 +7,7 @@ This document lists features, components, and refinements that appear to be miss
 - [Domain Layer (`novade-domain`)](#domain-layer-novade-domain)
 - [System Layer (`novade-system`)](#system-layer-novade-system)
 - [UI Layer (`novade-ui`)](#ui-layer-novade-ui)
+- [Feature Specifics & Refinements](#feature-specifics--refinements)
 - [General/Cross-Cutting](#generalcross-cutting)
 
 ---
@@ -29,6 +30,8 @@ This document lists features, components, and refinements that appear to be miss
     - Implement live monitoring of configuration files for changes and reloading, as specified.
 - **Schema-Based Validation (`ConfigSchema`):**
     - Implement the `ConfigSchema` structure and associated validation logic in `ConfigValidator` or `ConfigManager` to validate configurations against a defined schema, as per spec. Current validation is basic and hardcoded.
+- **System Health Dashboard Config:**
+    - Add `diagnostic_ping_target: Option<String>` to `SystemHealthDashboardConfig` in `novade-core/src/types/system_health.rs` and update its `Default` impl and TOML parsing if necessary.
 
 ### Error Handling (`src/error.rs`)
 - **Abstract Error Components (as per SPEC-MODULE-CORE-ERRORS-v1.0.0.md):**
@@ -157,16 +160,58 @@ This document lists features, components, and refinements that appear to be miss
 
 ---
 
+## Feature Specifics & Refinements
+
+### System Health Dashboard
+
+- **Domain Layer (`novade-domain`):**
+  - **Alarm Logic:**
+    - Implement full duration-based alerting (e.g., CPU high for X seconds *consecutively*). Current implementation checks instantaneous values.
+    - Add alerts for other metrics (network inactivity, high temperature) as specified or desired, based on `SystemHealthDashboardConfig`.
+    - Persist active alerts across service restarts (optional, would require a persistence strategy).
+    - Provide a mechanism to acknowledge or clear alerts via the `SystemHealthService` (e.g., `acknowledge_alert(alert_id: String)`).
+  - **Periodic Evaluation Task:** Implement a proper background task/ticker within `DefaultSystemHealthService` to call `evaluate_alerts` periodically, instead of the current approach where `get_active_alerts` triggers it. This ensures alerts are evaluated even if the UI isn't actively polling.
+- **System Layer (`novade-system`):**
+  - **Log Streaming:** Enhance `JournaldLogHarvester::stream_logs` to use `sd_journal_wait()` for more efficient, non-polling based streaming, likely involving `tokio::task::spawn_blocking` or an async-friendly journald library.
+  - **Disk SMART Diagnostics:** Fully implement the "Disk SMART Health" test in `BasicDiagnosticsRunner` or a new dedicated runner. This includes:
+    - Discovering available block devices (e.g., by listing `/dev/sd*`, `/dev/nvme*` or parsing `/proc/partitions`).
+    - Dynamically generating `DiagnosticTestInfo` for each relevant disk.
+    - Executing `smartctl -H /dev/sdX` (or equivalent) and parsing its output to determine health status (`Passed`, `Failed`, etc.) and relevant attributes to include in `DiagnosticTestResult::details`.
+  - **Collector Robustness:** Improve error handling and data validation in all collectors (e.g., handling missing `/proc` or `/sys` files gracefully for specific metrics, more specific error types instead of generic strings in `MetricCollectorError`).
+  - **Configurable Ping Target:** Ensure the ping target for `BasicDiagnosticsRunner` is configurable via `CoreConfig` (e.g. add `diagnostic_ping_target: Option<String>` to `SystemHealthDashboardConfig`).
+- **UI Layer (`novade-ui`):**
+  - **Log Viewer Panel:**
+    - Implement live log streaming UI controls (Start/Stop buttons) and connect to `SystemHealthService::stream_logs`. Display new entries as they arrive.
+    - Add UI for selecting a `TimeRange` for log queries.
+    - Add UI for filtering by log component/source if `LogFilter::component_filter` is to be used.
+    - Improve log entry formatting and presentation (e.g., custom styling for different levels beyond basic tags, clickable timestamps, structured field display).
+  - **Metrics Panel:**
+    - Consider graphical representations for metrics (e.g., simple sparklines, bar charts, or small line graphs using GTK drawing capabilities or a charting library) instead of just labels for better visualization.
+    - Allow configuration of which metrics/devices are displayed or filterable within the panel (e.g., selecting specific network interfaces or disk devices).
+  - **Diagnostics Panel:**
+    - Provide more detailed progress updates during test execution, especially for potentially long-running tests.
+    - Allow cancellation of running tests if feasible.
+  - **Alerts Panel:**
+    - Implement UI for acknowledging or clearing alerts (requires corresponding methods in `SystemHealthService`).
+    - Allow sorting and filtering of displayed alerts (e.g., by severity, timestamp, acknowledged status).
+  - **General UI:**
+    - Provide a user-friendly way to display configuration errors if `SystemHealthDashboardConfig` has issues (e.g., invalid thresholds).
+    - Implement more polished error display within panels (e.g., using `gtk::InfoBar` or dedicated error labels) instead of just setting primary widget text to an error message.
+    - Internationalization for all UI text using `gettextrs` or a similar library.
+    - Ensure all UI updates triggered by async operations are correctly performed on the GTK main thread (current use of `glib::MainContext::default().spawn_local` is good, maintain this pattern).
+
+---
+
 ## General/Cross-Cutting
 - **Documentation:**
     - Create/update detailed specification documents for modules where they are missing or where implementation has significantly diverged (especially for UI strategy and compositor rendering).
     - Add comprehensive code comments and Rustdoc documentation.
 - **Testing:**
-    - Expand unit test coverage across all layers.
-    - Implement integration tests for service interactions between layers.
-    - Implement UI tests (if feasible with chosen toolkits).
-- **Performance Profiling and Optimization:** Conduct thorough performance testing, especially for compositor, rendering, and high-frequency domain events.
-- **Security Review:** Conduct a security review, especially for D-Bus interfaces, file handling, and process management.
+    - Expand unit test coverage across all layers (many TODOs added for this).
+    - Implement integration tests for service interactions between layers (TODOs added for this).
+    - Implement UI tests (if feasible with chosen toolkits) (TODOs added for this).
+- **Performance Profiling and Optimization:** Conduct thorough performance testing, especially for compositor, rendering, and high-frequency domain events/metric collection.
+- **Security Review:** Conduct a security review, especially for D-Bus interfaces, file handling, and process management (e.g., `ping` and `smartctl` execution).
 - **Build System & CI/CD:**
     - Ensure `Cargo.toml` files correctly reflect inter-crate dependencies.
     - Refine build scripts (`build.rs` in `novade-ui`) for robustness.
