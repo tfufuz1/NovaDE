@@ -41,7 +41,8 @@ pub struct SurfaceData {
     pub input_region_surface_local: Option<Region<Logical>>,
 
     /// Handle to the renderer-specific texture for the current buffer.
-    pub texture_handle: Option<Box<dyn crate::compositor::renderer_interface::abstraction::RenderableTexture>>,
+    // Uses RenderableTexture from compositor::state for consistency with RenderElement
+    pub texture_handle: Option<Arc<dyn crate::compositor::state::RenderableTexture>>,
 }
 
 /// Information about an attached buffer

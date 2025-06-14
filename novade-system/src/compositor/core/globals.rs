@@ -136,6 +136,16 @@ pub fn create_all_wayland_globals(
     
     // TODO: Add creation of other essential globals here as they are implemented, e.g.:
     // - Data Device Manager (wl_data_device_manager)
+    // - wlr-layer-shell-unstable-v1:
+    //   If using Smithay 0.6+, this would be:
+    //   _desktop_state.layer_shell_state.create_global::<DesktopState>(_display_handle);
+    //   tracing::info!("Layer shell global (wlr_layer_shell_unstable_v1) registered.");
+    //   For Smithay 0.3.0, this requires manual global creation:
+    //   _display_handle.create_global::<DesktopState, YourLayerShellInterface, _>(
+    //       1, // version
+    //       your_custom_layer_shell_dispatcher_data // if needed
+    //   );
+    //   And DesktopState would need to implement GlobalDispatch for YourLayerShellInterface.
 
     Ok(())
 }

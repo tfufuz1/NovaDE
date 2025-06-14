@@ -132,7 +132,27 @@ pub struct DesktopState {
     // Adding concrete WGPU renderer for commit path as a temporary solution
     pub wgpu_renderer_concrete: Option<Arc<Mutex<NovaWgpuRenderer>>>,
     pub display_manager: Arc<WaylandDisplayManager>,
+
+    // --- Cursor Rendering State ---
+    // Use the RenderableTexture trait defined alongside FrameRenderer trait
+    pub active_cursor_texture: Option<Arc<dyn crate::compositor::state::RenderableTexture>>, // Changed Box to Arc
+    pub cursor_hotspot: Point<i32, Logical>,
+
+    // --- Layer Shell State (Placeholder for Smithay 0.3.0) ---
+    // Smithay 0.3.0 does not have built-in LayerShellState. This is a placeholder.
+    // A full implementation would require manual protocol handling or a newer Smithay.
+    pub layer_shell_data: MyCustomLayerShellData,
 }
+
+/// Placeholder for custom layer shell data management.
+/// In a real scenario with manual protocol implementation, this would store
+/// information about layer surfaces, their states, etc.
+#[derive(Debug, Default)]
+pub struct MyCustomLayerShellData {
+    // Example: layers: Vec<Weak<WlSurface>>, // or a more complex struct per layer
+    // For this placeholder, it's empty.
+}
+
 
 use crate::error::SystemResult; // For WaylandDisplayManager::new()
 
@@ -237,7 +257,134 @@ impl DesktopState {
             keyboard_data_map,
             touch_focus_per_slot: HashMap::new(),
             display_manager,
+            active_cursor_texture: None,
+            cursor_hotspot: (0, 0).into(), // Initialize hotspot
+            layer_shell_data: MyCustomLayerShellData::default(), // Initialize placeholder
         })
+    }
+
+    // TODO: This render_frame method is being added/adapted to DesktopState
+    // to align with the subtask's request to use `self.active_cursor_texture` directly.
+    // It mirrors the logic previously in `NovadeCompositorState::render_frame`.
+    // The interaction between DesktopState and NovadeCompositorState regarding rendering
+    // might need further review.
+    pub fn render_frame(
+        &mut self,
+        background_color: [f32; 4],
+        output_size: smithay::utils::Size<i32, Physical>,
+        output_scale: f64,
+    ) -> Result<(), String> {
+        let frame_renderer_arc = match &self.active_renderer {
+            Some(renderer) => renderer.clone(),
+            None => {
+                tracing::warn!("render_frame called on DesktopState but no active_renderer is initialized.");
+                return Ok(());
+            }
+        };
+        let mut frame_renderer_guard = frame_renderer_arc.lock().unwrap();
+
+        let mut render_elements = Vec::new();
+
+        // Collect surface elements from self.space
+        // This requires ManagedWindow to provide wl_surface() and for SurfaceData to be accessible.
+        // Assuming SurfaceData is in wl_surface's data_map and texture_handle is Arc<dyn RenderableTexture>.
+        // The SurfaceData in surface_management.rs has texture_handle: Option<Box<dyn RenderableTexture>>
+        // RenderElement::Surface expects Box<dyn RenderableTexture>. This is consistent.
+        let space_elements = self.space.elements().cloned().collect::<Vec<_>>();
+        for element_window in &space_elements { // element_window is Arc<ManagedWindow>
+            if let Some(wl_surface) = element_window.wl_surface() { // Assuming ManagedWindow has wl_surface()
+                if !wl_surface.is_alive() {
+                    tracing::trace!("Surface not alive: {:?}", wl_surface.id());
+                    continue;
+                }
+                // Accessing SurfaceData from compositor::surface_management
+                if let Some(s_data_arc) = wl_surface.data_map().get::<Arc<StdMutex<crate::compositor::surface_management::SurfaceData>>>() {
+                    let s_data = s_data_arc.lock().unwrap();
+                    if let Some(texture_handle_box) = &s_data.texture_handle {
+                        // RenderElement::Surface expects Box<dyn RenderableTexture>.
+                        // We have a &Box here. To pass ownership, we'd need to clone the Box's content.
+                        // This requires RenderableTexture to have a method for cloning into a Box.
+                        // E.g., trait RenderableTexture: ... { fn box_clone(&self) -> Box<dyn RenderableTexture>; }
+                        // And impl Clone for Box<dyn RenderableTexture> where T: RenderableTexture + Clone { ... }
+                        // For now, this is a conceptual problem. If FrameRenderer takes &[RenderElement],
+                        // we might not need to clone the Box itself, but the RenderElement construction needs a Box.
+                        // Let's assume for the diff that we can get a suitable Box.
+                        // The simplest way if the Box cannot be cloned is to not render surfaces in this pass
+                        // or to change how RenderElement takes the texture (e.g. by reference if possible, or Arc).
+                        // SurfaceData.texture_handle is Arc<dyn RenderableTexture>
+                        // RenderElement::Surface expects Arc<dyn RenderableTexture>
+                        // We can clone the Arc.
+                        if let Some(geo) = self.space.element_geometry(element_window) {
+                            // Need to get surface transformation properly.
+                            // smithay::wayland::compositor::get_surface_transformation is not available directly here.
+                            // CompositorState has this. self.compositor_state.get_surface_transformation(wl_surface)
+                            let transform = self.compositor_state.get_surface_transformation(&wl_surface);
+                            // TODO: Proper damage tracking for surfaces.
+                            let damage = vec![Rectangle::from_loc_and_size((0,0), geo.size)]; // Placeholder: full damage
+
+                            render_elements.push(crate::compositor::state::RenderElement::Surface {
+                                surface: unsafe { &*(wl_surface.inner_ptr() as *const WlSurface) }, // Extending lifetime for 'a. Unsafe but common for render elements.
+                                texture: texture_handle_box.clone(), // Clone Arc
+                                location: geo.loc,
+                                size: geo.size,
+                                transform,
+                                damage,
+                            });
+                            tracing::trace!("Added RenderElement::Surface for {:?}, geom: {:?}", wl_surface.id(), geo);
+                        } else { tracing::trace!("No geometry for surface {:?}", wl_surface.id());}
+                    } else { tracing::trace!("No texture_handle for surface {:?}", wl_surface.id()); }
+                } else { tracing::warn!("No SurfaceData (compositor::surface_management) for surface {:?}", wl_surface.id()); }
+            }
+        }
+
+        // Collect cursor element using DesktopState's fields
+        let cursor_status_is_visible = self.current_cursor_status.lock().unwrap().is_visible();
+        if cursor_status_is_visible {
+            if let Some(cursor_texture_arc) = &self.active_cursor_texture { // This is Arc<dyn RenderableTexture>
+                // RenderElement::Cursor expects Arc<dyn RenderableTexture>
+                let cursor_element = crate::compositor::state::RenderElement::Cursor {
+                    texture: cursor_texture_arc.clone(),
+                    location: self.pointer_location.to_i32_round(),
+                    hotspot: self.cursor_hotspot,
+                };
+                render_elements.push(cursor_element);
+                tracing::trace!("Added RenderElement::Cursor to render list. Pos: {:?}, Hotspot: {:?}", self.pointer_location, self.cursor_hotspot);
+            } else {
+                tracing::trace!("Cursor is set to be visible, but no active_cursor_texture is available in DesktopState.");
+            }
+        }
+
+        let render_span = tracing::info_span!("desktop_state_render_frame", output_size = ?output_size, num_elements = render_elements.len());
+        let _render_guard = render_span.enter();
+
+        match frame_renderer_guard.render_frame(output_size, output_scale, &render_elements, background_color) {
+            Ok(_rendered_damage) => {
+                // Handle frame callbacks - this logic might need to be adapted depending on where smithay_compositor::SurfaceData is.
+                // Assuming space_elements contains items that have WlSurface.
+                let time_ms = self.clock.now().try_into().unwrap_or_default(); // Use self.clock
+
+                for element_window in &space_elements {
+                    if let Some(wl_surface) = element_window.wl_surface() {
+                        if wl_surface.is_alive() {
+                            if let Some(data_refcell) = wl_surface.data_map().get::<std::cell::RefCell<smithay::wayland::compositor::SurfaceData>>() {
+                                let mut surface_data_inner = data_refcell.borrow_mut();
+                                if !surface_data_inner.frame_callbacks.is_empty() {
+                                    tracing::trace!(parent: &render_span, "Sending frame callbacks for surface {:?}", wl_surface.id());
+                                    for callback in surface_data_inner.frame_callbacks.drain(..) {
+                                        callback.done(time_ms);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!(parent: &render_span, target: "Renderer", "DesktopState's FrameRenderer failed to render frame: {}", e);
+                Err(format!("FrameRenderer failed: {}", e))
+            }
+        }
     }
 }
 
@@ -360,176 +507,48 @@ impl CompositorHandler for DesktopState {
                 let buffer_to_texture = new_buffer_wl.unwrap();
                 let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
 
-                match self.active_renderer_type {
-                    ActiveRendererType::Gles => {
-                        // This path is problematic as gles_renderer was removed and texture_handle expects WgpuRenderableTexture.
-                        // For now, this means GLES support is effectively disabled for texture import.
-                        tracing::warn!("GLES renderer path in commit: gles_renderer field is removed. Cannot import texture for surface_id = {:?}.", surface.id());
-                        surface_data.texture_handle = None;
-                        surface_data.current_buffer_info = None;
-                        // if let Some(gles_renderer) = self.gles_renderer.as_mut() { // gles_renderer removed
-                        //     if let Some(dmabuf_attributes) = self.dmabuf_state.get_dmabuf_attributes(buffer_to_texture) {
-                        //         tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting DMABUF import for surface (GLES)");
-                        //         match gles_renderer.create_texture_from_dmabuf(&dmabuf_attributes) {
-                        //             Ok(new_texture_box) => {
-                        //                 tracing::warn!("GLES DMABUF texture created, but SurfaceData expects Arc<WgpuRenderableTexture>. This texture will not be usable with WGPU renderer.");
-                        //                 surface_data.texture_handle = None;
-                        //                 tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created GLES texture from DMABUF");
-                        //                 surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
-                                            buffer: buffer_to_texture.clone(),
-                                            scale: current_surface_attributes.buffer_scale,
-                                            transform: current_surface_attributes.buffer_transform,
-                                            dimensions: (dmabuf_attributes.width(), dmabuf_attributes.height()).into(),
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create GLES texture from DMABUF: {:?}", e);
-                                        surface_data.texture_handle = None;
-                                        surface_data.current_buffer_info = None;
-                                    }
-                                }
-                            } else {
-                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import (GLES)");
-                                match gles_renderer.create_texture_from_shm(buffer_to_texture) {
-                        //             Ok(new_texture_box) => {
-                        //                 tracing::warn!("GLES SHM texture created, but SurfaceData expects Arc<WgpuRenderableTexture>. This texture will not be usable with WGPU renderer.");
-                        //                 surface_data.texture_handle = None;
-                        //                 tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created GLES texture from SHM");
-                        //                 let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
-                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
-                                            buffer: buffer_to_texture.clone(),
-                                            scale: current_surface_attributes.buffer_scale,
-                                            transform: current_surface_attributes.buffer_transform,
-                                            dimensions,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create GLES texture from SHM: {:?}", e);
-                                        surface_data.texture_handle = None;
-                                        surface_data.current_buffer_info = None;
-                                    }
-                                }
-                            }
-                        } else {
-                        //     tracing::warn!(surface_id = ?surface.id(), client_info = %client_id_str, "GLES renderer selected but not available for texture import.");
-                        //     surface_data.texture_handle = None;
-                        //     surface_data.current_buffer_info = None;
-                        // }
-                    }
-                    ActiveRendererType::Vulkan => {
-                        // This path is problematic as vulkan_frame_renderer was removed.
-                        tracing::warn!("Vulkan renderer path in commit: vulkan_frame_renderer field is removed. Cannot import texture for surface_id = {:?}.", surface.id());
-                        surface_data.texture_handle = None;
-                        surface_data.current_buffer_info = None;
-                        // if let ( // vulkan_frame_renderer removed
-                        //     Some(vk_renderer_mutex),
-                        //     Some(vk_allocator),
-                        //     Some(vk_instance),
-                            Some(vk_physical_device),
-                            Some(vk_logical_device)
-                        ) = (
-                            self.vulkan_frame_renderer.as_ref(),
-                            self.vulkan_allocator.as_ref(),
-                            self.vulkan_instance.as_ref(),
-                            self.vulkan_physical_device_info.as_ref(),
-                            self.vulkan_logical_device.as_ref()
-                        ) {
-                            let mut vk_renderer = vk_renderer_mutex.lock().unwrap(); // Handle MutexGuard
+                if let Some(active_renderer_arc_mutex) = self.active_renderer.as_ref() {
+                    let mut renderer = active_renderer_arc_mutex.lock().unwrap();
 
-                            if let Some(dmabuf_attributes) = self.dmabuf_state.get_dmabuf_attributes(buffer_to_texture) {
-                                tracing::debug!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting DMABUF import for surface (Vulkan path)");
-                                match vk_renderer.import_dmabuf_texture(
-                                    &dmabuf_attributes,
-                                    vk_instance,
-                                    vk_physical_device,
-                                    vk_logical_device,
-                                    vk_allocator
-                                ) {
-                        //     Ok(new_texture_box) => {
-                        //         tracing::warn!("Vulkan (GL interop) DMABUF texture created, but SurfaceData expects Arc<WgpuRenderableTexture>.");
-                        //         surface_data.texture_handle = None;
-                        //         tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully imported DMABUF as Vulkan texture.");
-                        //         surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
-                                            buffer: buffer_to_texture.clone(),
-                                            scale: current_surface_attributes.buffer_scale,
-                                            transform: current_surface_attributes.buffer_transform,
-                                            dimensions: (dmabuf_attributes.width(), dmabuf_attributes.height()).into(),
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create Vulkan texture from DMABUF: {:?}", e);
-                                        surface_data.texture_handle = None;
-                                        surface_data.current_buffer_info = None;
-                                    }
+                    // Attempt DMABUF import first if the buffer is a DMABUF
+                    match smithay::backend::allocator::dmabuf::attributes_for_buffer(buffer_to_texture) {
+                        Ok(dmabuf_attrs) => { // It's a DMABUF
+                            tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Buffer is DMABUF. Attempting import with generic FrameRenderer.");
+                            match renderer.create_texture_from_dmabuf(&dmabuf_attrs) {
+                                Ok(texture_box) => {
+                                    surface_data.texture_handle = Some(Arc::from(texture_box)); // Store as Arc
+                                    // current_buffer_info was already updated with the new buffer's general info.
+                                    // No need to clear it on success.
+                                    tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created texture from DMABUF via generic FrameRenderer. New buffer info: {:?}", surface_data.current_buffer_info);
                                 }
-                            } else {
-                                tracing::debug!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import for surface (Vulkan path)");
-                                match vk_renderer.import_shm_texture(
-                                    buffer_to_texture,
-                                    vk_allocator,
-                                    vk_logical_device
-                                ) {
-                        //     Ok(new_texture_box) => {
-                        //         tracing::warn!("Vulkan (GL interop) SHM texture created, but SurfaceData expects Arc<WgpuRenderableTexture>.");
-                        //         surface_data.texture_handle = None;
-                        //         tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully imported SHM as Vulkan texture.");
-                        //         let dimensions = buffer_dimensions(buffer_to_texture).map_or_else(Default::default, |d| d.size);
-                                        surface_data.current_buffer_info = Some(crate::compositor::surface_management::AttachedBufferInfo {
-                                            buffer: buffer_to_texture.clone(),
-                                            scale: current_surface_attributes.buffer_scale,
-                                            transform: current_surface_attributes.buffer_transform,
-                                            dimensions,
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create Vulkan texture from SHM: {:?}", e);
-                                        surface_data.texture_handle = None;
-                                        surface_data.current_buffer_info = None;
-                                    }
+                                Err(err) => {
+                                    tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create texture from DMABUF via generic FrameRenderer: {}", err);
+                                    surface_data.texture_handle = None;
+                                    surface_data.current_buffer_info = None; // New buffer is unusable if import fails.
                                 }
                             }
-                        } else {
-                        //     tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Vulkan renderer selected, but some core components (renderer, allocator, instance, devices) are missing. Cannot import texture.");
-                        //     surface_data.texture_handle = None;
-                        //     surface_data.current_buffer_info = None;
-                        // }
-                    }
-                    ActiveRendererType::Wgpu => {
-                        if let Some(wgpu_renderer_concrete_mutexed) = self.wgpu_renderer_concrete.as_ref() {
-                            let mut wgpu_renderer = wgpu_renderer_concrete_mutexed.lock().unwrap();
-                            if self.dmabuf_state.get_dmabuf_attributes(buffer_to_texture).is_some() {
-                                tracing::warn!(surface_id = ?surface.id(), client_info = %client_id_str, "DMABUF import for WGPU not yet implemented in commit path. Clearing texture.");
-                                surface_data.texture_handle = None;
-                                // If DMABUF import fails for this new buffer, it's unusable with current renderer caps.
-                                // The surface_data.current_buffer_info was already updated to this new buffer's info.
-                                // Setting it to None here means this new buffer attachment is effectively void.
-                                surface_data.current_buffer_info = None;
-                            } else { // SHM Buffer
-                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Attempting SHM import for WGPU renderer.");
-                                match wgpu_renderer.create_texture_from_shm(buffer_to_texture) {
-                                    Ok(wgpu_texture_arc) => {
-                                        surface_data.texture_handle = Some(wgpu_texture_arc);
-                                        // surface_data.current_buffer_info was already updated at the start of the
-                                        // `smithay::wayland::compositor::with_states` block if a new buffer was attached.
-                                        // We don't need to set it again here if texture creation is successful.
-                                        // It correctly reflects the new buffer's attributes.
-                                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created WGPU texture from SHM. New buffer info: {:?}", surface_data.current_buffer_info);
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create WGPU texture from SHM: {:?}", e);
-                                        surface_data.texture_handle = None;
-                                        // If texture creation failed for this *new* buffer, then this buffer cannot be displayed.
-                                        // The surface_data.current_buffer_info (already pointing to this new buffer) should be cleared.
-                                        surface_data.current_buffer_info = None;
-                                    }
+                        }
+                        Err(_) => { // Not a DMABUF, or failed to get attributes. Assume SHM.
+                            tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Buffer is not DMABUF (or failed to get attrs), attempting SHM import with generic FrameRenderer.");
+                            // FrameRenderer::create_texture_from_shm returns Result<Box<dyn RenderableTexture>, RendererError>
+                            match renderer.create_texture_from_shm(buffer_to_texture) {
+                                Ok(texture_box) => {
+                                    surface_data.texture_handle = Some(Arc::from(texture_box)); // Store as Arc
+                                    // current_buffer_info was already updated.
+                                    tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created texture from SHM via generic FrameRenderer. New buffer info: {:?}", surface_data.current_buffer_info);
+                                }
+                                Err(err) => {
+                                    tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create texture from SHM via generic FrameRenderer: {}", err);
+                                    surface_data.texture_handle = None;
+                                    surface_data.current_buffer_info = None; // New buffer is unusable if import fails.
                                 }
                             }
-                        } else {
-                            tracing::warn!("WGPU renderer selected but wgpu_renderer_concrete is None. Cannot import texture for surface_id = {:?}.", surface.id());
-                            surface_data.texture_handle = None;
-                            surface_data.current_buffer_info = None;
                         }
                     }
+                } else { // self.active_renderer is None
+                    tracing::warn!("self.active_renderer is None. Cannot import texture for surface_id = {:?}.", surface.id());
+                    surface_data.texture_handle = None;
+                    surface_data.current_buffer_info = None;
                 }
             } else if buffer_detached {
                 let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
@@ -694,16 +713,77 @@ impl SeatHandler for DesktopState {
     }
 
     fn cursor_image(&mut self, seat: &Seat<Self>, image: CursorImageStatus) {
-        tracing::trace!(
-            seat = %seat.name(),
-            new_status = ?image,
-            "Seat cursor image updated"
-        );
-        *self.current_cursor_status.lock().unwrap() = image.clone();
-        tracing::info!(
-            "Renderer to be signaled: Update cursor image to {:?} at location {:?}.",
-            image,
-            self.pointer_location
-        );
+        tracing::debug!(seat_name = %seat.name(), cursor_status = ?image, "SeatHandler: cursor_image updated");
+
+        let mut current_status_gaurd = self.current_cursor_status.lock().unwrap();
+        *current_status_gaurd = image.clone(); // Update the generic cursor status for other parts of the system
+
+        match image {
+            CursorImageStatus::Surface(surface) => {
+                // This is the case where wl_pointer.set_cursor is called with a surface.
+                // We need to get the WlBuffer from this surface.
+                let buffer = smithay::wayland::compositor::with_states(&surface, |states| {
+                    states.data_map.get::<self::WlSurfaceAttributes>().unwrap().buffer.clone()
+                });
+
+                if let Some(buffer) = buffer {
+                    if let Some(renderer_arc) = &self.active_renderer {
+                        let mut renderer = renderer_arc.lock().unwrap();
+                        match renderer.create_texture_from_shm(&buffer) {
+                            Ok(texture_handle_box) => { // create_texture_from_shm returns a Box
+                                self.active_cursor_texture = Some(Arc::from(texture_handle_box)); // Convert Box to Arc
+                                // Hotspot usually comes from an accompanying wl_surface.attach or a protocol extension.
+                                // Smithay's CursorImageStatus::Surface doesn't directly provide it.
+                                // For now, we'll use a default hotspot or what's already in self.cursor_hotspot.
+                                // A more complete solution would involve retrieving hotspot from client (e.g. via surface commit data).
+                                // Let's assume hotspot is (0,0) for now or managed by client via other means that update self.cursor_hotspot
+                                tracing::info!("Successfully created texture for cursor surface {:?}", surface.id());
+                            }
+                            Err(err) => {
+                                tracing::error!("Failed to create texture for cursor surface {:?}: {}", surface.id(), err);
+                                self.active_cursor_texture = None;
+                            }
+                        }
+                    } else {
+                        tracing::warn!("No active_renderer to create cursor texture.");
+                        self.active_cursor_texture = None;
+                    }
+                } else {
+                    tracing::warn!("Cursor surface {:?} has no attached buffer.", surface.id());
+                    self.active_cursor_texture = None;
+                }
+                 // self.cursor_hotspot should be updated based on client request, often part of wl_pointer.set_cursor
+                 // For this example, we assume it's either (0,0) or set elsewhere.
+                 // If CursorImageStatus::Uploaded provided it, we'd use that.
+            }
+            CursorImageStatus::Uploaded { buffer, hotspot } => {
+                // Client pre-uploaded a buffer (less common for standard cursors but possible).
+                if let Some(renderer_arc) = &self.active_renderer {
+                    let mut renderer = renderer_arc.lock().unwrap();
+                    match renderer.create_texture_from_shm(&buffer) {
+                        Ok(texture_handle_box) => { // create_texture_from_shm returns a Box
+                            self.active_cursor_texture = Some(Arc::from(texture_handle_box)); // Convert Box to Arc
+                            self.cursor_hotspot = hotspot.into(); // Use provided hotspot
+                            tracing::info!("Successfully created texture for uploaded cursor buffer.");
+                        }
+                        Err(err) => {
+                            tracing::error!("Failed to create texture for uploaded cursor buffer: {}", err);
+                            self.active_cursor_texture = None;
+                        }
+                    }
+                } else {
+                    tracing::warn!("No active_renderer to create uploaded cursor texture.");
+                    self.active_cursor_texture = None;
+                }
+            }
+            CursorImageStatus::Hidden => {
+                self.active_cursor_texture = None;
+                tracing::info!("Cursor set to hidden.");
+            }
+            _ => { // Default, None, etc.
+                // This case might not be strictly necessary if Hidden covers it.
+                self.active_cursor_texture = None;
+            }
+        }
     }
 }
