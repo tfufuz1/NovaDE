@@ -10,9 +10,11 @@ pub mod pointer;
 pub mod touch;
 pub mod udev_handler;
 pub mod errors; // Assuming errors.rs exists or is planned
+pub mod voice_capture_service; // Added for assistant integration
 
 // Re-export key public types or structs if this module is to be used as a library facade
 pub use config::InputConfig;
+pub use voice_capture_service::{VoiceCaptureService, VoiceInputEvent}; // Added for assistant integration
 pub use device_manager::DeviceManager;
 pub use focus::FocusManager; // FocusManager might be internal to InputManager mostly
 pub use libinput_handler::LibinputHandler; // The stubbed one

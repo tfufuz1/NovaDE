@@ -27,5 +27,7 @@ pub enum SystemError {
     DomainMcpError(#[from] DomainMCPError),
     // This can be expanded if the system layer needs its own distinct MCP errors
     #[error("System-level MCP error: {0}")]
-    SystemMcpError(String), 
+    SystemMcpError(String),
+    #[error("Application launch failed for '{0}': {1}")]
+    ApplicationLaunchFailed(String, String),
 }

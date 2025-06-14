@@ -54,6 +54,68 @@ pub(super) fn default_bool_false() -> bool {
     false
 }
 
+// --- Assistant Configuration ---
+// The following section outlines the default configuration structure for the Smart Assistant.
+// Actual implementation would involve integrating `AssistantPreferences` from `crate::types::assistant`.
+
+/*
+Example structure for assistant configuration within a larger config file (e.g., TOML):
+
+[assistant]
+enabled = true
+language = "en-US"
+activation_method = "hotword" # Options: "hotword", "keybinding", "manual"
+hotword = "Nova"
+# keybinding = "Super+Space" # Example if using keybinding
+voice_feedback_enabled = true
+
+[assistant.privacy_settings]
+share_usage_data = false
+keep_history = true
+allow_location_access = false
+
+# Skill-specific settings would be nested, e.g.:
+# [assistant.skills."com.novade.skills.weather"]
+# api_key = "your_default_or_placeholder_api_key"
+# preferred_units = "celsius"
+
+*/
+
+/// Placeholder function to illustrate where default assistant preferences would be defined.
+#[allow(dead_code)]
+fn default_assistant_preferences() -> crate::types::assistant::AssistantPreferences {
+    use crate::types::assistant::AssistantPreferences;
+    use std::collections::HashMap;
+
+    AssistantPreferences {
+        enabled: true,
+        language: "en-US".to_string(),
+        activation_method: "hotword".to_string(),
+        hotword: Some("Nova".to_string()),
+        keybinding: None,
+        voice_feedback_enabled: true,
+        privacy_settings: {
+            let mut map = HashMap::new();
+            map.insert("share_usage_data".to_string(), false);
+            map.insert("keep_history".to_string(), true);
+            map.insert("allow_location_access".to_string(), false);
+            map
+        },
+        skill_settings: {
+            let mut map = HashMap::new();
+            // Example default skill setting
+            let mut weather_settings = HashMap::new();
+            weather_settings.insert("preferred_units".to_string(), "celsius".to_string());
+            map.insert("com.novade.skills.weather".to_string(), weather_settings);
+            map
+        },
+    }
+}
+
+// TODO: Integrate these defaults properly into the overall configuration loading mechanism.
+// TODO: Ensure the main configuration struct in `novade-core/src/config/mod.rs`
+//       includes a field for `AssistantPreferences`.
+
 #[cfg(test)]
 mod tests {
     use super::*;
