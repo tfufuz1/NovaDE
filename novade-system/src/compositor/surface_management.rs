@@ -199,6 +199,79 @@ impl SurfaceData {
     }
 }
 
+// --- XDG Surface Handler Implementation ---
+use smithay::wayland::shell::xdg::{XdgSurfaceHandler, XdgSurfaceUserData, XdgTopLevelSurfaceData, XdgPopupSurfaceData, Configure};
+use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
+use smithay::utils::Serial;
+
+
+impl XdgSurfaceHandler for SurfaceData {
+    fn ack_configure(&mut self, configure: Configure) {
+        // It's important to use the correct UserData struct that Smithay's XdgShellState
+        // associates with the wl_surface when it gets an XDG role. This is typically
+        // XdgSurfaceUserData for common fields, or XdgTopLevelSurfaceData / XdgPopupSurfaceData
+        // for role-specific ones.
+        // The `configure` object here is `smithay::wayland::shell::xdg::Configure`,
+        // which contains the serial and potentially cached state.
+
+        // For SurfaceData, we don't typically store the XdgSurfaceUserData directly,
+        // as that's on the WlSurface's data_map managed by XdgShellState.
+        // This ack_configure is called by Smithay *on* the data that implements XdgSurfaceHandler.
+        // If SurfaceData is registered as the user_data for XDG surfaces (which is one way to do it),
+        // then this method is fine.
+
+        // The main role here is to acknowledge that a configure sequence is complete from the client's side.
+        // Actual state application (like new size) often happens when the toplevel/popup surface
+        // itself processes this ack and commits its new state, which then might trigger
+        // CompositorHandler::commit on DesktopState.
+
+        // For MVP, logging is key.
+        tracing::info!(
+            surface_internal_id = %self.id,
+            serial = ?configure.serial,
+            window_geometry = ?configure.window_geometry,
+            "XDG Surface (wl_surface associated with this SurfaceData) acked configure."
+        );
+
+        // TODO MVP: If we need to store the acknowledged serial or geometry directly in SurfaceData,
+        // this is the place. However, usually the ToplevelSurface/PopupSurface objects handle their state.
+        // This handler is more of a notification.
+
+        // Example of what might be done if SurfaceData was more tightly coupled with XDG state:
+        // if let Some(new_geo) = configure.window_geometry {
+        //     A WlSurface does not inherently have geometry; its roles (like toplevel) do.
+        //     This geometry would apply to the ManagedWindow if this SurfaceData belongs to one.
+        //     It's complex because SurfaceData is generic for any WlSurface.
+        // }
+    }
+
+    fn send_close(&self) {
+        // This is called by Smithay when the XDG surface should be closed.
+        // For a toplevel, this means the client should destroy its window.
+        // For a popup, it means the popup is dismissed.
+        // The actual WlSurface resource is not destroyed by this call alone.
+        tracing::info!(
+            surface_internal_id = %self.id,
+            "XDG Surface (wl_surface associated with this SurfaceData) requested to be closed by compositor."
+        );
+        // The ToplevelSurface or PopupSurface object associated with this WlSurface (if any)
+        // will have a `send_close()` method that sends the actual protocol event.
+        // This handler method is a notification that Smithay is about to do that, or that it happened.
+        // Smithay's default implementation of XdgShellHandler (if we were using it directly)
+        // would call the appropriate send_close on the ToplevelSurface/PopupSurface.
+        // Since we implement XdgShellHandler on DesktopState, and this XdgSurfaceHandler on SurfaceData,
+        // the `DesktopState::toplevel_request_close` (if that existed) or similar logic would
+        // eventually lead to the actual `xdg_toplevel.close` or `xdg_popup.popup_done` event.
+        // This `send_close` on `XdgSurfaceHandler` is more about reacting to it if the surface data needs to.
+    }
+
+    // Other XdgSurfaceHandler methods can be stubbed for MVP if not immediately needed.
+    // Smithay 0.10 XdgSurfaceHandler is minimal: ack_configure and send_close.
+    // Older versions might have had more, like set_parent, set_title directly on XdgSurface.
+    // These are now mostly on ToplevelSurface or PopupSurface specific handlers or requests.
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +421,28 @@ mod tests {
         assert_eq!(surface_data.get_state().unwrap().size, Size::from((100, 200)));
         assert_eq!(surface_data.get_buffer_info().unwrap().dimensions, Size::from((100, 200)));
         */
+    }
+
+    #[test]
+    fn test_xdg_surface_handler_ack_configure() {
+        let mut surface_data = SurfaceData::new("test_xdg_ack_configure".to_string());
+        let configure = Configure {
+            serial: Serial::from(123),
+            window_geometry: Some(Rectangle::from_loc_and_size((0,0), (100,100))),
+            // Smithay 0.10 Configure doesn't have `data` or `new_size` directly.
+            // It's a simpler struct. Let's assume it's just serial and optional geometry for this test.
+            // If `configure.data` was used, it would be `Option<SurfaceCachedState>` in older Smithay.
+        };
+        // This just tests that the method runs without panic and logs (implicitly).
+        surface_data.ack_configure(configure);
+        // Add assertions here if ack_configure modifies SurfaceData state.
+        // For MVP, it's just logging.
+    }
+
+    #[test]
+    fn test_xdg_surface_handler_send_close() {
+        let surface_data = SurfaceData::new("test_xdg_send_close".to_string());
+        // This just tests that the method runs without panic and logs (implicitly).
+        surface_data.send_close();
     }
 }

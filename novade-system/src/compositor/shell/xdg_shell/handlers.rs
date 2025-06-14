@@ -132,16 +132,52 @@ impl XdgShellHandler for DesktopState {
         let wl_surface = surface.wl_surface();
         tracing::info!(surface_id = ?wl_surface.id(), "XDG Toplevel map request");
 
+        // Ensure the surface has our SurfaceData, indicating it's a surface we know and manage
+        // This also implies it has gone through CompositorHandler::new_surface
+        if wl_surface.data_map().get::<Arc<std::sync::Mutex<crate::compositor::surface_management::SurfaceData>>>().is_none() {
+            tracing::error!("Attempted to map XDG Toplevel (surface {:?}) that does not have our SurfaceData. This should not happen.", wl_surface.id());
+            // TODO: Consider destroying the client or the surface if it's in such an inconsistent state.
+            return;
+        }
+        // Smithay's XdgShellState also puts XdgSurfaceUserData, XdgTopLevelSurfaceData etc.
+        // We rely on those being present for an XDG surface.
+
         if let Some(window_arc) = find_managed_window_by_wl_surface(self, wl_surface) {
             {
                 let mut state_guard = window_arc.state.write().unwrap();
                 state_guard.is_mapped = true;
+                // Client is expected to commit with a buffer after map.
+                // Initial geometry might have been set in new_toplevel's configure.
+                // If not, window_arc.geometry() will be the default.
             }
+            // Map the window in space. Use its current geometry. Activate it.
             self.space.map_window(window_arc.clone(), window_arc.geometry().loc, true);
-            tracing::info!("XDG Toplevel {:?} mapped to space at {:?}", window_arc.id, window_arc.geometry().loc);
+            tracing::info!("XDG Toplevel {:?} (surface {:?}) mapped to space at {:?}.",
+                         window_arc.id, wl_surface.id(), window_arc.geometry().loc);
+
+            // Set initial focus to the newly mapped window (MVP behavior)
+            // This requires access to the primary seat.
+            let seat = &self.seat; // Assuming self.seat is the primary Seat<DesktopState>
+            if let Some(keyboard) = seat.get_keyboard() {
+                // Check if the surface is still alive before trying to focus
+                if wl_surface.alive() {
+                    // The focus_changed method on SeatHandler will be called as a result.
+                    keyboard.set_focus(self, Some(wl_surface.clone()), Serial::now());
+                    tracing::info!("Set keyboard focus to newly mapped XDG Toplevel {:?} (surface {:?}).",
+                                 window_arc.id, wl_surface.id());
+                } else {
+                    tracing::warn!("Attempted to focus newly mapped XDG Toplevel {:?} (surface {:?}), but its WlSurface is no longer alive.",
+                                 window_arc.id, wl_surface.id());
+                }
+            } else {
+                tracing::warn!("No keyboard found on seat {:?} to focus newly mapped XDG Toplevel {:?}.",
+                             seat.name(), window_arc.id);
+            }
+
             self.space.damage_all_outputs();
         } else {
-            tracing::warn!("Map request for unknown XDG Toplevel (surface_id: {:?})", wl_surface.id());
+            tracing::warn!("Map request for an XDG Toplevel whose WlSurface ({:?}) is not associated with any ManagedWindow.",
+                         wl_surface.id());
         }
     }
 
@@ -160,31 +196,13 @@ impl XdgShellHandler for DesktopState {
             tracing::warn!("Unmap request for unknown XDG Toplevel (surface_id: {:?})", wl_surface.id());
         }
     }
-    
-    fn ack_configure(&mut self, surface: WlSurface, configure: xdg_surface::Configure) {
-        let xdg_surface_data = surface.data_map().get::<XdgSurfaceUserData>().unwrap();
-        tracing::debug!(surface_id = ?surface.id(), serial = ?configure.serial, "XDG Surface ack_configure received. Initial: {}", xdg_surface_data.initial_configure_sent);
 
-        // Smithay's XdgShellState::handle_ack_configure can be used for basic validation if needed,
-        // but often custom logic is applied here.
-        // if let Err(e) = XdgShellState::handle_ack_configure(&surface, configure.clone()) {
-        //     tracing::warn!("Error handling ack_configure via Smithay's XdgShellState: {}", e);
-        // }
+    // This method is removed from XdgShellHandler for DesktopState.
+    // `xdg_surface.ack_configure` requests are dispatched by Smithay's delegate_xdg_shell!
+    // to the XdgSurfaceHandler implementation on the user_data associated with the xdg_surface.
+    // In our case, this is `SurfaceData` in `surface_management.rs`.
+    // fn ack_configure(&mut self, surface: WlSurface, configure: xdg_surface::Configure) { ... }
 
-        if let Some(window_arc) = find_managed_window_by_wl_surface(self, &surface) {
-            // The configure.data is SurfaceCachedState. If it contains new_window_geometry,
-            // it means the client is acknowledging a resize.
-            // We might need to update our ManagedWindow.current_geometry and re-map in space.
-            // However, Smithay's ToplevelSurface itself updates its current_state upon ack.
-            // Our ManagedWindow should ideally sync from ToplevelSurface::current_state() if needed.
-            // For now, just log.
-            if xdg_surface_data.initial_configure_sent && !window_arc.state.read().unwrap().is_mapped {
-                 tracing::debug!("ack_configure for initial configure of window {:?}. Window mapped state: {}", window_arc.id, window_arc.state.read().unwrap().is_mapped);
-            }
-        } else {
-            tracing::warn!("ack_configure for unknown surface: {:?}", surface.id());
-        }
-    }
 
     // Using find_managed_window_by_wl_surface (read-only) for these setters
     fn toplevel_request_set_title(&mut self, surface: &ToplevelSurface, title: String) {

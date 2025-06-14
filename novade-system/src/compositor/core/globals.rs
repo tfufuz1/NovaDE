@@ -151,6 +151,72 @@ pub fn create_all_wayland_globals(
 }
 
 
+// --- Output Global Management ---
+use smithay::output::{Output, Mode, PhysicalProperties, OutputHandler}; // Added OutputHandler
+use smithay::utils::Transform;
+
+/// Creates and registers an initial "virtual" output for the compositor.
+///
+/// For the MVP, this output has fixed properties:
+/// - Name: "HEADLESS-1"
+/// - Mode: 1920x1080 @ 60Hz
+/// - Physical properties: Default/unknown
+/// - Transform: Normal
+///
+/// The `smithay::output::Output` object handles the creation of the `wl_output` global.
+/// This function then integrates the output into the `DesktopState` using the `OutputHandler` trait.
+///
+/// It is expected to be called once during compositor initialization.
+pub fn create_initial_output(state: &mut DesktopState) {
+    tracing::info!("Creating initial headless output 'HEADLESS-1'");
+
+    let mode = Mode {
+        size: (1920, 1080).into(), // 1920x1080 resolution
+        refresh: 60_000,           // 60Hz (in mHz)
+    };
+
+    let physical_properties = PhysicalProperties {
+        size: (0, 0).into(), // Unknown physical size
+        subpixel: smithay::output::Subpixel::Unknown,
+        make: "NovaDE".to_string(),
+        model: "Virtual Headless".to_string(),
+    };
+
+    // The Output::new method creates the wl_output global on the provided display handle.
+    // The DesktopState must implement GlobalDispatch<WlOutput, OutputData>,
+    // which is typically handled by smithay::output::Output itself if it's created
+    // with the display handle where DesktopState is the primary dispatching state.
+    // Smithay 0.10+ Output::new takes name, physical_properties, and an optional logger.
+    // It automatically creates the global.
+    let new_output = Output::new(
+        "HEADLESS-1".to_string(),
+        physical_properties,
+        Some(tracing::Span::current().into()), // Or None if no specific logger
+    );
+
+    // Set preferred and current mode
+    new_output.add_mode(mode);
+    new_output.set_preferred_mode(mode);
+    if !new_output.set_current_mode(mode) {
+        tracing::error!("Failed to set current mode for initial output HEADLESS-1. This should not happen with a newly created output and mode.");
+        // Depending on error handling strategy, might panic or try to recover.
+        // For MVP, logging an error is sufficient.
+    }
+    new_output.set_transform(Transform::Normal); // Set default transform
+
+    // Call the OutputHandler::new_output method on DesktopState to integrate it.
+    // This will map it to the space and add it to state.outputs.
+    // The OutputHandler trait is implemented for DesktopState in output_handlers.rs.
+    state.new_output(new_output); // This calls the method from the OutputHandler trait
+
+    tracing::info!("Successfully created and registered 'HEADLESS-1' output with mode {:?} and refresh {} mHz.", mode.size, mode.refresh);
+    // Note: The global for wl_output is created by `Output::new` itself.
+    // `OutputManagerState` (in DesktopState) will be aware of this output via the `OutputHandler::new_output` call.
+    // Clients will see this output when they bind to wl_registry and then to specific outputs.
+}
+
+
+
 // --- XDG WM Base Global Dispatch ---
 use smithay::wayland::shell::xdg::{XdgWmBase, XdgWmBaseClientData, XdgShellState}; // Added XdgShellState here for new_client
 
@@ -214,3 +280,85 @@ impl GlobalDispatch<WlShm, ()> for DesktopState {
         data_init.init(resource, ());
     }
 }
+
+// --- Seat Global Dispatch ---
+// Smithay's SeatState::new_wl_seat function handles the creation of the wl_seat global
+// and its registration with the display. It also sets up the necessary dispatch logic
+// internally, provided that DesktopState (or whatever state struct is used) implements
+// SeatHandler and GlobalDispatch<WlSeat, SeatGlobalData>.
+//
+// The `GlobalDispatch<WlSeat, SeatGlobalData>` implementation for `DesktopState` would look like this:
+// (This is often provided by smithay::delegate_seat! macro or similar mechanisms if
+// `SeatState` is used as intended.)
+
+/*
+use smithay::wayland::seat::{SeatGlobalData, WlSeat}; // WlSeat might be from reexports::wayland_server::protocol::wl_seat
+
+impl GlobalDispatch<WlSeat, SeatGlobalData> for DesktopState {
+    fn bind(
+        _state: &mut Self,
+        _handle: &DisplayHandle,
+        _client: &Client,
+        resource: New<WlSeat>,
+        _global_data: &SeatGlobalData, // Data associated with the wl_seat global itself
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        // SeatState::new_wl_seat already created the global.
+        // The binding of a client to this global instance is what this `bind` call achieves.
+        // Smithay's SeatState will typically handle the initialization of the client's seat resource.
+        // We might need to call a method on self.seat_state or self.seat to finalize client binding
+        // if not automatically handled by just data_init.init.
+        // However, for wl_seat, the SeatState often manages this transparently when the global is created
+        // with DesktopState as the handler type. The delegate_seat! macro helps here.
+
+        // This init call binds the wl_seat resource for the specific client.
+        // The user_data for the wl_seat resource itself is typically managed by SeatState.
+        // Smithay's `Seat::add_client` or similar internal logic handles this.
+        // It's possible that `data_init.init` with appropriate user_data (often derived from Seat::new_client_data())
+        // is all that's needed if not using a higher-level abstraction from SeatState for this.
+
+        // Assuming `self.seat` is the main `Seat<Self>` instance.
+        // When a client binds to `wl_seat`, a new `wl_seat` resource is created for that client.
+        // This resource needs to be associated with your `Seat<Self>` logic.
+        // Smithay's `SeatState` usually handles this association if the global was created via `new_wl_seat`.
+        // The `delegate_seat!` macro ensures that requests to `wl_seat` resources are forwarded
+        // to the `SeatData` and then to `SeatHandler` methods on `DesktopState`.
+
+        // For a client binding to wl_seat, Smithay needs to associate the new wl_seat resource
+        // with the server-side Seat object. This is often done by initializing the resource
+        // with user data that links it to the server's Seat. Smithay's SeatState typically
+        // provides a way to do this, or it's handled by the new_wl_seat mechanism.
+
+        // If using `Seat::add_client` pattern (more manual):
+        // let seat_data = self.seat.add_client(client_resource_id); // client_resource_id is resource.id()
+        // data_init.init(resource, seat_data);
+
+        // If relying on `SeatState` and `delegate_seat!`:
+        // The init might just need default user data for the WlSeat resource if Smithay handles
+        // the connection internally. Often, the resource itself doesn't need complex user data
+        // because its state is derived from the main `Seat<Self>` object via `SeatData::seat()`.
+        // Smithay's `Seat::new_client_data()` is often used here.
+        let client_seat_data = smithay::wayland::seat::SeatData::new(); // This is a marker.
+                                                                    // Actual user_data for wl_seat might be more complex
+                                                                    // or managed by SeatState/Seat.
+                                                                    // The `delegate_seat!` macro implies that requests to
+                                                                    // this client's wl_seat resource will be handled by
+                                                                    // methods on `DesktopState` via `SeatData`.
+                                                                    // The important part is that the resource is initialized.
+        data_init.init(resource, client_seat_data);
+
+        tracing::info!("Client bound to WlSeat global. Resource ID: {:?}", resource.id());
+    }
+
+    // Optional: Implement can_view if access to wl_seat needs to be restricted.
+    // fn can_view(client: Client, global_data: &SeatGlobalData) -> bool { true }
+}
+*/
+
+// Note: The `delegate_seat!(DesktopState);` macro in `compositor/core/state.rs` effectively
+// generates the necessary `GlobalDispatch` and other `Dispatch` implementations for `wl_seat`
+// and its associated objects like `wl_pointer`, `wl_keyboard`, `wl_touch`, assuming `DesktopState`
+// is configured as the handler for these.
+// Thus, explicit `GlobalDispatch<WlSeat, ...>` might not be needed here if `delegate_seat`
+// covers it, which it usually does for the main `wl_seat` global created by `SeatState::new_wl_seat`.
+// The global itself is created in `DesktopState::new()`.

@@ -39,7 +39,7 @@ pub enum RendererError {
     Unsupported(String), // Moved from original list to group with other errors
 }
 
-pub trait RenderableTexture: Send + Sync + std::fmt::Debug {
+pub trait RenderableTexture: Send + Sync + std::fmt::Debug + std::any::Any {
     fn id(&self) -> Uuid;
     fn bind(&self, slot: u32) -> Result<(), RendererError>;
     fn width_px(&self) -> u32;

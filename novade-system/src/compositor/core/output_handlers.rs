@@ -7,9 +7,10 @@ use smithay::{
     utils::Point,
     desktop::Space,
 };
-use crate::compositor::core::state::NovadeCompositorState;
+// Corrected: NovadeCompositorState should be DesktopState
+use crate::compositor::core::state::DesktopState;
 
-impl OutputHandler for NovadeCompositorState {
+impl OutputHandler for DesktopState {
     fn output_state(&mut self) -> &mut OutputManagerState {
         &mut self.output_manager_state
     }
