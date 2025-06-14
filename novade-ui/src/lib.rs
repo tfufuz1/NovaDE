@@ -4,6 +4,7 @@
 //! It builds upon the System Layer to create a cohesive and user-friendly desktop experience.
 
 // Re-export key modules for convenience
+pub mod assistant_ui; // Added for Smart Assistant
 pub mod error;
 pub mod window_manager_ui;
 pub mod desktop_ui;

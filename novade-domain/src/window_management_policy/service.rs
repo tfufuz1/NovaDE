@@ -79,6 +79,18 @@ pub trait WindowManagementPolicyService: Send + Sync {
     async fn get_effective_snapping_policy(&self) -> Result<WindowSnappingPolicy, WindowPolicyError>;
     async fn get_effective_focus_policy(&self) -> Result<FocusPolicy, WindowPolicyError>;
     async fn get_effective_new_window_placement_strategy(&self) -> Result<NewWindowPlacementStrategy, WindowPolicyError>;
+
+    // TODO: Assistant Integration - Needed by Smart Assistant
+    // While this service is about policy, the assistant might trigger actions that depend on or change policy,
+    // or query window states. Actual window manipulation (focus, close, move, resize) might belong
+    // to a different service (e.g., a 'WindowControlService' or 'WindowManagerService').
+    // If such a service exists, similar comments would apply there.
+    // Examples:
+    // fn get_focused_window_title(&self) -> Option<String>; // Needs access to window state
+    // fn list_open_windows_summary(&self) -> Vec<WindowSummary>; // WindowSummary { id: WindowIdentifier, title: String, app_name: String }
+    // async fn focus_window_by_criteria(&self, criteria: WindowSearchCriteria) -> Result<(), WindowPolicyError>; // criteria could be title substring, app_name, etc.
+    // async fn close_window_by_criteria(&self, criteria: WindowSearchCriteria) -> Result<(), WindowPolicyError>;
+    // async fn set_window_state(&self, window_id: &WindowIdentifier, state: WindowDesiredState) -> Result<(), WindowPolicyError>; // state: Maximized, Minimized, TiledLeft etc.
 }
 
 // --- DefaultWindowManagementPolicyService Implementation ---

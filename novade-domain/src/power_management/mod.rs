@@ -216,4 +216,10 @@ pub trait PowerManagementService: Send + Sync {
     ///
     /// A `Result` containing a map of inhibitor IDs to reasons.
     async fn get_sleep_inhibitors(&self) -> Result<std::collections::HashMap<String, String>, crate::error::DomainError>;
+
+    // TODO: Assistant Integration - Needed by Smart Assistant
+    // async fn get_current_power_profile(&self) -> Result<String, crate::error::DomainError>; // e.g., "balanced", "power-saver", "performance"
+    // async fn set_power_profile(&self, profile_name: &str) -> Result<(), crate::error::DomainError>;
+    // `get_batteries` already provides percentage.
+    // async fn is_lid_closed(&self) -> Result<bool, crate::error::DomainError>; // May need specific hardware integration not covered by UPower.
 }

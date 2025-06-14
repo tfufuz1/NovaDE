@@ -39,6 +39,12 @@ pub trait WorkspaceManagerService: Send + Sync {
     async fn save_configuration(&self) -> Result<(), WorkspaceManagerError>;
     fn subscribe_to_workspace_events(&self) -> broadcast::Receiver<WorkspaceEvent>;
     async fn reorder_workspace(&self, workspace_id: WorkspaceId, new_index: usize) -> Result<(), WorkspaceManagerError>;
+
+    // TODO: Assistant Integration - Needed by Smart Assistant
+    // Consider methods like:
+    // fn get_active_workspace_details(&self) -> Option<SomeWorkspaceDetailStruct>; // Currently active_workspace_id() and get_workspace() can be combined.
+    // fn list_workspaces_summary(&self) -> Vec<SomeWorkspaceSummaryStruct>; // Currently all_workspaces_ordered() provides full details.
+    // async fn switch_to_workspace_by_name(&self, name: &str) -> Result<(), WorkspaceManagerError>; // Useful for natural language commands.
 }
 
 // --- WorkspaceManagerInternalState Struct ---

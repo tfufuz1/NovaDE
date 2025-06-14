@@ -6,6 +6,7 @@
 
 // Declare submodules
 pub mod app_identifier;
+pub mod assistant;
 pub mod color;
 // pub mod enums; // enums.rs is now empty after Orientation was moved
 pub mod display;

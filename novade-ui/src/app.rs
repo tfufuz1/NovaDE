@@ -1,264 +1,171 @@
-//! Main application module for the NovaDE UI layer.
-//!
-//! This module provides the main application for the NovaDE desktop environment.
-
-use iced::{Application, Command, Element, Settings, Subscription, executor, window, Background, Color};
-use iced::widget::{Container, Column, Row, Space};
+// novade-ui/src/app.rs
+use iced::{Application, Command, Element, Settings, Theme, executor, Subscription, alignment};
+use iced::widget::{container, column, text, button, Space}; // Basic iced imports
 use std::sync::Arc;
-use novade_system::SystemContext;
-use crate::error::{UiError, UiResult};
-use crate::styles::ContainerStyle;
-use crate::desktop_ui::{DesktopUi, Message as DesktopMessage};
-use crate::panel_ui::{PanelUi, Message as PanelMessage};
-use crate::window_manager_ui::{WindowManagerUi, Message as WindowManagerMessage};
-use crate::application_launcher::{ApplicationLauncher, Message as LauncherMessage};
-use crate::settings_ui::{SettingsUi, Message as SettingsMessage};
+use tokio::sync::mpsc; // For communication between tokio tasks and Iced app
 
-/// Main application message.
-#[derive(Debug, Clone)]
-pub enum Message {
-    /// A desktop message.
-    Desktop(DesktopMessage),
-    /// A panel message.
-    Panel(PanelMessage),
-    /// A window manager message.
-    WindowManager(WindowManagerMessage),
-    /// An application launcher message.
-    Launcher(LauncherMessage),
-    /// A settings message.
-    Settings(SettingsMessage),
-    /// The application was initialized.
-    Initialized,
-    /// The application should exit.
-    Exit,
+// Assuming assistant_ui is made public in lib.rs or mod.rs
+use crate::assistant_ui::widgets::{AssistantMainWidget, AssistantUIMessage};
+use crate::assistant_ui::controller::{AssistantUIController, AssistantUIUpdate, create_default_assistant_controller};
+
+// Placeholder for other UI components and messages if they exist
+// use crate::desktop_ui::{DesktopUi, Message as DesktopMessage};
+// use crate::panel_ui::{PanelUi, Message as PanelMessage};
+// ... and so on for other UI parts defined in the original app.rs
+
+// For simplicity in this focused subtask, we'll stub out other UI parts.
+struct DesktopUiStub;
+impl DesktopUiStub { fn view(&self) -> Element<'static, Message> { text("Desktop Area").into() } }
+struct PanelUiStub;
+impl PanelUiStub { fn view(&self) -> Element<'static, Message> { text("Panel Area").into() } }
+
+
+pub struct NovaDeApp {
+    assistant_widget: AssistantMainWidget,
+    // The controller is not stored directly in NovaDeApp state typically.
+    // Its methods are called, and it communicates back via messages through the subscription.
+    // The Arc<AssistantUIController> might be passed to UI elements if they need to call its methods directly
+    // (but usually, they send messages that `update` then uses to call the controller).
+    // For this prototype, the widget holds an Arc to the controller.
+
+    // Channel to receive updates from AssistantUIController's async tasks
+    // The receiver part is consumed by the subscription.
+    // The sender part was given to the controller.
+    _assistant_result_sender: mpsc::Sender<AssistantUIUpdate>, // Keep sender to avoid dropping channel immediately
+    assistant_result_receiver: Option<mpsc::Receiver<AssistantUIUpdate>>, // Option to allow take() for subscription
 }
 
-/// Main application.
-pub struct NovaDeApp {
-    /// The system context.
-    system_context: Arc<SystemContext>,
-    /// The desktop UI.
-    desktop_ui: DesktopUi,
-    /// The panel UI.
-    panel_ui: PanelUi,
-    /// The window manager UI.
-    window_manager_ui: WindowManagerUi,
-    /// The application launcher.
-    application_launcher: ApplicationLauncher,
-    /// The settings UI.
-    settings_ui: SettingsUi,
+#[derive(Debug, Clone)]
+pub enum Message {
+    ToggleAssistant,
+    AssistantGUIMessage(AssistantUIMessage), // Renamed to avoid conflict if AssistantUIMessage was top-level
+    AssistantControllerUpdate(AssistantUIUpdate), // Message carrying result from controller's async task
+    Loaded, // Placeholder for app loaded event
+    None, // No-op message
 }
 
 impl Application for NovaDeApp {
     type Executor = executor::Default;
     type Message = Message;
-    type Theme = iced::Theme;
+    type Theme = Theme;
     type Flags = ();
 
-    /// Creates a new application.
-    ///
-    /// # Arguments
-    ///
-    /// * `flags` - The application flags
-    ///
-    /// # Returns
-    ///
-    /// A new application.
     fn new(_flags: ()) -> (Self, Command<Message>) {
-        // Initialize system context
-        let system_context = Arc::new(SystemContext::new());
+        let (sender, receiver) = mpsc::channel(100);
+        let assistant_controller = Arc::new(create_default_assistant_controller(sender.clone()));
         
-        // Initialize UI components
-        let desktop_ui = DesktopUi::new(system_context.clone());
-        let panel_ui = PanelUi::new(system_context.clone());
-        let window_manager_ui = WindowManagerUi::new(system_context.clone());
-        let application_launcher = ApplicationLauncher::new(system_context.clone());
-        let settings_ui = SettingsUi::new(system_context.clone());
-        
-        let app = NovaDeApp {
-            system_context,
-            desktop_ui,
-            panel_ui,
-            window_manager_ui,
-            application_launcher,
-            settings_ui,
-        };
-        
-        // Initialize the application
-        let command = Command::perform(
-            async { },
-            |_| Message::Initialized
-        );
-        
-        (app, command)
+        (
+            NovaDeApp {
+                assistant_widget: AssistantMainWidget::new(assistant_controller),
+                _assistant_result_sender: sender,
+                assistant_result_receiver: Some(receiver), // Store receiver to be used in subscription
+            },
+            Command::perform(async {}, |_| Message::Loaded), // Simulate app loaded
+        )
     }
 
-    /// Gets the application title.
-    ///
-    /// # Returns
-    ///
-    /// The application title.
     fn title(&self) -> String {
-        String::from("NovaDE Desktop Environment")
+        String::from("NovaDE Prototype with Assistant")
     }
 
-    /// Updates the application.
-    ///
-    /// # Arguments
-    ///
-    /// * `message` - The message to process
-    ///
-    /// # Returns
-    ///
-    /// A command to be processed.
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
-            Message::Desktop(msg) => {
-                self.desktop_ui.update(msg)
-                    .map(Message::Desktop)
+            Message::Loaded => {
+                println!("[App] NovaDeApp loaded.");
             }
-            Message::Panel(msg) => {
-                self.panel_ui.update(msg)
-                    .map(Message::Panel)
+            Message::ToggleAssistant => {
+                println!("[App] Toggling Assistant Visibility.");
+                self.assistant_widget.set_visible(!self.assistant_widget.is_visible());
             }
-            Message::WindowManager(msg) => {
-                self.window_manager_ui.update(msg)
-                    .map(Message::WindowManager)
+            Message::AssistantGUIMessage(asst_msg) => {
+                // This message comes from the assistant's view elements (e.g., TextInput, Button)
+                self.assistant_widget.update(asst_msg);
             }
-            Message::Launcher(msg) => {
-                self.application_launcher.update(msg)
-                    .map(Message::Launcher)
+            Message::AssistantControllerUpdate(update) => {
+                // This message comes from the subscription listening to AssistantUIController results
+                println!("[App] Received controller update: {:?}", update);
+                self.assistant_widget.update(AssistantUIMessage::ControllerUpdate(update));
             }
-            Message::Settings(msg) => {
-                self.settings_ui.update(msg)
-                    .map(Message::Settings)
-            }
-            Message::Initialized => {
-                // Start subscriptions
-                Command::batch(vec![
-                    // Start clock subscription
-                    PanelUi::start_clock_subscription()
-                        .map(Message::Panel),
-                    
-                    // Start battery subscription
-                    PanelUi::start_battery_subscription(self.system_context.power_manager.clone())
-                        .map(Message::Panel),
-                    
-                    // Start network subscription
-                    PanelUi::start_network_subscription(self.system_context.network_manager.clone())
-                        .map(Message::Panel),
-                    
-                    // Start window list subscription
-                    WindowManagerUi::start_window_list_subscription(self.system_context.window_manager.clone())
-                        .map(Message::WindowManager),
-                ])
-            }
-            Message::Exit => {
-                // Exit the application
-                window::close()
-            }
+            Message::None => {}
+        }
+        Command::none()
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        // Consume the receiver for the subscription. This can only be done once.
+        // If the app is reloaded (e.g. hot reload), this setup might need adjustment.
+        // For a typical app lifecycle, it's fine.
+        if let Some(receiver) = std::mem::take(&mut self.assistant_result_receiver) {
+             struct AssistantEventsSubscription; // Unique ID for the subscription
+             iced::subscription::channel(
+                 std::any::TypeId::of::<AssistantEventsSubscription>(),
+                 100, // Buffer size for the channel within Iced
+                 |mut output| async move {
+                     let mut local_receiver = receiver; // Move receiver into the async block
+                     loop {
+                         match local_receiver.recv().await {
+                             Some(update) => {
+                                 // Send the received update to the Iced application's update method
+                                 if output.send(Message::AssistantControllerUpdate(update)).await.is_err() {
+                                     eprintln!("[Subscription] Failed to send controller update to app. Channel closed.");
+                                     break;
+                                 }
+                             }
+                             None => {
+                                 // Channel closed
+                                 eprintln!("[Subscription] AssistantUIController result channel closed.");
+                                 break;
+                             }
+                         }
+                     }
+                 },
+             )
+        } else {
+            Subscription::none()
         }
     }
 
-    /// Renders the application.
-    ///
-    /// # Returns
-    ///
-    /// The application element.
     fn view(&self) -> Element<Message> {
-        // Create the main column
-        let mut content = Column::new()
-            .width(iced::Length::Fill)
-            .height(iced::Length::Fill);
-        
-        // Add the desktop
-        content = content.push(
-            self.desktop_ui.view()
-                .map(Message::Desktop)
-        );
-        
-        // Add overlays
-        let overlays = Column::new()
-            .width(iced::Length::Fill)
-            .height(iced::Length::Fill);
-        
-        // Add the window manager
-        let overlays = overlays.push(
-            self.window_manager_ui.view()
-                .map(Message::WindowManager)
-        );
-        
-        // Add the application launcher
-        let overlays = overlays.push(
-            self.application_launcher.view()
-                .map(Message::Launcher)
-        );
-        
-        // Add the settings
-        let overlays = overlays.push(
-            self.settings_ui.view()
-                .map(Message::Settings)
-        );
-        
-        // Add the panel
-        let panel = self.panel_ui.view()
-            .map(Message::Panel);
-        
-        // Combine everything
-        Container::new(
-            Column::new()
-                .width(iced::Length::Fill)
-                .height(iced::Length::Fill)
-                .push(content)
-                .push(
-                    Container::new(overlays)
-                        .width(iced::Length::Fill)
-                        .height(iced::Length::Fill)
-                        .style(ContainerStyle::Default)
-                )
-                .push(panel)
-        )
-        .width(iced::Length::Fill)
-        .height(iced::Length::Fill)
-        .style(ContainerStyle::Default)
-        .into()
+        let main_content = column![
+            button(text("Toggle Assistant (Show/Hide)")).on_press(Message::ToggleAssistant),
+            Space::with_height(iced::Length::Units(20)), // Use fixed units instead of Fill for Space
+            text("NovaDE Main Content Area (Placeholder)"),
+            // Other main UI elements would go here
+            // Example: DesktopUiStub.view().map(|_| Message::None), // Map stub messages to None
+            // Example: PanelUiStub.view().map(|_| Message::None),
+        ]
+        .spacing(20)
+        .padding(20)
+        .width(Length::Fill)
+        .align_items(alignment::Alignment::Center);
+
+        let assistant_view_element = self.assistant_widget.view().map(Message::AssistantGUIMessage);
+
+        // Layout: Main content on top, assistant UI below it.
+        let full_layout = column![
+            main_content,
+            assistant_view_element, // This will be empty if assistant is not visible
+        ]
+        .width(Length::Fill)
+        .align_items(alignment::Alignment::Center);
+
+        container(full_layout)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x()
+            .center_y()
+            .into()
     }
 
-    /// Gets the application subscriptions.
-    ///
-    /// # Returns
-    ///
-    /// The application subscriptions.
-    fn subscription(&self) -> Subscription<Message> {
-        Subscription::none()
+    fn theme(&self) -> Theme {
+        Theme::Dark // Or Theme::Light, or a custom theme
     }
 }
 
-/// Runs the NovaDE application.
-///
-/// # Returns
-///
-/// `Ok(())` if the application ran successfully, or an error if it failed.
-pub fn run() -> UiResult<()> {
-    let settings = Settings {
-        window: window::Settings {
-            size: (1280, 720),
-            position: window::Position::Centered,
-            min_size: Some((800, 600)),
-            max_size: None,
-            resizable: true,
-            decorations: true,
-            transparent: false,
-            always_on_top: false,
-            icon: None,
-        },
-        default_font: None,
-        default_text_size: 16,
-        antialiasing: true,
-        exit_on_close_request: true,
-        ..Default::default()
-    };
-    
-    NovaDeApp::run(settings)
-        .map_err(|err| UiError::new(format!("Failed to run application: {}", err)))
-}
+// The main function to run the app (usually in main.rs, but included here for completeness of the example)
+// pub fn main() -> iced::Result {
+//     NovaDeApp::run(Settings {
+//         // ... any custom settings ...
+//         ..Settings::default()
+//     })
+// }
