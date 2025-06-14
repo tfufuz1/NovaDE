@@ -7,6 +7,7 @@ This document details the current implementation status of the NovaDE project, b
 - [Domain Layer (`novade-domain`)](#domain-layer-novade-domain)
 - [System Layer (`novade-system`)](#system-layer-novade-system)
 - [UI Layer (`novade-ui`)](#ui-layer-novade-ui)
+- [Feature Implementations](#feature-implementations)
 
 ---
 
@@ -220,13 +221,44 @@ Presents the GUI. **Significant finding: Code for two UI toolkits (GTK/Libadwait
     - Implementation status of sub-components (`DesktopUi`, etc.) not deeply analyzed.
     - Purpose/status relative to GTK UI is unclear. `build.rs` compiling GResources suggests GTK is a primary target.
 
-### Micro Level (Noteworthy Details - GTK Path)
-- Custom widgets (`ClockDateTimeWidget`, `WorkspaceIndicatorWidget`) are GObject subclasses.
-- `WorkspaceIndicatorWidget` demonstrates a good pattern for async domain updates to GTK UI.
-- `NovaSettingsWindow` uses Libadwaita preferences widgets.
-
 ### Dual UI Toolkit Anomaly
 The presence of both GTK and Iced code is a major point. The GTK path in `main.rs` appears more actively developed for the desktop shell. This needs clarification in project strategy.
+
+---
+
+## Feature Implementations
+
+### System Health Dashboard (SPEC-FEATURE-SYSTEM-HEALTH-DASHBOARD-v0.1.0)
+
+- **Overall Status:** Basic end-to-end implementation is functional. Data flows from system collectors, through the domain service, to the GTK UI.
+- **Core Layer (`novade-core`):**
+  - **Data Types (`src/types/system_health.rs`):** Comprehensive structures for `CpuMetrics`, `MemoryMetrics`, `DiskActivityMetrics`, `DiskSpaceMetrics`, `NetworkActivityMetrics`, `TemperatureMetric`, `LogEntry`, `LogFilter`, `DiagnosticTestInfo`, `DiagnosticTestResult`, and `Alert` are defined and used.
+  - **Configuration (`src/config/mod.rs` & `src/types/system_health.rs`):** `SystemHealthDashboardConfig` is defined and integrated into the main `CoreConfig` (as `system_health` field), allowing for TOML-based configuration of refresh intervals and alert thresholds. Default configurations are provided.
+- **System Layer (`novade-system`):**
+  - **Collectors & Runners (`src/system_health_collectors/`):**
+    - `LinuxCpuMetricsCollector`: Implemented to collect CPU usage from `/proc/stat`. Includes Rustdoc comments.
+    - `LinuxMemoryMetricsCollector`: Implemented to collect memory and swap usage from `/proc/meminfo`. Includes Rustdoc comments.
+    - `LinuxDiskMetricsCollector`: Implemented to collect disk I/O activity from `/proc/diskstats` and space usage from `/proc/mounts` (using `statvfs`). Includes Rustdoc comments.
+    - `LinuxNetworkMetricsCollector`: Implemented to collect network interface activity from `/proc/net/dev`. Includes Rustdoc comments.
+    - `LinuxTemperatureMetricsCollector`: Implemented to collect temperatures from `/sys/class/thermal/thermal_zone*`. Includes Rustdoc comments.
+    - `JournaldLogHarvester`: Implemented to query logs from journald using the `sd-journal` crate. Provides basic polling-based streaming. Includes Rustdoc comments.
+    - `BasicDiagnosticsRunner`: Implemented to list available tests and run a basic ping test using the system `ping` command. Placeholder for SMART disk check. Includes Rustdoc comments.
+  - **Error Handling (`src/error.rs`):** `SystemError::MetricCollectorError` documented for error reporting from collectors.
+  - **Module (`src/system_health_collectors/mod.rs`):** Module-level documentation and Rustdoc for traits added.
+- **Domain Layer (`novade-domain`):**
+  - **Service (`src/system_health_service/service.rs`):**
+    - `DefaultSystemHealthService` implemented, orchestrating data collection from system layer components.
+    - Provides methods to get metrics, query/stream logs, and list/run diagnostic tests.
+    - Implements basic alarm evaluation logic for CPU, memory, and disk space metrics based on thresholds from `SystemHealthDashboardConfig` (accessed via `core_config.system_health`). Active alerts are managed in an internal `Arc<Mutex<HashMap<String, Alert>>>`.
+    - Rustdoc comments added for the service trait, struct, new method, and inline comments for `evaluate_alerts`.
+  - **Error Handling (`src/error.rs`):** `DomainError::SystemHealth` and `SystemHealthError` variants defined and documented for service-level errors, with mapping from system layer errors.
+  - **Module (`src/system_health_service/mod.rs`):** Module-level documentation added.
+- **UI Layer (`novade-ui` - GTK/Libadwaita):**
+  - **Main View (`src/system_health_dashboard/main_view.rs`):** `SystemHealthDashboardView` created, using a `gtk::Notebook` to host different panels. Receives and distributes the `SystemHealthService` instance to child panels.
+  - **Metrics Panel (`src/system_health_dashboard/metrics_panel.rs`):** Connected to `SystemHealthService`. Periodically fetches and displays CPU, memory, disk, network, and temperature metrics using `gtk::Label`s within `gtk::Grid`s. TODOs for UI/unit tests added.
+  - **Log Viewer Panel (`src/system_health_dashboard/log_viewer_panel.rs`):** Connected to `SystemHealthService`. Allows querying logs with keyword and level filters. Displays results in a `gtk::TextView`. TODOs for UI/unit tests added.
+  - **Diagnostics Panel (`src/system_health_dashboard/diagnostics_panel.rs`):** Connected to `SystemHealthService`. Lists available diagnostic tests (ping, SMART placeholder) and allows running them. Displays results in a `gtk::TextView`. TODOs for UI/unit tests added.
+  - **Alerts Panel (`src/system_health_dashboard/alerts_panel.rs`):** Connected to `SystemHealthService`. Periodically fetches and displays active alerts in a `gtk::ListBox`. TODOs for UI/unit tests added.
 
 ---
 *(End of `EXISTING_IMPLEMENTATIONS.md`)*

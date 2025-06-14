@@ -30,4 +30,9 @@ pub enum SystemError {
     SystemMcpError(String),
     #[error("Application launch failed for '{0}': {1}")]
     ApplicationLaunchFailed(String, String),
+    /// Errors specific to metric collection tasks.
+    /// This could involve issues like failing to read or parse system files (e.g., /proc files),
+    /// calculation errors, or unexpected data formats.
+    #[error("Metric collector error: {0}")]
+    MetricCollectorError(String),
 }

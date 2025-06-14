@@ -10,6 +10,10 @@ serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync"] }
 thiserror = "1.0.48"
 serde_json = "1.0"
+novade-system = { path = "../novade-system" }
+futures-core = "0.3"
+futures-util = "0.3" # Added for TryStreamExt
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

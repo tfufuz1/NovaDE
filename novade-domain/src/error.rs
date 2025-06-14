@@ -220,6 +220,42 @@ pub enum WindowManagementError {
     /// Other error.
     #[error("Window management error: {0}")]
     Other(String),
+
+    #[error("System health service error: {0}")]
+    SystemHealth(#[from] SystemHealthError),
+}
+
+/// Errors related to the System Health service operations.
+#[derive(Debug, thiserror::Error)]
+pub enum SystemHealthError {
+    /// An error propagated from the underlying system layer (e.g., `novade-system`).
+    /// This typically indicates issues with accessing system resources or parsing system files.
+    #[error("System layer error: {0}")]
+    SystemLayerError(#[from] novade_system::error::SystemError),
+
+    /// An error related to configuration problems for the system health service.
+    /// For example, missing or invalid alert thresholds in `CoreConfig`.
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
+    /// A failure during the collection of a specific metric.
+    /// The string provides more context about the metric and failure.
+    #[error("Metric collection failed: {0}")]
+    MetricError(String),
+
+    /// A failure during log harvesting operations (querying or streaming).
+    /// The string provides more details about the failure.
+    #[error("Log harvesting failed: {0}")]
+    LogError(String),
+
+    /// A failure during the execution of a diagnostic test.
+    /// The string provides context about the test and the error.
+    #[error("Diagnostic run failed: {0}")]
+    DiagnosticError(String),
+
+    /// Indicates that a requested resource or item (e.g., a specific diagnostic test ID) was not found.
+    #[error("Not found: {0}")]
+    NotFound(String),
 }
 
 /// Power management error type.
