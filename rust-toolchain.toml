@@ -2,4 +2,4 @@
 channel = "1.81.0"
 channel = "stable" # Oder z.B. "stable", "nightly" oder eine spezifische Version "1.75.0"
 # Komponenten sind optional, aber manchmal nützlich
-# components = [ "rustfmt", "clippy" ]
+components = [ "rustup","rustfmt", "clippy" ]
