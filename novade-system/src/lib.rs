@@ -11,10 +11,14 @@ pub mod system_services;
 pub mod system_settings_service; // Added for assistant integration
 pub mod window_info_provider;
 pub mod window_mechanics;
+//ANCHOR [NovaDE Developers <dev@novade.org>] Added debug_interface module.
+pub mod debug_interface;
 pub use application_manager::{ApplicationManager, AppInfo}; // Added for assistant integration
 pub use filesystem_service::{FileSystemService, FileInfo, UserContext}; // Added for assistant integration
 pub use system_settings_service::{SystemSettingsService, SystemSettingInfo}; // Added for assistant integration
 pub use window_info_provider::{FocusedWindowDetails, SystemWindowInfoProvider, StubSystemWindowInfoProvider, WaylandWindowInfoProvider};
+//ANCHOR [NovaDE Developers <dev@novade.org>] Re-export DebugInterface components.
+pub use debug_interface::{DebugInterface, DebugCommand, ProfilerTarget, StateSnapshot};
 
 pub mod dbus_menu_provider; // Assuming this was added from a previous task
 pub use dbus_menu_provider::{DBusMenuError, DBusMenuProvider, StubDBusMenuProvider}; // Assuming

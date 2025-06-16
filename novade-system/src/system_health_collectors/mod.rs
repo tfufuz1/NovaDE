@@ -25,19 +25,37 @@ pub mod temperature_collector;
 pub mod journald_harvester;
 pub mod basic_diagnostics_runner;
 // Optionally: pub mod disk_smart_runner;
+pub mod frame_time_collector; //ANCHOR [NovaDE Developers <dev@novade.org>] Added frame time collector module
+pub mod gpu_collector; //ANCHOR [NovaDE Developers <dev@novade.org>] Added GPU collector module
+pub mod regression_detector; //ANCHOR [NovaDE Developers <dev@novade.org>] Added regression detector module
+#[cfg(feature = "prometheus_exporter")]
+//ANCHOR [NovaDE Developers <dev@novade.org>] Added metrics_exporter module (conditional).
+pub mod metrics_exporter;
 
 // Re-export collectors and traits
-pub use cpu_collector::LinuxCpuMetricsCollector;
-pub use memory_collector::LinuxMemoryMetricsCollector;
+pub use cpu_collector::LinuxCpuMetricsCollector; // Assuming this is the public API for CPU for now
+//ANCHOR [NovaDE Developers <dev@novade.org>] Replaced LinuxMemoryMetricsCollector with the new MemoryCollector.
+pub use memory_collector::MemoryCollector;
+pub use memory_collector::ExtendedMemoryMetrics; // Also export the new metrics struct
 pub use disk_collector::LinuxDiskMetricsCollector;
 pub use network_collector::LinuxNetworkMetricsCollector;
 pub use temperature_collector::LinuxTemperatureMetricsCollector;
 pub use journald_harvester::JournaldLogHarvester;
 pub use basic_diagnostics_runner::BasicDiagnosticsRunner;
+pub use frame_time_collector::FrameTimeCollector; //ANCHOR [NovaDE Developers <dev@novade.org>] Export FrameTimeCollector
+pub use frame_time_collector::FrameTimeStatistics; //ANCHOR [NovaDE Developers <dev@novade.org>] Export FrameTimeStatistics
+pub use gpu_collector::GpuCollector; //ANCHOR [NovaDE Developers <dev@novade.org>] Export GpuCollector
+pub use gpu_collector::GpuStatistics; //ANCHOR [NovaDE Developers <dev@novade.org>] Export GpuStatistics
+pub use regression_detector::{BaselineStore, BaselineEntry, check_regression_higher_is_worse, check_regression_lower_is_worse}; //ANCHOR [NovaDE Developers <dev@novade.org>] Export regression detector components
+#[cfg(feature = "prometheus_exporter")]
+//ANCHOR [NovaDE Developers <dev@novade.org>] Export metrics_exporter components (conditional).
+pub use metrics_exporter::{MetricsExporter, run_exporter};
+
 
 pub use self::{
     CpuMetricsCollector, DiagnosticRunner, DiskMetricsCollector, LogHarvester,
     MemoryMetricsCollector, NetworkMetricsCollector, TemperatureMetricsCollector, // DiagnosticRunner already included
+    GpuMetricsCollector, //ANCHOR [NovaDE Developers <dev@novade.org>] Added GpuMetricsCollector trait
 };
 
 /// Defines the contract for CPU metrics collection.
@@ -55,9 +73,9 @@ pub trait CpuMetricsCollector {
 pub trait MemoryMetricsCollector {
     /// Asynchronously collects current memory and swap usage metrics.
     ///
-    /// Returns a `Result` containing `MemoryMetrics` on success, or a `SystemError` on failure.
-    /// Common errors include inability to read or parse `/proc/meminfo`.
-    async fn collect_memory_metrics(&self) -> Result<MemoryMetrics, SystemError>;
+    /// Returns a `Result` containing `ExtendedMemoryMetrics` on success, or a `SystemError` on failure.
+    /// Common errors include inability to read or parse underlying system data.
+    async fn collect_memory_metrics(&self) -> Result<ExtendedMemoryMetrics, SystemError>;
 }
 
 /// Defines the contract for disk I/O activity and space usage metrics collection.
@@ -96,6 +114,19 @@ pub trait TemperatureMetricsCollector {
     ///
     /// Returns a `Result` containing a `Vec<TemperatureMetric>` on success, or a `SystemError`.
     async fn collect_temperature_metrics(&self) -> Result<Vec<TemperatureMetric>, SystemError>;
+}
+
+//ANCHOR [NovaDE Developers <dev@novade.org>] Defines the contract for GPU metrics collection.
+/// Defines the contract for GPU metrics collection.
+#[async_trait::async_trait]
+pub trait GpuMetricsCollector {
+    //ANCHOR [NovaDE Developers <dev@novade.org>] Collects GPU metrics.
+    /// Asynchronously collects current GPU metrics.
+    ///
+    /// Returns a `Result` containing a `Vec<GpuStatistics>` (one per GPU) on success,
+    /// or a `SystemError` on failure.
+    async fn collect_gpu_metrics(&self) -> Result<Vec<GpuStatistics>, SystemError>;
+    //TODO [NovaDE Developers <dev@novade.org>] Consider if GpuMetrics should come from novade_core::types like others.
 }
 
 /// Defines the contract for harvesting system logs.
