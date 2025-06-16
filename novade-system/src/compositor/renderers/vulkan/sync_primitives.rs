@@ -57,15 +57,22 @@ impl FrameSyncPrimitives {
         logical_device: &LogicalDevice,
         initially_signaled_fence: bool,
     ) -> Result<Self> {
-        let semaphore_create_info = vk::SemaphoreCreateInfo::builder();
+        // ANCHOR[TimelineSemaphores_SyncPrimitivesRS]
+        let mut timeline_semaphore_type_create_info = vk::SemaphoreTypeCreateInfo::builder()
+            .semaphore_type(vk::SemaphoreType::TIMELINE)
+            .initial_value(0); // Initial value for timeline semaphores
+
+        let semaphore_create_info = vk::SemaphoreCreateInfo::builder()
+            .p_next(&mut timeline_semaphore_type_create_info as *mut _ as *mut std::ffi::c_void);
         
         let image_available_semaphore = unsafe {
             logical_device.raw.create_semaphore(&semaphore_create_info, None)
-        }?; // Uses From<vk::Result> for VulkanError
+        }?;
 
         let render_finished_semaphore = unsafe {
             logical_device.raw.create_semaphore(&semaphore_create_info, None)
-        }?; // Uses From<vk::Result>
+        }?;
+        // End ANCHOR
 
         let fence_flags = if initially_signaled_fence {
             vk::FenceCreateFlags::SIGNALED

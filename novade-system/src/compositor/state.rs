@@ -36,6 +36,8 @@ use crate::compositor::render::gl::OpenGLRenderer; // Added for OpenGLRenderer
 // use crate::compositor::render::renderer::RenderError; // Might be needed for error mapping if not just using .expect()
 
 // Imports from existing code that might be needed by new structs or were missing contextually
+use crate::compositor::texture_manager::TextureManager; // Added for TextureManager
+const MAX_TEXTURE_CACHE_BYTES: u64 = 256 * 1024 * 1024; // Example: 256MB cache size
 use smithay::reexports::wayland_server::protocol::wl_shm::Format;
 use smithay::backend::renderer::{Bind, DebugFlags, Frame, Offscreen, Renderer, Texture, Unbind};
 use smithay::backend::renderer::element::{texture::TextureRenderBuffer, Element, Id, RenderElementState};
@@ -89,6 +91,8 @@ pub struct DesktopState {
     pub backend_data: Arc<Mutex<BackendData>>,
     /// Manages the layout and stacking of windows (surfaces) in the compositor.
     pub space: Space<Window>,
+    /// Manages caching and lifecycle of textures from client buffers.
+    pub texture_manager: Arc<RwLock<TextureManager>>,
     // TODO: Integrate NovaDE specific configuration.
     // /// NovaDE specific configurations.
     // pub config: NovaDEConfiguration,
@@ -149,6 +153,10 @@ impl DesktopState {
 
         let backend_data = Arc::new(Mutex::new(BackendData { renderer: opengl_renderer }));
 
+        // Initialize TextureManager
+        let texture_manager = Arc::new(RwLock::new(TextureManager::new(MAX_TEXTURE_CACHE_BYTES)));
+        info!("TextureManager initialized with {}MB cache limit.", MAX_TEXTURE_CACHE_BYTES / (1024 * 1024));
+
 
         info!("NovaDE DesktopState initialized successfully");
 
@@ -165,6 +173,7 @@ impl DesktopState {
             popups,
             backend_data,
             space,
+            texture_manager, // Store TextureManager
             // config: NovaDEConfiguration, // Placeholder
             // domain_services: NovaDEDomainServices, // Placeholder
         }
@@ -177,11 +186,194 @@ impl CompositorHandler for DesktopState {
         &mut self.compositor_state
     }
 
+    fn new_surface(&mut self, surface: &WlSurface) {
+        // Initialize custom surface data (SurfaceData from surface_management.rs)
+        let surface_id = surface.id().to_string(); // Or any other unique ID generation
+        let nova_surface_data = crate::compositor::surface_management::SurfaceData::new(surface_id);
+
+        surface.data_map().insert_if_missing_threadsafe(|| {
+            Arc::new(Mutex::new(nova_surface_data))
+        });
+        info!("Initialized NovaDE SurfaceData for new surface {:?}", surface.id());
+    }
+
+    fn commit(&mut self, surface: &WlSurface) {
+        // Default Smithay commit handling (damage tracking, buffer attachment etc.)
+        // smithay::wayland::compositor::handle_commit(&self.display_handle, surface); // handle_commit needs DisplayHandle
+        // Simpler: smithay::wayland::compositor::dispatch_damage_if_needed(surface);
+        // And then manually handle buffer attachment.
+        // Or, more commonly, use the full `CompositorState::commit` logic.
+
+        // Let's use smithay's full commit logic which updates internal surface states.
+        // This needs to be done carefully. Smithay's `CompositorState::commit_surface_ignore_role`
+        // or similar internal functions are what `handle_commit` would use.
+        // For now, let's assume basic damage tracking is needed.
+        // smithay::wayland::compositor::basic_damage_tracking(surface, self.space.output_under(Point::from((0,0))).next(), (0.0,0.0)); // Needs output and scale
+        // This is complex. Let's focus on the buffer part and assume damage tracking is handled elsewhere or by default.
+        // A typical pattern is:
+        // 1. process_commit(surface) in smithay
+        // 2. then custom logic.
+
+        // For now, we directly use smithay's functions where available.
+        // smithay::wayland::compositor::on_commit_buffer_handler(surface); // Handles buffer attachment state.
+        // smithay::wayland::compositor::damage_handler(surface); // Handles damage.
+
+        // The most straightforward way is to call the functions that `handle_commit` would call for buffer processing.
+        // This includes setting the new buffer as "pending" and then "current" if no role objects reject it.
+        // Smithay's `CompositorState::commit` is usually called by role handlers (e.g. XdgToplevel).
+
+        // Let's assume the primary role of this commit hook here, after Smithay's internal processing (if any),
+        // is to update our custom `SurfaceData` with a texture.
+
+        // Get the custom surface data
+        let surface_data_ext_opt = surface.data_map().get::<Arc<Mutex<crate::compositor::surface_management::SurfaceData>>>();
+        if surface_data_ext_opt.is_none() {
+            // This can happen if the surface is being destroyed or not yet fully initialized with our data.
+            // Or if it's a surface role we don't attach our SurfaceData to.
+            warn!("commit called on a WlSurface without NovaDE SurfaceData: {:?}", surface.id());
+            // Fallback to default Smithay commit processing if available and not already done.
+            // smithay::wayland::compositor::handlers::commit_handler(&mut self.compositor_state, surface); // Example, API varies
+            return;
+        }
+        let surface_data_arc_mutex = surface_data_ext_opt.unwrap();
+
+        // Handle buffer attachment and texture creation
+        if let Some(buffer) = surface.get_buffer() {
+            let buffer_type = smithay::wayland::compositor::buffer_type(&buffer);
+            let key_result: Result<BufferKey, String> = match buffer_type {
+                Some(smithay::wayland::compositor::BufferType::Shm) => {
+                    Ok(BufferKey::from_shm(&buffer))
+                }
+                Some(smithay::wayland::compositor::BufferType::Dma) => {
+                    // We need a Dmabuf object here, not just the WlBuffer.
+                    // Smithay's DmabufState::get_dmabuf might be used if the buffer is a DMABUF.
+                    // This usually happens after wl_drm.authenticate and prime import.
+                    // For now, we assume `buffer` can be transformed into a `Dmabuf` object if it's a DMABUF.
+                    // This part is complex and depends on how DMABUFs are handled and validated.
+                    // Let's assume `Dmabuf::from_buffer()` exists or similar.
+                    // This is a simplification for now.
+                    if let Ok(dmabuf) = Dmabuf::from_buffer(&buffer) {
+                         Ok(BufferKey::from_dmabuf(&dmabuf))
+                    } else {
+                        Err(format!("Buffer {:?} is DMA but could not be accessed as Dmabuf object.", buffer.id()))
+                    }
+                }
+                _ => Err(format!("Buffer {:?} has unknown or unsupported type.", buffer.id())),
+            };
+
+            match key_result {
+                Ok(key) => {
+                    let buffer_source_arg = match buffer_type {
+                        Some(smithay::wayland::compositor::BufferType::Shm) => BufferSource::Shm(&buffer),
+                        Some(smithay::wayland::compositor::BufferType::Dma) => {
+                            // This re-retrieval of Dmabuf is inefficient if already done for key.
+                            // Ideally, get Dmabuf once.
+                            // Let's create the Dmabuf object once for both key creation and BufferSource.
+                            // This was already done implicitly by key_result if it was Dmabuf.
+                            // The key_result part already calls Dmabuf::from_buffer.
+                            // We need to ensure that if key_result is Ok(BufferKey::Dmabuf),
+                            // we use the same Dmabuf object for BufferSource.
+
+                            // The issue is that BufferKey::from_dmabuf consumes the Dmabuf by value in some interpretations,
+                            // or takes a reference. The current BufferKey::from_dmabuf takes &Dmabuf.
+                            // So, the Dmabuf object created for key_result is fine.
+                            // The problem was how BufferSource::Dmabuf was constructed with a potentially different Dmabuf.
+
+                            // Corrected logic:
+                            // The Dmabuf object is created when constructing `key`.
+                            // We need to pass a reference to *that same* Dmabuf object to BufferSource.
+                            // This means `key_result` should perhaps hold the Dmabuf if it's a DMA key,
+                            // or we retrieve it once and use it for both.
+
+                            // Simpler: Match on buffer_type again for BufferSource construction to ensure correct reference.
+                            // This mirrors the key creation logic path.
+                            let dmabuf_for_source = Dmabuf::from_buffer(&buffer).expect("DMABUF type identified but Dmabuf::from_buffer failed. This should not happen.");
+                            BufferSource::Dmabuf(&dmabuf_for_source)
+                            // This Dmabuf object (`dmabuf_for_source`) is created on the stack here.
+                            // Its reference is passed to BufferSource. This is valid as long as
+                            // `dmabuf_for_source` outlives the call to `get_or_create_texture`
+                            // AND the subsequent call to the factory method if a new texture is created.
+                            // This is true because both calls happen within this `commit` scope.
+                        }
+                        _ => {
+                            error!("Unhandled buffer type for BufferSource construction for buffer {:?}", buffer.id());
+                            // Ensure this path doesn't proceed to texture manager if we can't build BufferSource
+                            smithay::wayland::compositor::handlers::commit_handler(surface); // Still run default Smithay commit
+                            return;
+                        }
+                    };
+
+                    let mut texture_manager_guard = self.texture_manager.write().unwrap();
+                    let mut backend_data_guard = self.backend_data.lock().unwrap();
+                    // The renderer in BackendData is OpenGLRenderer, which needs to implement TextureFactory.
+                    // We pass a mutable reference to it.
+                    let factory_mut_ref: &mut dyn crate::compositor::renderer_interface::abstraction::TextureFactory = &mut backend_data_guard.renderer;
+
+                    match texture_manager_guard.get_or_create_texture(key, buffer_source_arg, factory_mut_ref) {
+                        Ok(texture_arc) => {
+                            let mut sd_lock = surface_data_arc_mutex.lock().unwrap();
+                            sd_lock.texture_handle = Some(texture_arc);
+                            // Mark surface for damage or update, specific to renderer/scene graph
+                            // e.g., self.space.damage_surface(surface, initial_damage);
+                            // smithay::desktop::space::Space::damage_element // needs window
+                            info!("Texture updated for surface {:?}", surface.id());
+                        }
+                        Err(e) => {
+                            error!("Failed to get or create texture for surface {:?}: {:?}", surface.id(), e);
+                            let mut sd_lock = surface_data_arc_mutex.lock().unwrap();
+                            sd_lock.texture_handle = None; // Clear previous texture if creation failed
+                        }
+                    }
+                }
+                Err(msg) => {
+                    error!("Failed to create BufferKey for surface {:?}: {}", surface.id(), msg);
+                    let mut sd_lock = surface_data_arc_mutex.lock().unwrap();
+                    sd_lock.texture_handle = None;
+                }
+            }
+        } else {
+            // No buffer attached, likely client detaching buffer.
+            // Clear our texture handle.
+            let mut sd_lock = surface_data_arc_mutex.lock().unwrap();
+            if sd_lock.texture_handle.is_some() {
+                sd_lock.texture_handle = None;
+                info!("Buffer detached, texture handle cleared for surface {:?}", surface.id());
+                // Mark surface for damage or update
+            }
+        }
+
+        // Default damage tracking etc. from Smithay
+        // This needs to be called after we've potentially updated the texture,
+        // as it might use the new buffer state for damage calculation.
+        smithay::wayland::compositor::handlers::commit_handler(surface);
+
+
+        // Example of how one might integrate with space damage, assuming 'window' can be found.
+        // This part is highly dependent on how DesktopState manages windows in its Space.
+        // if let Some(window) = self.space.elements().find(|w| w.wl_surface().map_or(false, |s| s == surface)) {
+        //     self.space.damage_element(window, None, None); // Simplified damage
+        // }
+
+        // After custom logic, call the default Smithay commit handler for roles.
+        // This will invoke role-specific commit logic (e.g., for XdgSurface).
+        // Note: The exact function might vary based on Smithay version and how roles are handled.
+        // smithay::wayland::compositor::delegate_compositor_commit(self, surface); // This is a conceptual call
+        // More accurately, role-specific handlers usually call CompositorState::commit.
+        // Our custom logic runs before role-specific commit logic.
+        // The call to smithay::wayland::compositor::handlers::commit_handler(surface) at the end
+        // is appropriate for basic commit steps like frame callbacks.
+
+    }
+
     /// Called when a Wayland client disconnects.
     fn client_disconnected(&mut self, client: ClientId, reason: DisconnectReason) {
         warn!(?client, ?reason, "Wayland client disconnected.");
         // TODO: Add cleanup logic for client resources.
     }
+
+    // Implement other CompositorHandler methods as needed, or rely on Smithay's defaults via delegate_compositor!
+    // fn new_subsurface(&mut self, subsurface: &wl_subsurface::WlSubsurface, surface: &WlSurface, parent: &WlSurface) { ... }
+    // fn destroyed(&mut self, surface: &WlSurface) { ... }
 }
 
 /// Handles Wayland data device (clipboard, drag-and-drop) events and manages `DataDeviceState`.

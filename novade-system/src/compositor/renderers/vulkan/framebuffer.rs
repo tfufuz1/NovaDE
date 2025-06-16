@@ -55,21 +55,22 @@ pub fn create_framebuffers(
     logical_device: &LogicalDevice,
     render_pass: vk::RenderPass,
     swapchain_image_views: &[vk::ImageView],
-    depth_image_view: vk::ImageView,
+    depth_image_view: Option<vk::ImageView>, // Changed to Option
     swapchain_extent: vk::Extent2D,
 ) -> Result<Vec<vk::Framebuffer>> {
     info!(
-        "Creating {} framebuffers for swapchain extent: {:?}, render pass: {:?}",
-        swapchain_image_views.len(), swapchain_extent, render_pass
+        "Creating {} framebuffers for swapchain extent: {:?}, render pass: {:?}, with_depth: {}",
+        swapchain_image_views.len(), swapchain_extent, render_pass, depth_image_view.is_some()
     );
 
     let mut framebuffers = Vec::with_capacity(swapchain_image_views.len());
 
     for (i, &swapchain_image_view) in swapchain_image_views.iter().enumerate() {
-        // The order of attachments must match the order in the render pass definition.
-        // Attachment 0: Color (swapchain image view)
-        // Attachment 1: Depth (depth image view)
-        let attachments = [swapchain_image_view, depth_image_view];
+        let attachments = if let Some(div) = depth_image_view {
+            vec![swapchain_image_view, div]
+        } else {
+            vec![swapchain_image_view]
+        };
 
         let framebuffer_create_info = vk::FramebufferCreateInfo::builder()
             .render_pass(render_pass)

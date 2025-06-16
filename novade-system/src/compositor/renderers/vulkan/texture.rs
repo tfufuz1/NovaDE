@@ -443,6 +443,30 @@ impl AbstractionRenderableTexture for VulkanRenderableTexture {
         self
     }
     // The old downcast_ref method is removed.
+    fn estimated_gpu_memory_size(&self) -> u64 {
+        let bpp = Self::bytes_per_pixel_for_format(self.format);
+        self.width as u64 * self.height as u64 * bpp as u64
+    }
+}
+
+impl VulkanRenderableTexture {
+    // Helper function to estimate bytes per pixel for a given Vulkan format.
+    // This can be expanded as more formats are supported.
+    fn bytes_per_pixel_for_format(format: vk::Format) -> u32 {
+        match format {
+            vk::Format::R8G8B8A8_UNORM | vk::Format::B8G8R8A8_UNORM |
+            vk::Format::R8G8B8A8_SRGB | vk::Format::B8G8R8A8_SRGB => 4,
+            vk::Format::R8_UNORM => 1,
+            vk::Format::R8G8_UNORM => 2,
+            // Add more formats as needed
+            // For planar YUV formats, this calculation would be more complex
+            // and might represent an effective BPP for total memory.
+            _ => {
+                warn!("Bytes per pixel estimation not implemented for format {:?}, defaulting to 4.", format);
+                4
+            }
+        }
+    }
 }
 
 impl Drop for VulkanRenderableTexture {

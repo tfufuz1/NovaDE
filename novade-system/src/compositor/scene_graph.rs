@@ -339,76 +339,83 @@ impl SceneGraph {
         }
     }
 
-    // Placeholder for occlusion culling
+    // Optimized occlusion culling using SpatialIndex
     fn perform_occlusion_culling(&mut self) {
         if self.nodes.is_empty() {
             return;
         }
 
+        // Build a map for quick lookup of nodes by SurfaceId.
+        // This map stores references to the nodes in their current state (before occlusion status update).
+        let node_map: HashMap<SurfaceId, Arc<SceneGraphNode>> = self.nodes.iter().map(|node_arc| (node_arc.surface_id, node_arc.clone())).collect();
+
         let mut new_nodes_with_occlusion_info = Vec::with_capacity(self.nodes.len());
 
-        for i in 0..self.nodes.len() {
-            let current_node_arc = &self.nodes[i];
+        // Iterate through nodes (sorted by Z from bottom to top)
+        for current_node_arc in &self.nodes {
             let mut current_node_is_occluded = false;
 
-            // Use the new RectExt trait method for checking if clipped_rect is empty
             if current_node_arc.clipped_rect.is_empty_rect() {
                 current_node_is_occluded = true;
             } else {
-                // Check against nodes with higher Z-order (rendered on top)
-                // These are nodes from index i+1 to self.nodes.len()-1
-                for j in (i + 1)..self.nodes.len() {
-                    let occluder_node_arc = &self.nodes[j];
+                // Query spatial_index for potential occluders
+                let potential_occluder_ids = self.spatial_index.query(&current_node_arc.clipped_rect);
 
-                    // Only consider occluders that are not already marked occluded themselves
-                    // (though this simple algorithm doesn't mark occluders as occluded based on others above them yet)
-                    // and have a valid, non-empty clipped rectangle.
-                    if occluder_node_arc.clipped_rect.is_empty_rect() { // Using RectExt
+                for occluder_id in potential_occluder_ids {
+                    if current_node_arc.surface_id == occluder_id { // Node cannot occlude itself
                         continue;
                     }
 
-                    // Use opaque_region if available, otherwise use clipped_rect as a proxy
-                    // The opaque_region is in local surface coordinates. It needs to be transformed.
-                    let occluder_opaque_rect_in_world = occluder_node_arc.attributes.opaque_region
-                        .as_ref()
-                        .map(|local_opaque_region| {
-                            // Transform local opaque region to world space using the occluder's final_transform
-                            let world_opaque_region = occluder_node_arc.final_transform.transform_rect_bounding_box(*local_opaque_region);
-                            // Then, this world_opaque_region must be clipped by the occluder's own clipped_rect,
-                            // as an occluder cannot make opaque an area where it isn't drawn.
-                            world_opaque_region.intersection(&occluder_node_arc.clipped_rect)
-                                               .unwrap_or_else(|| Rectangle::from_coords(0.0,0.0,0.0,0.0)) // if intersection is None
-                        })
-                        .filter(|r| !r.is_empty_rect()) // Use RectExt, ensure it's not empty after intersection
-                        .unwrap_or(occluder_node_arc.clipped_rect); // Fallback to full clipped_rect if no specific opaque_region or if it became empty
+                    if let Some(potential_occluder_node_arc) = node_map.get(&occluder_id) {
+                        // Occluder must have a higher Z-order
+                        if potential_occluder_node_arc.z_order <= current_node_arc.z_order {
+                            continue;
+                        }
 
+                        // Occluder's clipped_rect must not be empty
+                        if potential_occluder_node_arc.clipped_rect.is_empty_rect() {
+                            continue;
+                        }
 
-                    if occluder_opaque_rect_in_world.is_empty_rect() { // Use RectExt
-                        continue;
-                    }
+                        // Determine occluder's effective opaque area
+                        let effective_opaque_area = potential_occluder_node_arc.attributes.opaque_region
+                            .as_ref()
+                            .map(|local_opaque_region| {
+                                let world_opaque_region = potential_occluder_node_arc.final_transform.transform_rect_bounding_box(*local_opaque_region);
+                                world_opaque_region.intersection(&potential_occluder_node_arc.clipped_rect)
+                                                   .unwrap_or_else(|| Rectangle::from_coords(0.0, 0.0, 0.0, 0.0))
+                            })
+                            .filter(|r| !r.is_empty_rect()) // Ensure not empty after intersection
+                            .unwrap_or(potential_occluder_node_arc.clipped_rect); // Fallback
 
-                    // Check if current_node's clipped_rect is fully contained within this single occluder's effective opaque area.
-                    if current_node_arc.clipped_rect.is_fully_contained_by(&occluder_opaque_rect_in_world) {
-                        current_node_is_occluded = true;
-                        break;
+                        if effective_opaque_area.is_empty_rect() {
+                            continue;
+                        }
+
+                        // Check for full containment
+                        if current_node_arc.clipped_rect.is_fully_contained_by(&effective_opaque_area) {
+                            current_node_is_occluded = true;
+                            break; // Found an occluder, no need to check others for this current_node
+                        }
                     }
                 }
             }
 
-            // Create a new node with updated occlusion status.
-            // This clones the Arc and then the Node, which is not ideal for performance.
-            // In a real-world scenario, `is_occluded` might use interior mutability (e.g., RefCell<bool>)
-            // or the list of nodes would be rebuilt more carefully.
-            let mut new_node_data = (**current_node_arc).clone(); // Deref Arc, then clone SceneGraphNode
+            let mut new_node_data = (**current_node_arc).clone();
             new_node_data.is_occluded = current_node_is_occluded;
             new_nodes_with_occlusion_info.push(Arc::new(new_node_data));
         }
+
         self.nodes = new_nodes_with_occlusion_info;
-        println!("Occlusion culling performed. {} nodes processed.", self.nodes.len());
+        println!("Occlusion culling (optimized) performed. {} nodes processed.", self.nodes.len());
     }
 
-    pub fn get_renderable_nodes(&self) -> &Vec<Arc<SceneGraphNode>> {
-        &self.nodes
+    pub fn get_renderable_nodes(&self) -> Vec<Arc<SceneGraphNode>> {
+        self.nodes
+            .iter()
+            .filter(|node| !node.is_occluded)
+            .cloned()
+            .collect()
     }
 }
 
@@ -417,26 +424,55 @@ mod tests {
     use super::*;
     use novade_core::types::geometry::{Point, Size}; // For Point2D, Size2D aliases
 
-    // Helper to create a dummy SceneGraphNode for testing SpatialIndex
+    // Helper to create SurfaceAttributes for tests
+    fn create_surface_attributes(x: f32, y: f32, w: f32, h: f32, z: i32, opaque: bool) -> SurfaceAttributes {
+        SurfaceAttributes {
+            position: Point2D::new(x, y),
+            size: Size2D::new(w, h),
+            transform: Transform::identity(),
+            is_visible: true,
+            z_order: z,
+            opaque_region: if opaque { Some(Rectangle::from_coords(0.0, 0.0, w, h)) } else { None },
+            parent: None,
+        }
+    }
+
+    // Helper to create SurfaceAttributes with a specific local opaque region for tests
+    fn create_surface_attributes_with_opaque_region(
+        x: f32, y: f32, w: f32, h: f32, z: i32,
+        opaque_rect: Option<Rectangle>
+    ) -> SurfaceAttributes {
+        SurfaceAttributes {
+            position: Point2D::new(x, y),
+            size: Size2D::new(w, h),
+            transform: Transform::identity(),
+            is_visible: true,
+            z_order: z,
+            opaque_region: opaque_rect,
+            parent: None,
+        }
+    }
+
+
+    // Helper to create a dummy SceneGraphNode for testing SpatialIndex (can be deprecated if SurfaceAttributes helpers are enough)
     fn create_test_node(id: u64, x: f32, y: f32, w: f32, h: f32, z: i32) -> Arc<SceneGraphNode> {
         Arc::new(SceneGraphNode {
-            surface_id: SurfaceId::new(id), // Assuming SurfaceId::new exists
+            surface_id: SurfaceId::new(id),
             attributes: SurfaceAttributes {
-                position: Point2D::new(x,y), // These are relative positions for transform calculation
-                size: Size2D::new(w,h),      // This is the surface's own size
-                transform: Transform::identity(), // Assume identity for simplicity in index tests
+                position: Point2D::new(x,y),
+                size: Size2D::new(w,h),
+                transform: Transform::identity(),
                 is_visible: true,
                 z_order: z,
                 opaque_region: Some(Rectangle::from_coords(0.0,0.0,w,h)),
                 parent: None,
             },
-            // For spatial index tests, clipped_rect is the most important part.
-            // We simulate that it has been correctly calculated by prior steps.
             clipped_rect: Rectangle::from_coords(x, y, w, h),
-            final_transform: Transform { // A transform that would result in the above clipped_rect's position
+            final_transform: Transform {
                 matrix: [[1.0, 0.0, x], [0.0, 1.0, y]]
             },
             children: Vec::new(),
+            is_occluded: false, // Default to not occluded for test setup
         })
     }
 
@@ -603,32 +639,52 @@ mod tests {
     }
 
     #[test]
-    fn test_occlusion_culling_simple_full_occlusion() {
-        let output_geom = Rectangle::from_coords(0.0, 0.0, 800.0, 600.0 );
-        let mut sg = SceneGraph::new(); // Uses placeholder output initially
-
+    fn test_get_renderable_nodes_filters_occluded() {
+        let output_geom = Rectangle::from_coords(0.0, 0.0, 800.0, 600.0);
+        let mut sg = SceneGraph::new();
         let mut surface_data_map = HashMap::new();
+
+        let surf1_id = SurfaceId::new(1); // Will be occluded
+        let surf2_id = SurfaceId::new(2); // Occluder
+        let surf3_id = SurfaceId::new(3); // Visible
+
+        surface_data_map.insert(surf1_id, create_surface_attributes(10.0, 10.0, 50.0, 50.0, 1, true));
+        surface_data_map.insert(surf2_id, create_surface_attributes(10.0, 10.0, 50.0, 50.0, 2, true)); // Occludes 1
+        surface_data_map.insert(surf3_id, create_surface_attributes(100.0, 100.0, 50.0, 50.0, 3, true));
+
+        sg.update(&surface_data_map, &output_geom);
+
+        let renderable_nodes = sg.get_renderable_nodes();
+
+        assert_eq!(renderable_nodes.len(), 2, "Should be 2 renderable nodes");
+        assert!(renderable_nodes.iter().any(|n| n.surface_id == surf2_id), "Surf2 should be renderable");
+        assert!(renderable_nodes.iter().any(|n| n.surface_id == surf3_id), "Surf3 should be renderable");
+        assert!(!renderable_nodes.iter().any(|n| n.surface_id == surf1_id), "Surf1 should be occluded and not renderable");
+
+        // Check Z-order preservation
+        assert_eq!(renderable_nodes[0].surface_id, surf2_id);
+        assert_eq!(renderable_nodes[1].surface_id, surf3_id);
+    }
+
+    #[test]
+    fn test_occlusion_culling_simple_full_occlusion() {
+        let output_geom = Rectangle::from_coords(0.0, 0.0, 800.0, 600.0);
+        let mut sg = SceneGraph::new();
+        let mut surface_data_map = HashMap::new();
+
         let surf1_id = SurfaceId::new(1); // Occluded node
         let surf2_id = SurfaceId::new(2); // Occluder node
 
-        surface_data_map.insert(surf1_id, SurfaceAttributes {
-            position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
-            transform: Transform::identity(), is_visible: true, z_order: 1, // Lower Z
-            opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-        });
-        surface_data_map.insert(surf2_id, SurfaceAttributes {
-            position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0), // Same spot
-            transform: Transform::identity(), is_visible: true, z_order: 2, // Higher Z
-            opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-        });
+        surface_data_map.insert(surf1_id, create_surface_attributes(10.0, 10.0, 50.0, 50.0, 1, true));
+        surface_data_map.insert(surf2_id, create_surface_attributes(10.0, 10.0, 50.0, 50.0, 2, true));
 
-        sg.update(&surface_data_map, &output_geom); // This calls perform_occlusion_culling
+        sg.update(&surface_data_map, &output_geom);
+        let renderable = sg.get_renderable_nodes();
+        assert_eq!(renderable.len(), 1);
+        assert_eq!(renderable[0].surface_id, surf2_id);
 
-        let node1 = sg.nodes.iter().find(|n| n.surface_id == surf1_id).expect("Node 1 not found");
-        let node2 = sg.nodes.iter().find(|n| n.surface_id == surf2_id).expect("Node 2 not found");
-
-        assert!(node1.is_occluded, "Node 1 (z=1) should be occluded by Node 2 (z=2)");
-        assert!(!node2.is_occluded, "Node 2 (z=2) should not be occluded as it's on top or has no one above it in this pair");
+        let node1_internal = sg.nodes.iter().find(|n| n.surface_id == surf1_id).unwrap();
+        assert!(node1_internal.is_occluded);
     }
 
     #[test]
@@ -638,22 +694,15 @@ mod tests {
         let mut surface_data_map = HashMap::new();
 
         let surf1_id = SurfaceId::new(1);
-        surface_data_map.insert(surf1_id, SurfaceAttributes {
-            position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
-            transform: Transform::identity(), is_visible: true, z_order: 1,
-            opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-        });
         let surf2_id = SurfaceId::new(2);
-        surface_data_map.insert(surf2_id, SurfaceAttributes {
-            position: Point2D::new(70.0, 70.0), size: Size2D::new(50.0, 50.0), // Different spot
-            transform: Transform::identity(), is_visible: true, z_order: 2,
-            opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-        });
+        surface_data_map.insert(surf1_id, create_surface_attributes(10.0, 10.0, 50.0, 50.0, 1, true));
+        surface_data_map.insert(surf2_id, create_surface_attributes(70.0, 70.0, 50.0, 50.0, 2, true));
+
         sg.update(&surface_data_map, &output_geom);
-        let node1 = sg.nodes.iter().find(|n| n.surface_id == surf1_id).unwrap();
-        let node2 = sg.nodes.iter().find(|n| n.surface_id == surf2_id).unwrap();
-        assert!(!node1.is_occluded, "Node 1 should not be occluded");
-        assert!(!node2.is_occluded, "Node 2 should not be occluded");
+        let renderable = sg.get_renderable_nodes();
+        assert_eq!(renderable.len(), 2);
+        assert!(renderable.iter().any(|n| n.surface_id == surf1_id));
+        assert!(renderable.iter().any(|n| n.surface_id == surf2_id));
     }
 
     #[test]
@@ -662,98 +711,203 @@ mod tests {
         let mut sg = SceneGraph::new();
         let mut surface_data_map = HashMap::new();
 
-        let surf1_id = SurfaceId::new(1); // Partially occluded node
-        surface_data_map.insert(surf1_id, SurfaceAttributes {
-            position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
-            transform: Transform::identity(), is_visible: true, z_order: 1,
-            opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-        });
-        let surf2_id = SurfaceId::new(2); // Occluder node
-        surface_data_map.insert(surf2_id, SurfaceAttributes {
-            position: Point2D::new(30.0, 30.0), size: Size2D::new(50.0, 50.0), // Overlaps (10,10)-(60,60) with (30,30)-(80,80)
-            transform: Transform::identity(), is_visible: true, z_order: 2,
-            opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-        });
+        let surf1_id = SurfaceId::new(1);
+        let surf2_id = SurfaceId::new(2);
+        surface_data_map.insert(surf1_id, create_surface_attributes(10.0, 10.0, 50.0, 50.0, 1, true));
+        surface_data_map.insert(surf2_id, create_surface_attributes(30.0, 30.0, 50.0, 50.0, 2, true));
+
         sg.update(&surface_data_map, &output_geom);
-        let node1 = sg.nodes.iter().find(|n| n.surface_id == surf1_id).unwrap();
-        assert!(!node1.is_occluded, "Node 1 should not be marked as occluded due to partial overlap by this simple algorithm");
+        let renderable = sg.get_renderable_nodes();
+        assert_eq!(renderable.len(), 2, "Both nodes should be renderable due to partial overlap");
     }
 
     #[test]
-    fn test_occlusion_culling_fully_clipped_node_is_occluded() {
+    fn test_occlusion_culling_specific_opaque_region_causes_occlusion() {
         let output_geom = Rectangle::from_coords(0.0, 0.0, 100.0, 100.0);
         let mut sg = SceneGraph::new();
         let mut surface_data_map = HashMap::new();
 
-        let surf1_id = SurfaceId::new(1); // This node will be outside the output geometry
-        surface_data_map.insert(surf1_id, SurfaceAttributes {
-            position: Point2D::new(200.0, 200.0), size: Size2D::new(50.0, 50.0),
-            transform: Transform::identity(), is_visible: true, z_order: 1,
-            opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-        });
+        let surf_occluded_id = SurfaceId::new(1);
+        let surf_occluder_id = SurfaceId::new(2);
+
+        // Occluded: full 50x50 at (10,10)
+        surface_data_map.insert(surf_occluded_id, create_surface_attributes(10.0, 10.0, 50.0, 50.0, 1, true));
+        // Occluder: full 50x50 at (10,10), but its opaque region is also 50x50 at its local (0,0)
+        // which matches its full size and thus fully covers the occluded surface.
+        surface_data_map.insert(surf_occluder_id, create_surface_attributes_with_opaque_region(
+            10.0, 10.0, 50.0, 50.0, 2,
+            Some(Rectangle::from_coords(0.0,0.0,50.0,50.0))
+        ));
+
         sg.update(&surface_data_map, &output_geom);
-        // The node might not even be in sg.nodes if it's fully clipped before occlusion check.
-        // Let's adjust test: if it's in nodes, its clipped_rect should be empty, then is_occluded should be true.
-        // The current SceneGraph::update adds nodes if clipped_rect.w/h > 0.
-        // So, a fully clipped node won't be added to processing_nodes_map.
-        // The test for perform_occlusion_culling should assume nodes *are* in self.nodes.
-        // The first check in perform_occlusion_culling is `if current_node_arc.clipped_rect.is_empty_rect()`.
-
-        // To test this part of perform_occlusion_culling, we need a node that *is* added
-        // but its clipped_rect becomes empty due to some other logic (not possible with current setup)
-        // OR, we manually create a node with an empty clipped_rect for the test.
-        // For now, this specific path (a node in self.nodes having an empty clipped_rect *before* occlusion check)
-        // is hard to trigger naturally. The check is more of a safeguard.
-        // The spirit of the test is: if a node effectively isn't drawn, it's "occluded".
-
-        // Let's test a node that IS on output, but gets occluded by another one.
-        // And an occluder that has a specific opaque_region smaller than its full bounds.
-        let surf2_id = SurfaceId::new(2); // Occluded
-        let surf3_id = SurfaceId::new(3); // Occluder with specific opaque region
-
-        surface_data_map.clear();
-        surface_data_map.insert(surf2_id, SurfaceAttributes {
-            position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
-            transform: Transform::identity(), is_visible: true, z_order: 1,
-            opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-        });
-        surface_data_map.insert(surf3_id, SurfaceAttributes {
-            position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
-            transform: Transform::identity(), is_visible: true, z_order: 2,
-             // Opaque region is only the top-left quarter of the surface
-            opaque_region: Some(Rectangle::from_coords(0.0,0.0,25.0,25.0)), parent: None,
-        });
-        sg.update(&surface_data_map, &output_geom);
-        let node2 = sg.nodes.iter().find(|n| n.surface_id == surf2_id).unwrap();
-        let node3 = sg.nodes.iter().find(|n| n.surface_id == surf3_id).unwrap();
-
-        assert!(!node2.is_occluded, "Node 2 should not be occluded, occluder's opaque region is smaller");
-        assert!(!node3.is_occluded);
+        let renderable = sg.get_renderable_nodes();
+        assert_eq!(renderable.len(), 1);
+        assert_eq!(renderable[0].surface_id, surf_occluder_id);
     }
 
     #[test]
-    fn test_occlusion_by_non_opaque_region_fallback() {
-        let output_geom = Rectangle::from_coords(0.0, 0.0, 800.0, 600.0 );
+    fn test_occlusion_culling_specific_opaque_region_prevents_occlusion() {
+        let output_geom = Rectangle::from_coords(0.0, 0.0, 100.0, 100.0);
         let mut sg = SceneGraph::new();
-
         let mut surface_data_map = HashMap::new();
-        let surf1_id = SurfaceId::new(1); // Occluded node
-        let surf2_id = SurfaceId::new(2); // Occluder node, but no opaque_region specified
 
-        surface_data_map.insert(surf1_id, SurfaceAttributes {
-            position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
-            transform: Transform::identity(), is_visible: true, z_order: 1,
-            opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-        });
-        surface_data_map.insert(surf2_id, SurfaceAttributes {
-            position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
-            transform: Transform::identity(), is_visible: true, z_order: 2,
-            opaque_region: None, // Occluder considered fully opaque via its clipped_rect
-            parent: None,
-        });
+        let surf_target_id = SurfaceId::new(1); // Target that might be occluded
+        let surf_occluder_id = SurfaceId::new(2); // Occluder with small opaque region
+
+        // Target surface: 50x50 at (10,10)
+        surface_data_map.insert(surf_target_id, create_surface_attributes(10.0, 10.0, 50.0, 50.0, 1, true));
+
+        // Occluder surface: Also 50x50 at (10,10) (same position and size as target)
+        // BUT, its opaque region is only the top-left 10x10 of its area.
+        // Local opaque region: Rectangle::from_coords(0.0, 0.0, 10.0, 10.0)
+        // This means only a small part of the occluder is opaque.
+        surface_data_map.insert(surf_occluder_id, create_surface_attributes_with_opaque_region(
+            10.0, 10.0, 50.0, 50.0, 2,
+            Some(Rectangle::from_coords(0.0, 0.0, 10.0, 10.0))
+        ));
 
         sg.update(&surface_data_map, &output_geom);
-        let node1 = sg.nodes.iter().find(|n| n.surface_id == surf1_id).unwrap();
-        assert!(node1.is_occluded, "Node 1 should be occluded by Node 2 (fallback to clipped_rect)");
+        let renderable = sg.get_renderable_nodes();
+
+        // The target surface (50x50) should NOT be occluded because the occluder's
+        // small opaque region (10x10 at world 10,10) does not fully cover it.
+        assert_eq!(renderable.len(), 2, "Both nodes should be renderable");
+        assert!(renderable.iter().any(|n| n.surface_id == surf_target_id), "Target node should be renderable");
+        assert!(renderable.iter().any(|n| n.surface_id == surf_occluder_id), "Occluder node should be renderable");
     }
+
+    #[test]
+    fn test_occlusion_by_opaque_region_none_fallback() { // Renamed from previous similar test for clarity
+        let output_geom = Rectangle::from_coords(0.0, 0.0, 800.0, 600.0);
+        let mut sg = SceneGraph::new();
+        let mut surface_data_map = HashMap::new();
+
+        let surf1_id = SurfaceId::new(1);
+        let surf2_id = SurfaceId::new(2);
+
+        surface_data_map.insert(surf1_id, create_surface_attributes(10.0, 10.0, 50.0, 50.0, 1, true));
+        surface_data_map.insert(surf2_id, create_surface_attributes_with_opaque_region( // Using helper for consistency
+            10.0, 10.0, 50.0, 50.0, 2,
+            None // Opaque region is None, should fallback to clipped_rect
+        ));
+
+        sg.update(&surface_data_map, &output_geom);
+        let renderable = sg.get_renderable_nodes();
+        assert_eq!(renderable.len(), 1);
+        assert_eq!(renderable[0].surface_id, surf2_id);
+    }
+
+    #[test]
+    fn test_occlusion_culling_many_non_overlapping_surfaces() {
+        let output_geom = Rectangle::from_coords(0.0, 0.0, 1000.0, 1000.0);
+        let mut sg = SceneGraph::new();
+        let mut surface_data_map = HashMap::new();
+        let count = 100; // 100 non-overlapping surfaces
+
+        for i in 0..count {
+            let id = SurfaceId::new(i as u64);
+            // Position them in a grid; 10x10 grid for 100 surfaces
+            let x = (i % 10) as f32 * 60.0;
+            let y = (i / 10) as f32 * 60.0;
+            surface_data_map.insert(id, create_surface_attributes(x, y, 50.0, 50.0, i as i32, true));
+        }
+
+        sg.update(&surface_data_map, &output_geom);
+        let renderable = sg.get_renderable_nodes();
+        assert_eq!(renderable.len(), count, "All non-overlapping surfaces should be renderable");
+    }
+
+    #[test]
+    fn test_occlusion_culling_scattered_occluding_pair() {
+        let output_geom = Rectangle::from_coords(0.0, 0.0, 2000.0, 2000.0); // Large area
+        let mut sg = SceneGraph::new();
+        let mut surface_data_map = HashMap::new();
+
+        // A few scattered non-occluding surfaces
+        surface_data_map.insert(SurfaceId::new(1), create_surface_attributes(10.0, 10.0, 50.0, 50.0, 1, true));
+        surface_data_map.insert(SurfaceId::new(2), create_surface_attributes(1800.0, 10.0, 50.0, 50.0, 2, true));
+        surface_data_map.insert(SurfaceId::new(3), create_surface_attributes(10.0, 1800.0, 50.0, 50.0, 3, true));
+
+        // The occluding pair in the middle
+        let occluded_id = SurfaceId::new(100);
+        let occluder_id = SurfaceId::new(101);
+        surface_data_map.insert(occluded_id, create_surface_attributes(1000.0, 1000.0, 50.0, 50.0, 4, true));
+        surface_data_map.insert(occluder_id, create_surface_attributes(1000.0, 1000.0, 50.0, 50.0, 5, true)); // Higher Z
+
+        surface_data_map.insert(SurfaceId::new(4), create_surface_attributes(1800.0, 1800.0, 50.0, 50.0, 6, true));
+
+        sg.update(&surface_data_map, &output_geom);
+        let renderable = sg.get_renderable_nodes();
+
+        assert_eq!(renderable.len(), 5, "Expected 5 renderable nodes (3 scattered, occluder, one other scattered)");
+        assert!(!renderable.iter().any(|n| n.surface_id == occluded_id), "Occluded node should not be renderable");
+        assert!(renderable.iter().any(|n| n.surface_id == occluder_id), "Occluder node should be renderable");
+    }
+
+    #[test]
+    fn test_occlusion_culling_dense_cluster() {
+        let output_geom = Rectangle::from_coords(0.0, 0.0, 200.0, 200.0);
+        let mut sg = SceneGraph::new();
+        let mut surface_data_map = HashMap::new();
+
+        // Bottom layer, fully covered
+        surface_data_map.insert(SurfaceId::new(1), create_surface_attributes(10.0, 10.0, 100.0, 100.0, 1, true));
+
+        // Middle layer, two halves covering the bottom one
+        surface_data_map.insert(SurfaceId::new(2), create_surface_attributes(10.0, 10.0, 50.0, 100.0, 2, true));
+        surface_data_map.insert(SurfaceId::new(3), create_surface_attributes(60.0, 10.0, 50.0, 100.0, 2, true));
+
+        // Top layer, small one on one of the halves
+        surface_data_map.insert(SurfaceId::new(4), create_surface_attributes(10.0, 10.0, 20.0, 20.0, 3, true));
+        // Top layer, another small one on the other half, but higher Z than its direct occluder
+        surface_data_map.insert(SurfaceId::new(5), create_surface_attributes(60.0, 10.0, 20.0, 20.0, 3, true));
+
+
+        sg.update(&surface_data_map, &output_geom);
+        let renderable = sg.get_renderable_nodes();
+
+        // Expected renderable: 4 and 5.
+        // Node 1 is occluded by 2 and 3.
+        // Node 2 is occluded by 4 (partially, but for this test let's assume full for simplicity of setup if 4 is on top and same spot)
+        // Actually, the current logic is "fully_contained_by". Let's adjust.
+        // If node 4 (20x20) is on node 2 (50x100), node 2 is NOT fully occluded.
+        // If node 2 and 3 are at z=2, and node 1 is at z=1. Node 1 is occluded.
+        // If node 4 (z=3) is on node 2 (z=2), node 2 is not occluded by 4 unless 4 covers it.
+        // If node 5 (z=3) is on node 3 (z=2), node 3 is not occluded by 5 unless 5 covers it.
+
+        // Let's redefine for clarity:
+        // Surf 1 (ID 1, z=1): 10,10,100x100 <- Will be occluded by 2 and 3 together.
+        // Surf 2 (ID 2, z=2): 10,10,50x100  <- Will be visible
+        // Surf 3 (ID 3, z=2): 60,10,50x100  <- Will be visible
+        // Surf 4 (ID 4, z=3): 10,10,20x20 (on top of Surf 2) <- Will be visible
+        // Surf 5 (ID 5, z=3): 60,10,20x20 (on top of Surf 3) <- Will be visible
+        // The current algorithm checks one-by-one occlusion. It does not combine occluders.
+        // So Surf 1 will NOT be occluded by Surf 2 alone, nor by Surf 3 alone.
+        // This means Surf 1, 2, 3, 4, 5 will all be renderable.
+
+        // To test dense occlusion where one IS occluded by ONE other:
+        surface_data_map.clear();
+        // Bottom: Big one (10,10, 100x100), z=1 (surf_A)
+        let surf_a_id = SurfaceId::new(10);
+        surface_data_map.insert(surf_a_id, create_surface_attributes(10.0, 10.0, 100.0, 100.0, 1, true));
+        // Middle: Smaller one on top of A (20,20, 50x50), z=2 (surf_B)
+        let surf_b_id = SurfaceId::new(20);
+        surface_data_map.insert(surf_b_id, create_surface_attributes(20.0, 20.0, 50.0, 50.0, 2, true));
+        // Top: Exact same size and position as A, but higher Z, z=3 (surf_C)
+        let surf_c_id = SurfaceId::new(30);
+        surface_data_map.insert(surf_c_id, create_surface_attributes(10.0, 10.0, 100.0, 100.0, 3, true));
+
+        sg.update(&surface_data_map, &output_geom);
+        let renderable = sg.get_renderable_nodes();
+
+        // Expected: B and C are renderable. A is occluded by C.
+        assert_eq!(renderable.len(), 2, "Dense cluster: Expected 2 renderable nodes");
+        assert!(renderable.iter().any(|n| n.surface_id == surf_b_id), "Surf B should be renderable");
+        assert!(renderable.iter().any(|n| n.surface_id == surf_c_id), "Surf C should be renderable");
+        assert!(!renderable.iter().any(|n| n.surface_id == surf_a_id), "Surf A should be occluded by C");
+
+        let node_a_internal = sg.nodes.iter().find(|n| n.surface_id == surf_a_id).unwrap();
+        assert!(node_a_internal.is_occluded);
+    }
+
 }

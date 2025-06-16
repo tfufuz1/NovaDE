@@ -161,10 +161,29 @@ pub fn create_logical_device(
     info!("Requesting device extensions for {}:", device_name);
     for ext_name in &device_extension_names_cstr { info!("  - {:?}", ext_name); }
 
-    let device_create_info = vk::DeviceCreateInfo::builder()
+    // ANCHOR[EnableTimelineSemaphoreFeature_DeviceRS]
+    // Check if timeline semaphore feature is supported (this check would ideally be done
+    // when PhysicalDeviceInfo is populated using vkGetPhysicalDeviceFeatures2)
+    // For this example, we'll assume physical_device_info.timeline_semaphore_supported is a boolean field.
+    // If not, this part needs adjustment based on how features are queried.
+    // For Vulkan 1.2, timelineSemaphore is a core feature.
+    let mut timeline_semaphore_features = vk::PhysicalDeviceTimelineSemaphoreFeatures::builder()
+        .timeline_semaphore(vk::TRUE); // Enable the feature
+
+    let mut device_create_info_builder = vk::DeviceCreateInfo::builder()
         .queue_create_infos(&queue_create_infos)
         .enabled_features(&enabled_features)
         .enabled_extension_names(&device_extension_names_ptr);
+
+    // TODO: Add a check here: if physical_device_info.supports_timeline_semaphores {
+    // For now, unconditionally chaining it, assuming Vulkan 1.2+ where it's core
+    // or that the physical device selected would support it if it was an extension.
+    // A robust implementation must check physicalDeviceProperties2 and physicalDeviceFeatures2.
+    info!("Enabling timelineSemaphore feature for logical device {}.", device_name);
+    device_create_info_builder = device_create_info_builder.p_next(&mut timeline_semaphore_features as *mut _ as *mut std::ffi::c_void);
+    // End ANCHOR
+
+    let device_create_info = device_create_info_builder.build();
     // Validation layers are typically instance-level. Device-specific layers are rare.
 
     let device_ash: ash::Device = unsafe {

@@ -35,13 +35,8 @@ use bytemuck; // For Pod, Zeroable traits, and bytes_of for push constants
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct UniformBufferObject {
-    /// A multiplier applied to colors in the fragment shader.
-    /// Array of 4 floats, typically representing RGBA values.
-    pub color_multiplier: [f32; 4],
-    // Example:
-    // pub model_matrix: [[f32; 4]; 4],
-    // pub view_matrix: [[f32; 4]; 4],
-    // pub proj_matrix: [[f32; 4]; 4],
+    pub mvp_matrix: [[f32; 4]; 4], // Model-View-Projection
+    pub surface_props: [f32; 4], // x: alpha_multiplier, yzw: unused or for future color ops
 }
 // --- End Uniform Buffer Object Definition ---
 
@@ -61,12 +56,16 @@ pub struct UniformBufferObject {
 pub struct GraphicsPushConstants {
     /// A tint color applied in the shader, typically RGBA.
     pub tint_color: [f32; 4], 
-    /// A scaling factor, potentially applied to vertex positions or other attributes.
-    pub scale: f32, // This might be used for overall scaling or removed if element_size handles it
-    pub offset: [f32; 2],      // To store (x, y) of the element's top-left corner
-    pub element_size: [f32; 2], // To store (width, height) of the element
-    // Note: Total size is now (4 + 1 + 2 + 2) * sizeof(f32) = 9 * 4 = 36 bytes.
-    // Vulkan requires the size of push constant data to be a multiple of 4, which 36 is.
+    // scale: f32, // Removed, handled by MVP matrix in UBO
+    pub offset: [f32; 2],      // To store (x, y) of the element's top-left corner (texture sampling related)
+    pub element_size: [f32; 2], // To store (width, height) of the element (texture sampling related)
+    // Note: Total size is now (4 + 2 + 2) * sizeof(f32) = 8 * 4 = 32 bytes.
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GammaPushConstants {
+    pub gamma_value: f32,
 }
 // --- End Push Constants Definition ---
 
@@ -377,13 +376,15 @@ impl GraphicsPipeline {
     pub fn new(
         logical_device: &LogicalDevice,
         render_pass: vk::RenderPass,
-        _swapchain_extent: vk::Extent2D, 
+        _swapchain_extent: vk::Extent2D, // TODO: This might be better named 'viewport_extent' or similar if not always swapchain
         pipeline_layout: PipelineLayout, 
         vertex_shader_module: vk::ShaderModule,
         fragment_shader_module: vk::ShaderModule,
         pipeline_cache: vk::PipelineCache,
+        enable_depth_test: bool, // New parameter
+        enable_depth_write: bool, // New parameter
     ) -> Result<Self> {
-        info!("Creating graphics pipeline...");
+        info!("Creating graphics pipeline (depth_test: {}, depth_write: {})...", enable_depth_test, enable_depth_write);
         let main_function_name = std::ffi::CString::new("main").unwrap();
 
         let shader_stages = [
@@ -416,11 +417,23 @@ impl GraphicsPipeline {
             .sample_shading_enable(false).rasterization_samples(vk::SampleCountFlags::TYPE_1);
 
         let depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::builder()
-            .depth_test_enable(true).depth_write_enable(true)
-            .depth_compare_op(vk::CompareOp::LESS).depth_bounds_test_enable(false).stencil_test_enable(false);
+            .depth_test_enable(enable_depth_test)
+            .depth_write_enable(enable_depth_write)
+            .depth_compare_op(if enable_depth_test { vk::CompareOp::LESS } else { vk::CompareOp::ALWAYS }) // Meaningful only if test is enabled
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(false);
 
+        // ANCHOR[Blend_State_PMA]
         let color_blend_attachment = vk::PipelineColorBlendAttachmentState::builder()
-            .color_write_mask(vk::ColorComponentFlags::RGBA).blend_enable(false).build();
+            .color_write_mask(vk::ColorComponentFlags::RGBA)
+            .blend_enable(true) // Enable blending
+            .src_color_blend_factor(vk::BlendFactor::ONE) // For PMA: SrcColor * 1
+            .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA) // For PMA: DstColor * (1 - SrcAlpha)
+            .color_blend_op(vk::BlendOp::ADD)
+            .src_alpha_blend_factor(vk::BlendFactor::ONE) // Alpha component usually handled like this for PMA
+            .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+            .alpha_blend_op(vk::BlendOp::ADD)
+            .build();
         let color_blend_info = vk::PipelineColorBlendStateCreateInfo::builder()
             .logic_op_enable(false).attachments(std::slice::from_ref(&color_blend_attachment));
 

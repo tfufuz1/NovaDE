@@ -136,6 +136,80 @@ impl RenderPass {
             logical_device_raw: logical_device.raw.clone(),
         })
     }
+
+    /// Creates a new Vulkan Render Pass with only a color attachment.
+    ///
+    /// This is suitable for passes that don't require depth testing, such as a final
+    /// blit to the swapchain or some 2D post-processing effects.
+    ///
+    /// The color attachment is configured for:
+    ///   - Format: `color_format`.
+    ///   - Load Operation: `CLEAR` or `DONT_CARE` (configurable, typically DONT_CARE for blit if fullscreen).
+    ///     For simplicity, using CLEAR here. A more advanced version could parameterize this.
+    ///   - Store Operation: `STORE`.
+    ///   - Initial Layout: `UNDEFINED`.
+    ///   - Final Layout: `PRESENT_SRC_KHR` (if targeting swapchain) or `SHADER_READ_ONLY_OPTIMAL` (if intermediate).
+    ///     Using `PRESENT_SRC_KHR` as this is typical for a final pass to swapchain.
+    pub fn new_color_only(
+        logical_device: &LogicalDevice,
+        color_format: vk::Format,
+        final_layout: vk::ImageLayout, // e.g., PRESENT_SRC_KHR or SHADER_READ_ONLY_OPTIMAL
+    ) -> Result<Self> {
+        info!(
+            "Creating color-only render pass with format: {:?}, final_layout: {:?}",
+            color_format, final_layout
+        );
+
+        let color_attachment = vk::AttachmentDescription::builder()
+            .format(color_format)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .load_op(vk::AttachmentLoadOp::DONT_CARE) // Common for blit target, or CLEAR if it's the first thing drawn
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
+            .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .initial_layout(vk::ImageLayout::UNDEFINED) // Or specific if transitioning from something
+            .final_layout(final_layout);
+
+        let attachments = [color_attachment.build()];
+
+        let color_attachment_ref = vk::AttachmentReference::builder()
+            .attachment(0)
+            .layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+
+        let color_attachment_refs = [color_attachment_ref.build()];
+
+        let subpass = vk::SubpassDescription::builder()
+            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
+            .color_attachments(&color_attachment_refs); // No depth attachment
+
+        let subpasses = [subpass.build()];
+
+        // Dependency to ensure layout transition for color attachment
+        let dependency = vk::SubpassDependency::builder()
+            .src_subpass(vk::SUBPASS_EXTERNAL)
+            .dst_subpass(0)
+            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags::empty())
+            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
+            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE);
+
+        let dependencies = [dependency.build()];
+
+        let render_pass_create_info = vk::RenderPassCreateInfo::builder()
+            .attachments(&attachments)
+            .subpasses(&subpasses)
+            .dependencies(&dependencies);
+
+        let raw_render_pass = unsafe {
+            logical_device.raw.create_render_pass(&render_pass_create_info, None)
+        }?;
+        debug!("Color-only render pass created: {:?}", raw_render_pass);
+
+        Ok(Self {
+            raw: raw_render_pass,
+            logical_device_raw: logical_device.raw.clone(),
+        })
+    }
 }
 
 impl Drop for RenderPass {

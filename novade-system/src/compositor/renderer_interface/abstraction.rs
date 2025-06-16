@@ -46,16 +46,18 @@ pub trait RenderableTexture: Send + Sync + std::fmt::Debug + std::any::Any {
     fn height_px(&self) -> u32;
     fn format(&self) -> Option<Fourcc>;
     fn as_any(&self) -> &dyn std::any::Any;
+    fn estimated_gpu_memory_size(&self) -> u64;
 }
 
 #[derive(Debug)]
 pub enum RenderElement<'a> {
     WaylandSurface {
         surface_wl: &'a WlSurface,
-        // surface_data_arc: Arc<SurfaceData>, // OLD
-        surface_data_mutex_arc: Arc<std::sync::Mutex<crate::compositor::surface_management::SurfaceData>>, // NEW
-        geometry: Rectangle<i32, Logical>,
-        damage_surface_local: Vec<Rectangle<i32, SmithayBuffer>>, // Use the renamed SmithayBuffer
+        surface_data_mutex_arc: Arc<std::sync::Mutex<crate::compositor::surface_management::SurfaceData>>,
+        geometry: Rectangle<i32, Logical>, // Logical geometry of the surface
+        physical_clipped_rect: Rectangle<f32, Physical>, // Physical, clipped rect for rendering
+        damage_surface_local: Vec<Rectangle<i32, SmithayBuffer>>,
+        alpha: Option<f32>, // Optional alpha override for the surface
     },
     SolidColor {
         color: [f32; 4],
@@ -98,4 +100,17 @@ pub trait FrameRenderer: 'static {
     }
 
     fn screen_size(&self) -> Size<i32, Physical>;
+}
+
+// New TextureFactory trait
+pub trait TextureFactory {
+    fn create_texture_from_shm(
+        &mut self,
+        buffer: &WlBuffer,
+    ) -> Result<Arc<dyn RenderableTexture>, RendererError>;
+
+    fn create_texture_from_dmabuf(
+        &mut self,
+        dmabuf: &Dmabuf,
+    ) -> Result<Arc<dyn RenderableTexture>, RendererError>;
 }

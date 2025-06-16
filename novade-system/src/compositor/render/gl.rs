@@ -16,9 +16,17 @@ use std::fmt;
 
 // Import from parent module (renderer.rs)
 use super::renderer::{
-    CompositorRenderer, RenderableTexture, RenderError, RenderElement,
+    CompositorRenderer, RenderableTexture, RenderError, RenderElement, // This is the local RenderableTexture
 };
 use crate::compositor::core::state::DesktopState; // For import methods
+
+// Imports for AbstractionTextureFactory and related traits
+use crate::compositor::renderer_interface::abstraction::{
+    RenderableTexture as AbstractionRenderableTexture, // Alias to avoid name clash
+    TextureFactory as AbstractionTextureFactory,
+    RendererError as AbstractionRendererError,
+};
+use uuid::Uuid; // For AbstractionRenderableTexture::id()
 use smithay::reexports::wayland_server::protocol::{
     wl_buffer::WlBuffer,
     wl_surface::WlSurface,
@@ -77,13 +85,14 @@ fn generate_texture_id() -> u64 {
 
 #[derive(Debug, Clone)]
 pub struct OpenGLTexture {
-    id: u64,
+    id: u64, // Original u64 ID, used by clear_texture_cache
+    uuid: Uuid, // New Uuid for AbstractionRenderableTexture
     smithay_texture: Arc<Gles2Texture>,
     format: Option<Fourcc>,
     size: Size<i32, Physical>,
 }
 
-impl RenderableTexture for OpenGLTexture {
+impl RenderableTexture for OpenGLTexture { // This is for super::renderer::RenderableTexture
     fn dimensions(&self) -> Size<i32, Physical> {
         self.size
     }
@@ -96,10 +105,49 @@ impl RenderableTexture for OpenGLTexture {
         self as &dyn Any
     }
 
-    fn unique_id(&self) -> u64 {
+    fn unique_id(&self) -> u64 { // Used by CompositorRenderer::clear_texture_cache
         self.id
     }
 }
+
+// Implement AbstractionRenderableTexture for OpenGLTexture
+impl AbstractionRenderableTexture for OpenGLTexture {
+    fn id(&self) -> Uuid {
+        self.uuid
+    }
+
+    fn bind(&self, _slot: u32) -> Result<(), AbstractionRendererError> {
+        // OpenGL binding is typically handled per draw call by the renderer, not on the texture itself.
+        Ok(())
+    }
+
+    fn width_px(&self) -> u32 {
+        self.size.w as u32
+    }
+
+    fn height_px(&self) -> u32 {
+        self.size.h as u32
+    }
+
+    fn format(&self) -> Option<Fourcc> { // This is smithay::backend::allocator::Fourcc
+        self.format
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any { // Ensure this matches the trait from abstraction.rs
+        self
+    }
+
+    fn estimated_gpu_memory_size(&self) -> u64 {
+        let bpp = match self.format {
+            Some(Fourcc::Argb8888) | Some(Fourcc::Xrgb8888) |
+            Some(Fourcc::Abgr8888) | Some(Fourcc::Xbgr8888) => 4,
+            // TODO: Add more formats from Fourcc if supported by GLES2 and relevant for estimation
+            _ => 4, // Default assumption
+        };
+        (self.size.w * self.size.h * bpp) as u64
+    }
+}
+
 
 pub struct OpenGLRenderer {
     smithay_renderer: Gles2Renderer,
@@ -392,12 +440,13 @@ impl CompositorRenderer for OpenGLRenderer {
 
         let opengl_texture = OpenGLTexture {
             id: generate_texture_id(),
+            uuid: Uuid::new_v4(), // Initialize new Uuid field
             smithay_texture: Arc::new(gles2_texture),
             format: fourcc_format,
             size: Size::from((width, height)),
         };
 
-        info!("SHM buffer imported successfully as OpenGLTexture id {}", opengl_texture.id);
+        info!("SHM buffer imported successfully as OpenGLTexture id {}, uuid {}", opengl_texture.id, opengl_texture.uuid);
         Ok(Arc::new(opengl_texture))
     }
 
@@ -439,12 +488,13 @@ impl CompositorRenderer for OpenGLRenderer {
 
         let opengl_texture = OpenGLTexture {
             id: generate_texture_id(),
+            uuid: Uuid::new_v4(), // Initialize new Uuid field
             smithay_texture: Arc::new(gles2_texture), // Wrap the Gles2Texture in Arc
             format: Some(fourcc_format),
             size: dimensions,
         };
 
-        info!("DMABUF imported successfully as OpenGLTexture id {}", opengl_texture.id);
+        info!("DMABUF imported successfully as OpenGLTexture id {}, uuid {}", opengl_texture.id, opengl_texture.uuid);
         Ok(Arc::new(opengl_texture))
     }
 
@@ -477,6 +527,44 @@ impl CompositorRenderer for OpenGLRenderer {
         None
     }
 }
+
+impl AbstractionTextureFactory for OpenGLRenderer {
+    fn create_texture_from_shm(
+        &mut self,
+        buffer: &WlBuffer,
+    ) -> Result<Arc<dyn AbstractionRenderableTexture>, AbstractionRendererError> {
+        // The current self.import_shm_buffer (from CompositorRenderer trait) takes DesktopState,
+        // which is not available here. This is a known issue for this refactoring step.
+        error!("OpenGLRenderer::create_texture_from_shm (TextureFactory) needs DesktopState to call the existing import_shm_buffer.");
+        // To make this compile and signal the issue:
+        // Option 1: Return error
+        Err(AbstractionRendererError::Unsupported(
+            "OpenGLRenderer SHM import via TextureFactory requires DesktopState, not yet refactored.".to_string()
+        ))
+        // Option 2: Panic (for development, to ensure it's fixed)
+        // panic!("OpenGLRenderer::create_texture_from_shm (TextureFactory) called but not fully implemented due to DesktopState dependency.");
+
+        // Ideal future call if import_shm_buffer is refactored or context is available:
+        // self.import_shm_buffer(buffer, None, /* somehow get DesktopState or required parts */)
+        //     .map(|arc_opengl_texture| arc_opengl_texture as Arc<dyn AbstractionRenderableTexture>) // Cast Arc<OpenGLTexture> to Arc<dyn Trait>
+        //     .map_err(|render_error| AbstractionRendererError::Generic(format!("SHM import failed: {}", render_error))) // Convert error type
+    }
+
+    fn create_texture_from_dmabuf(
+        &mut self,
+        dmabuf: &Dmabuf,
+    ) -> Result<Arc<dyn AbstractionRenderableTexture>, AbstractionRendererError> {
+        error!("OpenGLRenderer::create_texture_from_dmabuf (TextureFactory) needs DesktopState to call the existing import_dmabuf.");
+        Err(AbstractionRendererError::Unsupported(
+            "OpenGLRenderer DMABUF import via TextureFactory requires DesktopState, not yet refactored.".to_string()
+        ))
+        // Ideal future call:
+        // self.import_dmabuf(dmabuf, None, /* somehow get DesktopState or required parts */)
+        //     .map(|arc_opengl_texture| arc_opengl_texture as Arc<dyn AbstractionRenderableTexture>)
+        //     .map_err(|render_error| AbstractionRendererError::Generic(format!("DMABUF import failed: {}", render_error)))
+    }
+}
+
 
 // The old init_gl_renderer function is no longer needed as its logic is within OpenGLRenderer::new.
 // The old tests might need significant rework to test the new structure.
