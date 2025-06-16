@@ -10,3 +10,6 @@ pub use service::{DefaultSystemHealthService, SystemHealthService};
 // If a module alias is desired, it could be:
 // pub use crate::error::SystemHealthError; // This would make it accessible as system_health_service::SystemHealthError
 // However, it's generally better to use the canonical path from crate::error.
+
+#[cfg(test)]
+mod service_tests;

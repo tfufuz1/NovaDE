@@ -256,6 +256,10 @@ pub enum SystemHealthError {
     /// Indicates that a requested resource or item (e.g., a specific diagnostic test ID) was not found.
     #[error("Not found: {0}")]
     NotFound(String),
+
+    /// Indicates that a specific alert could not be found by its ID.
+    #[error("Alert not found: {alert_id}")]
+    AlertNotFound { alert_id: String },
 }
 
 /// Power management error type.

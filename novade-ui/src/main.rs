@@ -28,8 +28,8 @@ fn main() {
     let temperature_collector = Arc::new(LinuxTemperatureMetricsCollector);
     let log_harvester = Arc::new(JournaldLogHarvester);
     // BasicDiagnosticsRunner needs a ping target
-    // TODO: Get this from core_config.system_health.diagnostic_ping_target once that field is added to SystemHealthDashboardConfig
-    let diagnostic_runner = Arc::new(BasicDiagnosticsRunner::new(Some("8.8.8.8".to_string())));
+    // The diagnostic_ping_target field was added to SystemHealthDashboardConfig in a previous step.
+    let diagnostic_runner = Arc::new(BasicDiagnosticsRunner::new(core_config.system_health.diagnostic_ping_target.clone()));
 
     // Instantiate Domain Layer SystemHealthService
     let system_health_service: Arc<dyn SystemHealthService> = Arc::new(DefaultSystemHealthService::new(

@@ -212,8 +212,12 @@ pub struct Alert {
     /// Description of the metric or log condition that triggered the alert.
     pub source_metric_or_log: String, // e.g., "CPU Usage > 90%", "Disk space /dev/sda1 < 1GB"
     /// Whether the alert has been acknowledged by a user.
+    #[serde(default)]
     pub acknowledged: bool,
+    /// Timestamp of when this alert condition was last actively triggered or re-confirmed.
+    pub last_triggered_timestamp: DateTime<Utc>,
     /// How many times this specific alert condition has re-triggered.
+    #[serde(default)]
     pub last_triggered_count: u32,
     /// Optional suggested steps or guidance for resolving the alert condition.
     pub resolution_steps: Option<String>,
@@ -231,7 +235,29 @@ pub struct SystemHealthDashboardConfig {
     pub default_log_sources: Vec<String>,
     /// Configuration for various alert thresholds.
     pub alert_thresholds: AlertThresholdsConfig,
+    /// Optional target for a diagnostic ping test (e.g., an IP address or hostname).
+    /// If `None`, this diagnostic test might be disabled or use a system default.
+    #[serde(default)] // Ensures deserialization works if field is missing
+    pub diagnostic_ping_target: Option<String>,
+    /// How often to evaluate alert conditions, in seconds.
+    #[serde(default = "default_alert_evaluation_interval_secs")]
+    pub alert_evaluation_interval_secs: u64,
+    /// Duration in seconds CPU must be above threshold to trigger alert.
+    /// This is more specific than the one in CpuAlertConfig if needed for general history tracking.
+    #[serde(default)]
+    pub cpu_alert_duration_secs: Option<u64>,
+    /// Number of CPU metrics samples to keep for duration-based alerting.
+    #[serde(default = "default_cpu_alert_history_size")]
+    pub cpu_alert_history_size: usize,
     // Future: Per-metric refresh intervals, specific log source configs
+}
+
+fn default_alert_evaluation_interval_secs() -> u64 {
+    60 // Default to 60 seconds
+}
+
+fn default_cpu_alert_history_size() -> usize {
+    10 // Default to 10 samples
 }
 
 /// Configuration for specific alert thresholds.
@@ -282,7 +308,7 @@ impl Default for SystemHealthDashboardConfig {
             alert_thresholds: AlertThresholdsConfig {
                 high_cpu_usage_percent: Some(CpuAlertConfig {
                     threshold_percent: 90.0,
-                    duration_seconds: 60,
+                    duration_seconds: 60, // This is specific to an alert rule, might differ from history duration
                 }),
                 low_memory_available_percent: Some(MemoryAlertConfig {
                     threshold_percent: 10.0,
@@ -300,6 +326,10 @@ impl Default for SystemHealthDashboardConfig {
                     }
                 ])
             },
+            diagnostic_ping_target: None,
+            alert_evaluation_interval_secs: default_alert_evaluation_interval_secs(),
+            cpu_alert_duration_secs: Some(60), // Default CPU alert duration for history check
+            cpu_alert_history_size: default_cpu_alert_history_size(),
         }
     }
 }
@@ -371,3 +401,77 @@ impl Default for SystemHealthDashboardConfig {
     These notes serve as a guide for the subsequent subtask that will focus on
     implementing these configuration changes.
 */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn test_system_health_dashboard_config_defaults() {
+        let config = SystemHealthDashboardConfig::default();
+
+        assert_eq!(config.metric_refresh_interval_ms, 1000);
+        assert_eq!(config.log_refresh_interval_ms, 2000);
+        assert_eq!(config.default_log_sources, vec!["journald".to_string()]);
+
+        // Test new fields for periodic alert evaluation and CPU duration alerts
+        assert_eq!(config.alert_evaluation_interval_secs, default_alert_evaluation_interval_secs()); // 60
+        assert_eq!(config.cpu_alert_duration_secs, Some(60));
+        assert_eq!(config.cpu_alert_history_size, default_cpu_alert_history_size()); // 10
+        assert_eq!(config.diagnostic_ping_target, None);
+
+        // Test default alert thresholds (spot check one)
+        assert!(config.alert_thresholds.high_cpu_usage_percent.is_some());
+        let cpu_alert = config.alert_thresholds.high_cpu_usage_percent.unwrap();
+        assert_eq!(cpu_alert.threshold_percent, 90.0);
+        assert_eq!(cpu_alert.duration_seconds, 60);
+    }
+
+    // Note: Alert struct does not have a Default implementation.
+    // Fields `acknowledged` and `last_triggered_count` are marked with `#[serde(default)]`
+    // which applies during deserialization. For programmatic creation, these are set manually.
+    // If `Alert::default()` were required, the struct would need `#[derive(Default)]`
+    // or a manual `impl Default`.
+    #[test]
+    fn test_alert_manual_creation_defaults() {
+        // This test demonstrates how one might check default-like values for an Alert
+        // when it's created manually, which is typical if there's no Default trait.
+        let now = Utc::now();
+        let alert = Alert {
+            id: AlertId("test-id".to_string()),
+            name: "Test Alert".to_string(),
+            severity: AlertSeverity::Low,
+            message: "This is a test".to_string(),
+            timestamp: now,
+            source_metric_or_log: "test_source".to_string(),
+            acknowledged: false, // Manually set to expected "default" for a new alert
+            last_triggered_timestamp: now,
+            last_triggered_count: 0, // Manually set to expected "default"
+            resolution_steps: None,
+        };
+
+        assert!(!alert.acknowledged);
+        assert_eq!(alert.last_triggered_count, 0);
+        assert_eq!(alert.timestamp, now);
+        assert_eq!(alert.last_triggered_timestamp, now);
+    }
+
+    // Example of how to test LogPriority ordering if it were complex.
+    // Here it's derived, so it should be correct by definition of order.
+    #[test]
+    fn test_log_priority_ordering() {
+        assert!(LogPriority::Error > LogPriority::Warning);
+        assert!(LogPriority::Warning > LogPriority::Info);
+        assert!(LogPriority::Info > LogPriority::Debug);
+        assert!(LogPriority::Debug > LogPriority::Trace);
+        assert_eq!(LogPriority::Critical, LogPriority::Critical);
+    }
+
+    // Test default functions used by SystemHealthDashboardConfig
+    #[test]
+    fn check_default_value_functions() {
+        assert_eq!(default_alert_evaluation_interval_secs(), 60);
+        assert_eq!(default_cpu_alert_history_size(), 10);
+    }
+}
