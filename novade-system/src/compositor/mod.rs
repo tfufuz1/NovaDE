@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod config;
 pub mod core;
 pub mod cursor_manager; // Add this line
 pub mod display_loop;
