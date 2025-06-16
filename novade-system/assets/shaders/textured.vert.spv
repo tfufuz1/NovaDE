@@ -1,0 +1,7 @@
+// This is a placeholder file.
+// It should contain the compiled SPIR-V bytecode from textured.vert.
+//
+// To compile using glslc (if installed):
+// glslc textured.vert -o textured.vert.spv
+//
+// Ensure this file is replaced with actual SPIR-V code for the renderer to work.

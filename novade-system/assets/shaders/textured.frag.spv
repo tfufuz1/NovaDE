@@ -1,0 +1,7 @@
+// This is a placeholder file.
+// It should contain the compiled SPIR-V bytecode from textured.frag.
+//
+// To compile using glslc (if installed):
+// glslc textured.frag -o textured.frag.spv
+//
+// Ensure this file is replaced with actual SPIR-V code for the renderer to work.
