@@ -1,6 +1,10 @@
 // novade-system/src/renderer/wgpu_renderer.rs
 
-use crate::compositor::renderer_interface::abstraction::{FrameRenderer, RenderElement, RenderableTexture, RendererError};
+use crate::compositor::renderer_interface::abstraction::{
+    FrameRenderer, RenderElement, RenderableTexture, RendererError,
+    ClientBuffer, BufferFormat as AbstractionBufferFormat, // Added
+};
+use novade_compositor_core::surface::SurfaceId; // Added
 use raw_window_handle::{HasRawWindowHandle, HasRawDisplayHandle}; // For WGPU surface creation
 use std::sync::Arc;
 use uuid::Uuid;
@@ -96,6 +100,10 @@ pub struct NovaWgpuRenderer {
     solid_color_pipeline: wgpu::RenderPipeline,
     solid_color_bind_group_layout: wgpu::BindGroupLayout,
     dummy_white_texture: Arc<WgpuRenderableTexture>, // For fallback
+
+    // State for pending frame rendering
+    current_encoder: Option<wgpu::CommandEncoder>,
+    current_surface_texture: Option<wgpu::SurfaceTexture>,
 }
 
 // WGSL Shaders for Solid Color
@@ -457,6 +465,8 @@ impl NovaWgpuRenderer {
             solid_color_pipeline,
             solid_color_bind_group_layout,
             dummy_white_texture: dummy_white_renderable_texture,
+            current_encoder: None,
+            current_surface_texture: None,
         })
     }
 
@@ -486,91 +496,163 @@ impl FrameRenderer for NovaWgpuRenderer {
     fn render_frame<'iter_elements>(
         &mut self,
         elements: impl IntoIterator<Item = RenderElement<'iter_elements>>,
-        _output_geometry: Rectangle<i32, Physical>, // Used for viewport/scissor if not full-screen
-        _output_scale: f64, // Could be used for scaling elements if needed
+        output_geometry_physical: Rectangle<i32, Physical>, // Renamed for clarity, used for viewport/scissor
+        output_scale: f64, // Could be used for scaling elements if needed, or converting logical to physical
     ) -> Result<(), RendererError> {
+        // Ensure previous frame's resources are cleared if submit_and_present_frame wasn't called
+        if self.current_encoder.is_some() || self.current_surface_texture.is_some() {
+            tracing::warn!("render_frame called while previous frame resources were not cleared. \
+                            This might indicate a missed call to submit_and_present_frame.");
+            self.current_encoder = None;
+            // Dropping SurfaceTexture implicitly unpresents/releases it.
+            self.current_surface_texture = None;
+        }
+
         let surface = self.surface.as_ref().ok_or_else(|| {
             RendererError::Generic("WGPU surface not available in render_frame".to_string())
         })?;
 
-        let output_frame = match surface.get_current_texture() {
+        let surface_texture = match surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Outdated) => {
                 tracing::warn!("WGPU surface outdated, reconfiguring.");
-                let config = self.surface_config.as_ref().unwrap(); // Should exist
+                let config = self.surface_config.as_ref().unwrap();
                 surface.configure(&self.device, config);
                 surface.get_current_texture().map_err(|e| {
-                    RendererError::BufferSwapFailed(format!(
-                        "Failed to get WGPU texture after reconfigure: {}",
-                        e
-                    ))
+                    RendererError::BufferSwapFailed(format!("Failed to get WGPU texture after reconfigure: {}", e))
                 })?
             }
             Err(e) => {
-                return Err(RendererError::BufferSwapFailed(format!(
-                    "Failed to get WGPU texture: {}",
-                    e
-                )));
+                return Err(RendererError::BufferSwapFailed(format!("Failed to get WGPU texture: {}", e)));
             }
         };
 
-        let view = output_frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
+        let view = surface_texture.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("NovaDE WGPU Render Encoder"),
+            label: Some("NovaDE WGPU Main Render Encoder"),
         });
 
-        {
+        { // Main render pass block
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("NovaDE Main Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &view, // Render directly to the swapchain texture view
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0, g: 0.0, b: 0.0, a: 1.0, // Clear to black for better visibility of surfaces
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.1, g: 0.1, b: 0.15, a: 1.0 }), // Slightly different clear color for distinction
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None, // Added for wgpu 0.18+
-                occlusion_query_set: None, // Added for wgpu 0.18+
+                timestamp_writes: None,
+                occlusion_query_set: None,
             });
 
-            render_pass.set_pipeline(&self.render_pipeline);
+            // Set common buffers once
+            render_pass.set_pipeline(&self.render_pipeline); // Default to textured pipeline
             render_pass.set_vertex_buffer(0, self.quad_vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.quad_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
             for element in elements {
                 match element {
-                    RenderElement::WaylandSurface { surface_data_arc, geometry, .. } => {
-                        let surface_data = surface_data_mutex_arc.lock().unwrap(); // Corrected variable name from abstraction.rs
+                    RenderElement::TextureNode(params) => {
+                        render_pass.set_pipeline(&self.render_pipeline); // Ensure textured quad pipeline
+
+                        let wgpu_texture = params.texture.as_any().downcast_ref::<WgpuRenderableTexture>();
+
+                        if let Some(tex_ref) = wgpu_texture {
+                            // Create texture bind group (Group 0)
+                            let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                layout: &self.texture_bind_group_layout,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: wgpu::BindingResource::TextureView(tex_ref.view()),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu::BindingResource::Sampler(tex_ref.sampler()),
+                                    },
+                                ],
+                                label: Some("TextureNode BindGroup (Texture)"),
+                            });
+                            render_pass.set_bind_group(0, &texture_bind_group, &[]);
+
+                            // Create transform bind group (Group 1)
+                            // SceneGraphTransform.matrix is [[f32; 3]; 2]
+                            // Shader expects mat3x3<f32> (column-major)
+                            // m = [[m00, m01, m02], [m10, m11, m12]]
+                            // Column-major for shader: [m00, m10, 0.0,  m01, m11, 0.0,  m02, m12, 1.0]
+                            let sg_matrix = params.transform.matrix;
+                            let transform_uniform_data: [f32; 9] = [
+                                sg_matrix[0][0], sg_matrix[1][0], 0.0, // Col 0
+                                sg_matrix[0][1], sg_matrix[1][1], 0.0, // Col 1
+                                sg_matrix[0][2], sg_matrix[1][2], 1.0, // Col 2
+                            ];
+
+                            let transform_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                label: Some("TextureNode Transform Uniform Buffer"),
+                                contents: bytemuck::cast_slice(&transform_uniform_data),
+                                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                            });
+                            let transform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                layout: &self.transform_bind_group_layout,
+                                entries: &[wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: transform_buffer.as_entire_binding(),
+                                }],
+                                label: Some("TextureNode BindGroup (Transform)"),
+                            });
+                            render_pass.set_bind_group(1, &transform_bind_group, &[]);
+
+                            // Alpha is params.alpha (f32). Current shader doesn't use it.
+                            // If it did, it would be another uniform, likely in a new bind group or added to existing.
+                            // For now, alpha blending relies on texture's own alpha + pipeline blend state.
+                            // Current pipeline blend state is BlendState::REPLACE. For alpha < 1.0 to work,
+                            // this needs to be changed to e.g. BlendState::ALPHA_BLENDING.
+
+                            // Scissor rectangle
+                            // params.clip_rect is Rect<f32> in world/screen coordinates (Physical for WGPU)
+                            // Ensure it's within the bounds of the render target.
+                            let target_w = self.surface_config.as_ref().map_or(1, |c| c.width) as f32;
+                            let target_h = self.surface_config.as_ref().map_or(1, |c| c.height) as f32;
+
+                            let scissor_x = params.clip_rect.origin.x.max(0.0).min(target_w) as u32;
+                            let scissor_y = params.clip_rect.origin.y.max(0.0).min(target_h) as u32;
+                            let scissor_w = (params.clip_rect.origin.x + params.clip_rect.size.width)
+                                .max(0.0).min(target_w) as u32 - scissor_x;
+                            let scissor_h = (params.clip_rect.origin.y + params.clip_rect.size.height)
+                                .max(0.0).min(target_h) as u32 - scissor_y;
+
+                            if scissor_w > 0 && scissor_h > 0 {
+                                render_pass.set_scissor_rect(scissor_x, scissor_y, scissor_w, scissor_h);
+                                render_pass.draw_indexed(0..self.quad_num_indices, 0, 0..1);
+                            } else {
+                                // Scissor rect is empty, nothing to draw.
+                            }
+
+                        } else {
+                            tracing::warn!("Failed to downcast RenderableTexture to WgpuRenderableTexture for TextureNode. Skipping draw.");
+                            // Optionally, render a fallback color/texture here if desired, using self.dummy_white_texture
+                        }
+                    }
+                    RenderElement::WaylandSurface { surface_data_mutex_arc, geometry, .. } => { // Corrected surface_data_arc to surface_data_mutex_arc
+                        let surface_data = surface_data_mutex_arc.lock().unwrap();
                         if let Some(renderable_texture_arc) = surface_data.texture_handle.as_ref() {
-                            // Downcast Arc<dyn RenderableTexture> to &WgpuRenderableTexture
                             if let Some(wgpu_tex) = renderable_texture_arc.as_any().downcast_ref::<WgpuRenderableTexture>() {
-                                // Create a new bind group for this texture
                                 let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                                     layout: &self.texture_bind_group_layout,
                                     entries: &[
-                                        wgpu::BindGroupEntry {
-                                            binding: 0,
-                                            resource: wgpu::BindingResource::TextureView(wgpu_tex.view()),
-                                        },
-                                        wgpu::BindGroupEntry {
-                                            binding: 1,
-                                            resource: wgpu::BindingResource::Sampler(wgpu_tex.sampler()),
-                                        },
+                                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(wgpu_tex.view()) },
+                                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(wgpu_tex.sampler()) },
                                     ],
                                     label: Some("Wayland Surface Texture Bind Group"),
                                 });
+                                render_pass.set_pipeline(&self.render_pipeline); // Ensure correct pipeline
                                 render_pass.set_bind_group(0, &texture_bind_group, &[]);
                             } else {
-                                // Fallback or error if downcast fails: render a magenta placeholder using solid_color_pipeline
-                                tracing::warn!("Failed to downcast RenderableTexture to WgpuRenderableTexture for WaylandSurface. Rendering placeholder.");
-                                render_pass.set_pipeline(&self.solid_color_pipeline); // Switch to solid color
+                                tracing::warn!("Failed to downcast RenderableTexture for WaylandSurface. Rendering placeholder.");
+                                render_pass.set_pipeline(&self.solid_color_pipeline);
                                 let color = [1.0f32, 0.0, 1.0, 1.0]; // Magenta
                                 let color_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                                     label: Some("Fallback Color Uniform Buffer"),
@@ -583,52 +665,38 @@ impl FrameRenderer for NovaWgpuRenderer {
                                     label: Some("Fallback Color Bind Group"),
                                 });
                                 render_pass.set_bind_group(0, &fallback_bind_group, &[]);
-                                // Ensure pipeline is reset for next element if it was changed
-                                // This draw call will use the solid_color_pipeline.
-                                // Need to reset to self.render_pipeline if next element is textured.
                             }
 
-                            // Transformation for WaylandSurface (common for textured or placeholder)
                             let screen_w = self.screen_size_physical.w as f32;
                             let screen_h = self.screen_size_physical.h as f32;
                             let quad_width = geometry.size.w as f32;
                             let quad_height = geometry.size.h as f32;
-
                             let scale_x_ndc = quad_width / screen_w;
                             let scale_y_ndc = quad_height / screen_h;
-
                             let top_left_x_logical = geometry.loc.x as f32;
                             let top_left_y_logical = geometry.loc.y as f32;
-
                             let pos_x_ndc = (top_left_x_logical / screen_w) * 2.0 - 1.0;
                             let pos_y_ndc = (top_left_y_logical / screen_h) * -2.0 + 1.0;
-
                             let final_translate_x_ndc = pos_x_ndc + scale_x_ndc;
                             let final_translate_y_ndc = pos_y_ndc - scale_y_ndc;
-
                             let transform_matrix_col_major = [
                                 scale_x_ndc, 0.0, 0.0,
                                 0.0, scale_y_ndc, 0.0,
                                 final_translate_x_ndc, final_translate_y_ndc, 1.0,
                             ];
-
                             let transform_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                                 label: Some("WaylandSurface Transform Uniform Buffer"),
                                 contents: bytemuck::cast_slice(&transform_matrix_col_major),
                                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                             });
-
                             let transform_bind_group_group1 = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                layout: &self.transform_bind_group_layout, // Layout for group 1 (transform)
+                                layout: &self.transform_bind_group_layout,
                                 entries: &[wgpu::BindGroupEntry { binding: 0, resource: transform_buffer.as_entire_binding() }],
                                 label: Some("WaylandSurface Transform Bind Group (Group 1)"),
                             });
-
-                            render_pass.set_bind_group(1, &transform_bind_group_group1, &[]); // Set transform for group 1
+                            render_pass.set_bind_group(1, &transform_bind_group_group1, &[]);
                             render_pass.draw_indexed(0..self.quad_num_indices, 0, 0..1);
-
-                            // Reset to textured pipeline if it was changed by fallback
-                            render_pass.set_pipeline(&self.render_pipeline);
+                            render_pass.set_pipeline(&self.render_pipeline); // Reset to default textured pipeline
                         } else {
                             tracing::trace!("WaylandSurface element (geom {:?}) has no texture_handle, skipping render.", geometry);
                         }
@@ -676,7 +744,7 @@ impl FrameRenderer for NovaWgpuRenderer {
                         render_pass.set_bind_group(1, &transform_bind_group_solid, &[]);
                         render_pass.draw_indexed(0..self.quad_num_indices, 0, 0..1);
                         // Reset to textured pipeline for next element
-                        render_pass.set_pipeline(&self.render_pipeline);
+                        render_pass.set_pipeline(&self.render_pipeline); // Reset to default textured pipeline
                     }
                     RenderElement::Cursor { texture_arc, position_logical, hotspot_logical, .. } => {
                         // hotspot_logical is relative to the cursor image's top-left.
@@ -818,23 +886,28 @@ impl FrameRenderer for NovaWgpuRenderer {
                     }
                 }
             }
-        } // render_pass is dropped here
+        } // render_pass is dropped, encoder is still mutable here.
 
-        self.queue.submit(std::iter::once(encoder.finish()));
-
-        drop(output_frame);
+        // Store the encoder and surface texture for submit_and_present_frame
+        self.current_encoder = Some(encoder);
+        self.current_surface_texture = Some(surface_texture);
 
         Ok(())
     }
 
-    // Update present_frame if needed. With implicit presentation on SurfaceTexture drop,
-    // this might become a no-op or handle other vsync-related logic if any.
-    fn present_frame(&mut self) -> Result<(), RendererError> {
-        // As of wgpu 0.13+ (and 0.18), presentation happens when the SurfaceTexture is dropped.
-        // If render_frame ensures the SurfaceTexture is dropped (e.g. by not storing it beyond its scope),
-        // then this method might not need to do anything explicit for presentation.
-        tracing::debug!("NovaWgpuRenderer::present_frame called (presentation is implicit on SurfaceTexture drop).");
-        Ok(())
+    fn submit_and_present_frame(&mut self) -> Result<(), RendererError> {
+        if let Some(encoder) = self.current_encoder.take() {
+            if let Some(surface_texture) = self.current_surface_texture.take() {
+                self.queue.submit(std::iter::once(encoder.finish()));
+                surface_texture.present(); // Explicitly present (or drop for implicit presentation)
+                tracing::debug!("Frame submitted and presented.");
+                Ok(())
+            } else {
+                Err(RendererError::Generic("submit_and_present_frame called without a surface texture. Was render_frame called?".to_string()))
+            }
+        } else {
+            Err(RendererError::Generic("submit_and_present_frame called without an encoder. Was render_frame called?".to_string()))
+        }
     }
 
     fn screen_size(&self) -> Size<i32, Physical> {
@@ -973,6 +1046,155 @@ impl FrameRenderer for NovaWgpuRenderer {
         Err(RendererError::Unsupported(
             "DMABUF texture import not yet fully implemented for WGPU. Requires EGL interop or specific WGPU extensions.".to_string()
         ))
+    }
+
+    fn upload_surface_texture(
+        &mut self,
+        _surface_id: SurfaceId, // Used for logging/debugging, not directly for texture creation itself unless managing a map here
+        buffer: &ClientBuffer<'_>,
+    ) -> Result<Box<dyn RenderableTexture>, RendererError> {
+        tracing::debug!(
+            "Uploading texture for surface_id (not directly used by WGPU texture keying currently), buffer_id: {}, size: {}x{}, stride: {}, format: {:?}",
+            buffer.id, buffer.width, buffer.height, buffer.stride, buffer.format
+        );
+
+        let wgpu_texture_format = match buffer.format {
+            AbstractionBufferFormat::Argb8888 => wgpu::TextureFormat::Bgra8UnormSrgb,
+            AbstractionBufferFormat::Xrgb8888 => wgpu::TextureFormat::Bgra8UnormSrgb, // Treat X as opaque, map to BGRA
+            // TODO: Add other format mappings as they are defined in AbstractionBufferFormat
+            // For example, if AbstractionBufferFormat::Rgba8888 is added:
+            // AbstractionBufferFormat::Rgba8888 => wgpu::TextureFormat::Rgba8UnormSrgb,
+            _ => {
+                let err_msg = format!("Unsupported client buffer format for WGPU texture creation: {:?}", buffer.format);
+                tracing::error!("{}", err_msg);
+                // Assuming RendererError has a variant like UnsupportedPixelFormat or similar
+                return Err(RendererError::Generic(err_msg)); // Replace with specific error variant if available
+            }
+        };
+
+        if buffer.width == 0 || buffer.height == 0 {
+            return Err(RendererError::TextureUploadFailed("Buffer dimensions are zero.".to_string()));
+        }
+
+        // Stride check: bytes_per_row must be a multiple of wgpu::COPY_BYTES_PER_ROW_ALIGNMENT (256)
+        // and also >= width * bytes_per_pixel.
+        // For now, we pass buffer.stride directly. If it's not compliant, write_texture might fail or misbehave.
+        // TODO: Add robust stride handling (e.g., use a staging buffer if stride is not aligned).
+        if buffer.stride % wgpu::COPY_BYTES_PER_ROW_ALIGNMENT != 0 {
+            tracing::warn!(
+                "Buffer stride {} is not a multiple of WGPU COPY_BYTES_PER_ROW_ALIGNMENT ({}). \
+                Texture upload might fail or be incorrect without a staging buffer.",
+                buffer.stride, wgpu::COPY_BYTES_PER_ROW_ALIGNMENT
+            );
+            // For now, we'll proceed, but this is a point of potential failure or incorrect rendering.
+        }
+        let bytes_per_pixel = match buffer.format {
+            AbstractionBufferFormat::Argb8888 | AbstractionBufferFormat::Xrgb8888 => 4,
+            // Add other formats if necessary
+        };
+        if buffer.stride < buffer.width * bytes_per_pixel {
+             return Err(RendererError::TextureUploadFailed(format!(
+                "Buffer stride {} is less than minimum required {} (width {} * bytes_per_pixel {})",
+                buffer.stride, buffer.width * bytes_per_pixel, buffer.width, bytes_per_pixel
+            )));
+        }
+
+
+        let texture_size = wgpu::Extent3d {
+            width: buffer.width,
+            height: buffer.height,
+            depth_or_array_layers: 1,
+        };
+
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("Surface Texture (buffer_id: {})", buffer.id)),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu_texture_format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        tracing::debug!("Created WGPU texture {:?} for client buffer.", texture.global_id());
+
+        self.queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            buffer.data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(buffer.stride),
+                rows_per_image: Some(buffer.height),
+            },
+            texture_size,
+        );
+        tracing::debug!("Client buffer data written to WGPU texture {:?}.", texture.global_id());
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // For sampler, we can reuse the default_sampler or create a new one if specific settings are needed.
+        // Reusing default_sampler is often fine.
+        let sampler = self.default_sampler.clone();
+        tracing_debug!("Created view and using default sampler for WGPU client texture {:?}.", texture.global_id());
+
+
+        Ok(Box::new(WgpuRenderableTexture::new(
+            self.device.clone(),
+            texture, // WgpuRenderableTexture takes ownership
+            view,    // WgpuRenderableTexture takes ownership
+            sampler, // This needs to be wgpu::Sampler, not Arc<wgpu::Sampler> if WgpuRenderableTexture::new takes by value
+                     // Oh, WgpuRenderableTexture::new takes wgpu::Sampler, but stores Arc<wgpu::Sampler>.
+                     // So, we need to dereference the Arc for the call, or change new to take Arc.
+                     // Let's assume WgpuRenderableTexture::new can take the Arc directly or clone from it.
+                     // The current WgpuRenderableTexture::new takes objects and Arcs them internally.
+                     // So self.default_sampler (Arc<Sampler>) needs to be cloned then passed.
+                     // No, it takes `sampler: wgpu::Sampler`. So we must provide a `wgpu::Sampler` not an `Arc`.
+                     // This means we might not be able to just clone the Arc.
+                     // Let's create a new sampler for simplicity here, or ensure default_sampler is accessible as &wgpu::Sampler.
+                     // The self.default_sampler is Arc<wgpu::Sampler>.
+                     // We can pass self.default_sampler.as_ref().clone() if WgpuRenderableTexture::new expects a wgpu::Sampler.
+                     // Or, WgpuRenderableTexture::new should take Arc<wgpu::Sampler>.
+                     // Looking at wgpu_texture.rs, WgpuRenderableTexture::new takes `sampler: wgpu::Sampler` and then Arcs it.
+                     // So `(*self.default_sampler).clone()` or a new sampler.
+                     // Let's just create a new default one for now to avoid lifetime issues with deref then clone.
+            self.device.create_sampler(&wgpu::SamplerDescriptor { // Basic sampler
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            }),
+            buffer.width,
+            buffer.height,
+            wgpu_texture_format,
+            None, // ClientBuffer doesn't have FourCC, SHM/DMABUF path would.
+        )))
+    }
+
+    fn apply_gamma_correction(&mut self, gamma_value: f32) -> Result<(), RendererError> {
+        tracing::info!("[WGPU Renderer] apply_gamma_correction called with gamma: {}", gamma_value);
+        // TODO [WGPUShaderGamma]: Implement actual gamma correction shader and pass.
+        // This would involve:
+        // 1. Ensuring the main scene was rendered to a texture.
+        // 2. Setting up a new render pass targeting the swapchain image (or an intermediate texture).
+        // 3. Binding a gamma correction shader pipeline.
+        // 4. Binding the source texture (from step 1).
+        // 5. Passing gamma_value as a uniform.
+        // 6. Drawing a full-screen quad.
+        Ok(())
+    }
+
+    fn apply_hdr_to_sdr_tone_mapping(&mut self, max_luminance: f32, exposure: f32) -> Result<(), RendererError> {
+        tracing::info!("[WGPU Renderer] apply_hdr_to_sdr_tone_mapping called with max_lum: {}, exp: {}", max_luminance, exposure);
+        // TODO [WGPUShaderToneMap]: Implement actual tone mapping shader and pass.
+        // Similar steps to gamma correction: render-to-texture, new pass, specific shader, source texture, uniforms, full-screen quad.
+        Ok(())
     }
 }
 

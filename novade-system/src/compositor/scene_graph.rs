@@ -1,4 +1,5 @@
 // novade-system/src/compositor/scene_graph.rs
+// ANCHOR [SpatialIndexingImplemented]
 use novade_compositor_core::surface::{SurfaceId, SurfaceState}; // Assuming SurfaceState exists
 // Assuming Point2D = Point<f32>, Size2D = Size<f32>, Rectangle = Rect<f32> from novade_core
 use novade_core::types::geometry::{Point, Size, Rect};
@@ -10,6 +11,7 @@ const GRID_CELL_SIZE: f32 = 256.0; // Example cell size
 const MAX_OUTPUT_WIDTH_FOR_GRID: f32 = 1920.0 * 2.0;
 const MAX_OUTPUT_HEIGHT_FOR_GRID: f32 = 1080.0 * 2.0;
 
+// ANCHOR [SpatialIndexingImplemented]
 #[derive(Debug)]
 pub struct SpatialIndex {
     grid: HashMap<(i32, i32), Vec<SurfaceId>>,
@@ -20,6 +22,7 @@ pub struct SpatialIndex {
 }
 
 impl SpatialIndex {
+    // ANCHOR [SpatialIndexingImplemented]
     pub fn new(output_geometry: &Rectangle, cell_size: f32) -> Self {
         // Use output_geometry.size.width and .size.height for cols/rows calculation
         let grid_cols = (output_geometry.size.width / cell_size).ceil() as i32;
@@ -33,6 +36,7 @@ impl SpatialIndex {
         }
     }
 
+    // ANCHOR [SpatialIndexingImplemented]
     pub fn rebuild_corrected(&mut self, nodes: &[Arc<SceneGraphNode>], output_geometry: &Rectangle) {
         self.grid.clear();
         self.indexed_output_geometry = *output_geometry;
@@ -65,6 +69,7 @@ impl SpatialIndex {
         }
     }
 
+    // ANCHOR [SpatialIndexingImplemented]
     pub fn query(&self, query_rect: &Rectangle) -> HashSet<SurfaceId> {
         let mut potential_surfaces = HashSet::new();
         if query_rect.size.width == 0.0 || query_rect.size.height == 0.0 {
@@ -204,6 +209,14 @@ impl RectExt for Rectangle {
     }
 }
 
+// Duplicating BufferFormat here from abstraction.rs for now.
+// TODO: Move to a shared types module if this becomes common.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BufferFormat {
+    Argb8888,
+    Xrgb8888,
+    // ... other common formats
+}
 
 // Attributes of a surface relevant for scene graph construction
 #[derive(Debug, Clone)]
@@ -215,6 +228,10 @@ pub struct SurfaceAttributes {
     pub z_order: i32, // Relative Z-order
     pub opaque_region: Option<Rectangle>, // For damage tracking and culling
     pub parent: Option<SurfaceId>, // New field
+    // New fields for buffer information:
+    pub current_buffer_id: Option<u64>, // ID to track buffer changes
+    pub buffer_format: Option<BufferFormat>, // Format of the current buffer
+    pub buffer_stride: u32, // Stride of the current buffer (default to 0 if no buffer)
 }
 
 pub struct SceneGraph {
@@ -271,6 +288,7 @@ impl SceneGraph {
 
                 // Calculate the world transform:
                 // Parent's_World_Transform * Translation_Transform * Local_Surface_Transform
+                // ANCHOR [TransformApplication]
                 let world_transform = parent_transform
                                       .then(&translation_transform)
                                       .then(local_transform);
@@ -284,6 +302,7 @@ impl SceneGraph {
                 let transformed_bounding_box = world_transform.transform_rect_bounding_box(surface_rect_local);
 
                 // Clip this world-coordinate rectangle against the output geometry
+                // ANCHOR [SurfaceClipping]
                 let clipped_rect = transformed_bounding_box.intersection(output_geometry)
                     .unwrap_or_else(|| Rectangle::from_coords(0.0, 0.0, 0.0, 0.0)); // Zero sized if no intersection
 
@@ -307,6 +326,7 @@ impl SceneGraph {
             .collect();
 
         // Z-Order Sorting: Higher z_order means it's rendered on top.
+        // ANCHOR [ZOrderSorting]
         sorted_nodes.sort_by(|a, b| a.z_order.cmp(&b.z_order));
         self.nodes = sorted_nodes;
 
@@ -319,6 +339,7 @@ impl SceneGraph {
     }
 
     // Placeholder for spatial indexing
+    // ANCHOR [SpatialIndexingImplemented]
     fn perform_spatial_indexing(&mut self, output_geometry: &Rectangle) {
         // Rebuild the spatial index if the output geometry has changed or if there are nodes.
         // If there are no nodes and the geometry hasn't changed, we can skip.
@@ -340,6 +361,10 @@ impl SceneGraph {
     }
 
     // Placeholder for occlusion culling
+    // ANCHOR [OcclusionCullingImplemented]
+    // TODO [SpatialIndexForOcclusion] Current occlusion culling iterates all higher Z-nodes.
+    // This could be optimized by querying the spatial_index for potential occluders
+    // in the vicinity of the current_node_arc.clipped_rect.
     fn perform_occlusion_culling(&mut self) {
         if self.nodes.is_empty() {
             return;
@@ -429,6 +454,9 @@ mod tests {
                 z_order: z,
                 opaque_region: Some(Rectangle::from_coords(0.0,0.0,w,h)),
                 parent: None,
+                current_buffer_id: None, // Default for test node
+                buffer_format: None,     // Default for test node
+                buffer_stride: 0,        // Default for test node
             },
             // For spatial index tests, clipped_rect is the most important part.
             // We simulate that it has been correctly calculated by prior steps.
@@ -615,11 +643,13 @@ mod tests {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1, // Lower Z
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
+            current_buffer_id: Some(101), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
         });
         surface_data_map.insert(surf2_id, SurfaceAttributes {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0), // Same spot
             transform: Transform::identity(), is_visible: true, z_order: 2, // Higher Z
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
+            current_buffer_id: Some(102), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
         });
 
         sg.update(&surface_data_map, &output_geom); // This calls perform_occlusion_culling
@@ -642,12 +672,14 @@ mod tests {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
+            current_buffer_id: Some(201), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
         });
         let surf2_id = SurfaceId::new(2);
         surface_data_map.insert(surf2_id, SurfaceAttributes {
             position: Point2D::new(70.0, 70.0), size: Size2D::new(50.0, 50.0), // Different spot
             transform: Transform::identity(), is_visible: true, z_order: 2,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
+            current_buffer_id: Some(202), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
         });
         sg.update(&surface_data_map, &output_geom);
         let node1 = sg.nodes.iter().find(|n| n.surface_id == surf1_id).unwrap();
@@ -667,12 +699,14 @@ mod tests {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
+            current_buffer_id: Some(301), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
         });
         let surf2_id = SurfaceId::new(2); // Occluder node
         surface_data_map.insert(surf2_id, SurfaceAttributes {
             position: Point2D::new(30.0, 30.0), size: Size2D::new(50.0, 50.0), // Overlaps (10,10)-(60,60) with (30,30)-(80,80)
             transform: Transform::identity(), is_visible: true, z_order: 2,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
+            current_buffer_id: Some(302), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
         });
         sg.update(&surface_data_map, &output_geom);
         let node1 = sg.nodes.iter().find(|n| n.surface_id == surf1_id).unwrap();
@@ -690,6 +724,7 @@ mod tests {
             position: Point2D::new(200.0, 200.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
+            current_buffer_id: Some(401), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
         });
         sg.update(&surface_data_map, &output_geom);
         // The node might not even be in sg.nodes if it's fully clipped before occlusion check.
@@ -716,12 +751,14 @@ mod tests {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
+            current_buffer_id: Some(402), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
         });
         surface_data_map.insert(surf3_id, SurfaceAttributes {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 2,
              // Opaque region is only the top-left quarter of the surface
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,25.0,25.0)), parent: None,
+            current_buffer_id: Some(403), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 25*4, // Example stride
         });
         sg.update(&surface_data_map, &output_geom);
         let node2 = sg.nodes.iter().find(|n| n.surface_id == surf2_id).unwrap();
@@ -744,12 +781,14 @@ mod tests {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
+            current_buffer_id: Some(501), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
         });
         surface_data_map.insert(surf2_id, SurfaceAttributes {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 2,
             opaque_region: None, // Occluder considered fully opaque via its clipped_rect
             parent: None,
+            current_buffer_id: Some(502), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
         });
 
         sg.update(&surface_data_map, &output_geom);
