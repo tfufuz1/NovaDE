@@ -1,7 +1,15 @@
 use std::collections::{HashMap, VecDeque};
 use crate::compositor::wayland_server::client::Client;
 use crate::compositor::wayland_server::message::Message;
-use crate::compositor::wayland_server::object_registry::{ObjectRegistry, WaylandObject}; // For later use
+use crate::compositor::wayland_server::object_registry::{ObjectRegistry, WaylandObject};
+use super::event_sender::EventSender; // Added import
+
+// Protocol error codes (example, replace with actual Wayland codes or an enum)
+const WL_DISPLAY_ERROR_INVALID_OBJECT: u32 = 0; // Example code
+const WL_DISPLAY_ERROR_INVALID_METHOD: u32 = 1; // Example code
+const WL_DISPLAY_ERROR_NO_MEMORY: u32 = 2;    // Example code
+const WL_DISPLAY_ERROR_IMPLEMENTATION: u32 = 3; // Example for dispatch_request failure
+
 
 /// Represents events within the Wayland server.
 #[derive(Debug, Clone)]
@@ -94,35 +102,68 @@ impl EventDispatcher {
         let mut events_processed = 0;
         while let Some(event) = self.event_queue.dequeue() {
             events_processed += 1;
-            println!("[EventDispatcher] Processing event: {:?}", event); // Log the event being processed
+            // println!("[EventDispatcher] Processing event: {:?}", event); // Log the event being processed
 
             match event {
                 WaylandEvent::ClientMessage { client_id, message } => {
-                    if let Some(_client) = clients.get_mut(&client_id) {
-                        // Successfully found the client associated with the message
+                    if let Some(client_info) = clients.get(&client_id) { // Get immutable ref first
                         println!(
                             "[EventDispatcher] ClientMessage from client_id {}: object_id={}, opcode={}",
                             client_id, message.sender_id, message.opcode
                         );
 
-                        // Attempt to find the target object in the registry
-                        if let Some(_target_object) = registry.get_object_mut(message.sender_id) {
-                            // TODO: Implement actual message dispatch to the object.
-                            // This would involve calling a method on `_target_object` like:
-                            // `_target_object.dispatch(message.opcode, message.args, client_context, server_context)?;`
-                            // For now, just log that we found the object.
-                            println!(
-                                "[EventDispatcher] Target object_id {} found for message from client_id {}.",
-                                message.sender_id, client_id
-                            );
-                            // Example: if it's wl_display.get_registry, the client::handle_readable already made the object.
-                            // Here, we would dispatch the actual request to that object if it had methods.
+                        if let Some(target_object) = registry.get_object_mut(message.sender_id) {
+                            // Create an EventSender for this dispatch operation.
+                            // This borrows self.event_queue.queue mutably for the duration of dispatch.
+                            let mut event_sender = EventSender::new(&mut self.event_queue.queue);
+
+                            match target_object.dispatch_request(
+                                message.opcode,
+                                message.args, // Consumed here
+                                client_info,  // Pass client info
+                                message.sender_id, // ID of the object receiving the call
+                                &mut event_sender,
+                                registry, // Pass mutable registry
+                            ) {
+                                Ok(()) => {
+                                    // Request dispatched successfully
+                                    println!("[EventDispatcher] Request (obj: {}, opcode: {}) dispatched successfully for client {}.", message.sender_id, message.opcode, client_id);
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[EventDispatcher] Error dispatching request (obj: {}, opcode: {}) for client {}: {}",
+                                        message.sender_id, message.opcode, client_id, e
+                                    );
+                                    // Send a wl_display.error event to the client.
+                                    // Use message.sender_id as the error_object_id, as it's the object that failed.
+                                    // Error code can be generic for now.
+                                    if let Err(send_err) = event_sender.send_protocol_error(
+                                        client_id,
+                                        message.sender_id, // Object where error occurred
+                                        WL_DISPLAY_ERROR_IMPLEMENTATION, // Generic "implementation" error
+                                        format!("Request failed: {}", e),
+                                    ) {
+                                        eprintln!("[EventDispatcher] CRITICAL: Failed to send protocol error to client {}: {}", client_id, send_err);
+                                        // If sending the error fails, we might need to disconnect the client.
+                                        // self.post_event(WaylandEvent::ClientDisconnect { client_id }); // Avoid direct call in loop
+                                    }
+                                }
+                            }
                         } else {
                             eprintln!(
                                 "[EventDispatcher] Error: Target object_id {} not found for message from client_id {}.",
                                 message.sender_id, client_id
                             );
-                            // TODO: Send a protocol error to the client (e.g., invalid object).
+                            // Create an EventSender to send the error
+                            let mut event_sender = EventSender::new(&mut self.event_queue.queue);
+                            if let Err(send_err) = event_sender.send_protocol_error(
+                                client_id,
+                                message.sender_id, // The object that was not found
+                                WL_DISPLAY_ERROR_INVALID_OBJECT, // "invalid object" error
+                                format!("Object ID {} not found.", message.sender_id),
+                            ) {
+                                 eprintln!("[EventDispatcher] CRITICAL: Failed to send 'invalid object' protocol error to client {}: {}", client_id, send_err);
+                            }
                         }
                     } else {
                         eprintln!(
@@ -141,18 +182,32 @@ impl EventDispatcher {
                         // might be shared or have different ownership semantics.
                         // For now, we'll implement a simple cleanup.
                         let mut objects_to_remove: Vec<u32> = Vec::new();
-                        for (obj_id, entry) in registry.get_entries_iter() { // Assuming get_entries_iter() exists
-                            if entry.client_id == client_id && *obj_id != 1 { // Don't remove wl_display
+                        // Collect all objects associated with the disconnected client.
+                        // We don't need to worry about parent/child relationships here specifically,
+                        // as destroy_object() will handle cascading.
+                        // We also ensure not to try and remove wl_display (ID 1).
+                        for (obj_id, entry) in registry.get_entries_iter() {
+                            if entry.client_id == client_id && *obj_id != 1 {
                                 objects_to_remove.push(*obj_id);
                             }
                         }
+
+                        println!("[EventDispatcher] Client {} disconnected. Found {} objects to clean up: {:?}.", client_id, objects_to_remove.len(), objects_to_remove);
+
                         for obj_id in objects_to_remove {
-                            println!("[EventDispatcher] Destroying object {} for disconnected client {}.", obj_id, client_id);
-                            if let Err(e) = registry.destroy_object(obj_id) {
-                                eprintln!("[EventDispatcher] Error destroying object {}: {}", obj_id, e);
+                            // Check if the object still exists, as it might have been removed by a cascading delete
+                            // from a parent object also owned by the same client.
+                            if registry.get_object(obj_id).is_some() {
+                                println!("[EventDispatcher] Destroying object {} for disconnected client {}.", obj_id, client_id);
+                                if let Err(e) = registry.destroy_object(obj_id) {
+                                    // Log error, but continue cleanup. This might happen if an object was already
+                                    // destroyed due to cascading from another object in this list.
+                                    eprintln!("[EventDispatcher] Error destroying object {}: {} (it might have been already removed by cascade).", obj_id, e);
+                                }
+                            } else {
+                                println!("[EventDispatcher] Object {} for client {} was already removed (likely by cascade). Skipping.", obj_id, client_id);
                             }
                         }
-
                     } else {
                         eprintln!(
                             "[EventDispatcher] Warning: ClientDisconnect event for unknown client_id {}.",
@@ -165,24 +220,25 @@ impl EventDispatcher {
                     // TODO: Handle signals like shutdown, reconfigure, etc.
                 }
                 WaylandEvent::SendToClient { client_id, message_bytes } => {
-                    println!("[EventDispatcher] SendToClient event for client_id {}: {} bytes.", client_id, message_bytes.len());
                     if let Some(client) = clients.get_mut(&client_id) {
-                        // TODO: Implement actual message sending logic on client.stream
-                        // use std::io::Write;
-                        // if let Err(e) = client.stream.write_all(&message_bytes) {
-                        //     eprintln!("[EventDispatcher] Error sending message to client {}: {}", client_id, e);
-                        //     // Potentially queue ClientDisconnect event for this client
-                        // }
-                        println!("[EventDispatcher] Placeholder: Would send {} bytes to client {}.", message_bytes.len(), client_id);
+                        if let Err(e) = client.send_message_bytes(&message_bytes) {
+                            eprintln!("[EventDispatcher] Error sending message to client {}: {}. Marking for disconnect.", client_id, e);
+                            // Queue a disconnect event for this client.
+                            // Avoid direct manipulation of `clients` or `registry` here if it can be handled
+                            // by posting another event.
+                            self.event_queue.enqueue(WaylandEvent::ClientDisconnect { client_id });
+                        } else {
+                             println!("[EventDispatcher] Sent {} bytes to client {}.", message_bytes.len(), client_id);
+                        }
                     } else {
                         eprintln!("[EventDispatcher] Warning: SendToClient event for unknown client_id {}.", client_id);
                     }
                 }
             }
         }
-        if events_processed > 0 {
-            println!("[EventDispatcher] Processed {} events.", events_processed);
-        }
+        // if events_processed > 0 {
+        //     println!("[EventDispatcher] Processed {} events in this cycle.", events_processed);
+        // }
     }
 }
 
@@ -198,21 +254,48 @@ impl ObjectRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compositor::wayland_server::message::{Argument, Message as WaylandMessage}; // Renamed for clarity
-    use crate::compositor::wayland_server::object_registry::{ObjectRegistry, WlDisplay, WaylandObject};
-    use crate::compositor::wayland_server::client::Client; // For test setup
+    use crate::compositor::wayland_server::message::{Argument, Message as WaylandMessage};
+    use crate::compositor::wayland_server::object_registry::{ObjectRegistry, WlDisplay, WaylandObject, RegistryEntry}; // Added RegistryEntry
+    use crate::compositor::wayland_server::client::Client;
     use std::os::unix::net::UnixStream;
     use nix::sys::socket::UnixCredentials;
     use nix::unistd::{Uid, Gid, Pid};
+    use std::io::Read; // For test client to read what server sends
 
 
-    // Mock WaylandObject for testing
+    // Mock WaylandObject for testing dispatch_request
     #[derive(Debug)]
-    struct MockWaylandObject { pub name: String }
-    impl WaylandObject for MockWaylandObject {}
+    struct MockDispatchObject {
+        name: String,
+        last_opcode: Option<u16>,
+        should_error: bool,
+        events_to_send_on_dispatch: Vec<(u32, u16, Vec<Argument>)>, // (sender_id, opcode, args)
+    }
+    impl WaylandObject for MockDispatchObject {
+        fn dispatch_request(
+            &mut self,
+            request_opcode: u16,
+            _request_args: Vec<Argument>,
+            _client_info: &Client,
+            object_id: u32,
+            event_sender: &mut EventSender,
+            _object_registry: &mut ObjectRegistry,
+        ) -> Result<(), String> {
+            self.last_opcode = Some(request_opcode);
+            println!("[MockDispatchObject:{}] Received request opcode {}", self.name, request_opcode);
+            if self.should_error {
+                Err(format!("Mock error from {}", self.name))
+            } else {
+                for (sender_obj_id, opcode, args) in self.events_to_send_on_dispatch.drain(..) {
+                    event_sender.send_event(_client_info.id, sender_obj_id, opcode, args).unwrap();
+                }
+                Ok(())
+            }
+        }
+    }
+
 
     fn create_mock_client(id: u64) -> (Client, UnixStream) {
-        // Create a dummy socket pair for the stream
         let (stream1, stream2) = UnixStream::pair().unwrap();
         let creds = UnixCredentials::new(Uid::current().as_raw(), Gid::current().as_raw(), Some(Pid::this().as_raw()));
         (Client::new(id, stream1, creds), stream2)
