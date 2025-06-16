@@ -9,6 +9,25 @@ pub mod memory;
 pub mod dmabuf;
 pub mod texture_pipeline; // New
 pub mod command_buffer;   // New
+pub mod render_pass;      // Added for render pass
+pub mod framebuffer;      // Added for framebuffer
+pub mod shader;           // Added for shader modules
+pub mod pipeline;         // Added for graphics pipelines
+pub mod sync;             // Added for synchronization primitives
+pub mod renderer;         // Added for NovaVulkanRenderer
+pub mod buffer;           // Added for VMA-backed VulkanBuffer
+pub mod image;            // Added for VMA-backed VulkanImage
+
+pub use self::context::VulkanContext; // Assuming context.rs defines VulkanContext
+pub use self::swapchain::VulkanSwapchain; // Added for the new VulkanSwapchain struct
+pub use self::render_pass::VulkanRenderPass; // Added for VulkanRenderPass
+pub use self::framebuffer::VulkanFramebuffer; // Added for VulkanFramebuffer
+pub use self::shader::VulkanShaderModule; // Added for VulkanShaderModule
+pub use self::pipeline::VulkanPipeline; // Added for VulkanPipeline
+pub use self::sync::FrameSyncPrimitives; // Added for FrameSyncPrimitives
+pub use self.renderer::NovaVulkanRenderer; // Added for NovaVulkanRenderer
+pub use self::buffer::VulkanBuffer; // Added for VMA-backed VulkanBuffer
+pub use self::image::VulkanImage;   // Added for VMA-backed VulkanImage
 
 use crate::renderer_interface::RendererInterface;
 use novade_core::types::geometry::Size2D;

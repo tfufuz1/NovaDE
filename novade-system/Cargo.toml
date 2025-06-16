@@ -32,6 +32,11 @@ futures-core = "0.3"
 async-stream = "0.3"
 signal-hook = "0.3"
 polling = "3.4"
+ash = "0.37" # For Vulkan bindings
+ash-window = "0.12" # For Wayland surface creation with Ash
+gpu-allocator = { version = "0.22", features = ["ash"] } # Rust wrapper for VMA
+raw-window-handle = "0.5" # For integrating with Wayland surfaces
+
 
 [features]
 default = []
@@ -44,3 +49,7 @@ default = []
 # which is the intended outcome for a pure stub implementation.
 
 # Conditional dependency sections for libinput/udev are also removed.
+
+[[example]]
+name = "vulkan_renderer_test"
+path = "examples/vulkan_renderer_test.rs"
