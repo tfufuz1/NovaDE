@@ -19,7 +19,7 @@ pub use data_types::{
     InputEvent, KeyboardEventInfo, KeyState, ModifiersState,
     PointerMotionInfo, PointerButtonInfo, ButtonState, PointerAxisInfo, AxisMovement,
     TouchDownInfo, TouchUpInfo, TouchMotionInfo,
-    KeyboardState, PointerState, TouchState, Seat,
+    KeyboardState, PointerState, TouchState, // Seat removed
 };
 pub use input_handler::InputHandler;
 
@@ -34,14 +34,16 @@ use tracing::info;
 /// # Arguments
 ///
 /// * `seat_name`: A string slice representing the name of the seat to initialize (e.g., "seat0").
+///                This parameter is currently unused as InputHandler::new was changed.
+///                It might be removed or repurposed in future refactoring.
 ///
 /// # Returns
 ///
 /// A `Result` containing the initialized `InputHandler` or an `InputError` if
 /// initialization fails.
-pub fn initialize_input_subsystem(seat_name: String) -> Result<InputHandler, InputError> {
-    info!("Initializing Novade input subsystem for seat: {}", seat_name);
-    InputHandler::new(seat_name)
+pub fn initialize_input_subsystem(_seat_name: String) -> Result<InputHandler, InputError> { // seat_name parameter marked as unused for now
+    info!("Initializing Novade input subsystem"); // seat_name removed from log
+    InputHandler::new() // Call new without arguments
 }
 
 #[cfg(test)]
@@ -52,7 +54,7 @@ mod tests {
     // It relies on the same conditions as InputHandler::new() regarding udev availability.
     #[test]
     fn test_initialize_input_subsystem() {
-        match initialize_input_subsystem("seat_test_mod".to_string()) {
+        match initialize_input_subsystem("seat_test_mod".to_string()) { // Still passing a string, though new() doesn't use it
             Ok(_) => {
                 info!("Input subsystem initialized successfully via mod function.");
             }

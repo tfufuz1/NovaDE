@@ -137,26 +137,7 @@ pub struct TouchMotionInfo {
 }
 
 
-// Represents a "seat" - a collection of input devices assigned to a user.
-// This will likely need to be more integrated with Smithay's Seat later.
-#[derive(Debug, Clone, Default)] // Add other derives as needed
-pub struct Seat {
-    pub name: String, // e.g., "seat0"
-    pub keyboard_state: KeyboardState,
-    pub pointer_state: PointerState,
-    pub touch_state: TouchState,
-    // You might also store references or handles to the actual input devices
-    // or capabilities (e.g., has_keyboard, has_pointer).
-}
-
-impl Seat {
-    pub fn new(name: String) -> Self {
-        Seat {
-            name,
-            ..Default::default()
-        }
-    }
-}
+// Seat struct and its impl block removed.
 
 #[cfg(test)]
 mod tests {
@@ -344,28 +325,5 @@ mod tests {
         assert_eq!(event_info.y, 155.0);
     }
 
-    // --- Seat Tests ---
-    #[test]
-    fn test_seat_new() {
-        let seat_name = "seat_alpha".to_string();
-        let seat = Seat::new(seat_name.clone());
-        assert_eq!(seat.name, seat_name);
-        assert_eq!(seat.keyboard_state, KeyboardState::default());
-        assert_eq!(seat.pointer_state, PointerState::default());
-        assert_eq!(seat.touch_state, TouchState::default());
-    }
-
-    #[test]
-    fn test_seat_clonability_and_equality_if_needed() {
-        // Assuming Seat derives Clone and PartialEq
-        let seat1 = Seat::new("seat1".to_string());
-        let seat2 = seat1.clone();
-        // If they derive PartialEq, this should work.
-        // Note: Default PartialEq might not be what you want if they contain non-comparable fields later.
-        // For now, with simple fields and derived PartialEq, this is fine.
-         assert_eq!(seat1.name, seat2.name);
-         assert_eq!(seat1.keyboard_state, seat2.keyboard_state);
-         assert_eq!(seat1.pointer_state, seat2.pointer_state);
-         assert_eq!(seat1.touch_state, seat2.touch_state);
-    }
+    // Seat tests (test_seat_new, test_seat_clonability_and_equality_if_needed) removed.
 }
