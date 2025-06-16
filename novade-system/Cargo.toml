@@ -23,7 +23,7 @@ drm = "0.11.0"
 gbm = "0.11.0"
 nix = { version = "0.27.1", features = ["fs", "mount"] }
 glob = "0.3"
-sd-journal = "2"
+sd-journal = "0.1.0"
 futures-core = "0.3"
 async-stream = "0.3"
 
