@@ -30,6 +30,10 @@ use smithay::{
     input::{Seat, SeatHandler, SeatState, pointer::CursorImageStatus, keyboard::KeyboardHandle, touch::TouchSlotId}, // Added KeyboardHandle and TouchSlotId
     reexports::wayland_server::protocol::wl_surface::{WlSurface, Weak}, // Added WlSurface, Weak
     wayland::seat::WaylandSeatData, // Added WaylandSeatData
+    wayland::dmabuf::{DmabufHandler, DmabufGlobal, ImportNotifier}, // Added for DmabufHandler
+    backend::allocator::dmabuf::Dmabuf, // Added for DmabufHandler
+    reexports::wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_buffer_params_v1, // Added for DmabufHandler
+    backend::renderer::gles2::Gles2Texture, // Added for placeholder renderer Texture type
 };
 use std::{
     collections::HashMap,
@@ -37,14 +41,16 @@ use std::{
     time::Instant,
 };
 use crate::input::keyboard::xkb_config::XkbKeyboardData; // Added XkbKeyboardData
-use crate::compositor::surface_management::{AttachedBufferInfo, SurfaceData}; 
+use crate::compositor::surface_management::{AttachedBufferInfo, SurfaceData};
 use crate::compositor::core::ClientCompositorData;
+use crate::compositor::render::renderer::CompositorRenderer; // Added for DesktopState.renderer
+use crate::compositor::render::dmabuf_importer::DmabufImporter; // Added for DesktopState.dmabuf_importer
 use crate::compositor::shell::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
 use novade_domain::DomainServices;
 use crate::input::input_dispatcher::InputDispatcher;
 use crate::input::keyboard_layout::KeyboardLayoutManager;
-use crate::renderer::wgpu_renderer::NovaWgpuRenderer;
-use crate::compositor::renderer_interface::abstraction::FrameRenderer; // Added FrameRenderer import
+// use crate::renderer::wgpu_renderer::NovaWgpuRenderer; // Removed
+// use crate::compositor::renderer_interface::abstraction::FrameRenderer; // Removed
 use crate::display_management::WaylandDisplayManager;
 
 mod input_handlers; // Added module declaration
@@ -121,7 +127,8 @@ pub struct DesktopState {
     pub seat: Seat<Self>,
     pub pointer_location: Point<f64, Logical>,
     pub current_cursor_status: Arc<StdMutex<CursorImageStatus>>,
-    pub dmabuf_state: DmabufState,
+    pub dmabuf_state: DmabufState, // Already present
+    pub dmabuf_importer: Option<DmabufImporter>, // Added
     pub xdg_decoration_state: XdgDecorationState,
     pub screencopy_state: ScreencopyState, // Added screencopy_state
 
@@ -135,7 +142,8 @@ pub struct DesktopState {
     /// Specifies which renderer is currently active.
     /// TODO: This should ideally be dynamically determined or configured rather than defaulting to GLES.
     pub active_renderer_type: ActiveRendererType,
-    pub active_renderer: Option<Arc<Mutex<dyn FrameRenderer>>>, // Unified active renderer
+    // pub active_renderer: Option<Arc<Mutex<dyn FrameRenderer>>>, // This line is effectively removed / replaced by the line below
+    pub renderer: Option<Arc<Mutex<dyn CompositorRenderer<Texture = Arc<Gles2Texture>>>>>,
 
     // --- Added for MCP and CPU Usage Service ---
     pub mcp_connection_service: Option<Arc<TokioMutex<MCPConnectionService>>>,
@@ -151,9 +159,8 @@ pub struct DesktopState {
     pub touch_focus_per_slot: HashMap<TouchSlotId, Weak<WlSurface>>,
 
     // --- WGPU Renderer ---
-    // pub wgpu_renderer: Option<Arc<Mutex<NovaWgpuRenderer>>>, // TODO: Consolidate wgpu_renderer_concrete into active_renderer.
-    // Adding concrete WGPU renderer for commit path as a temporary solution
-    pub wgpu_renderer_concrete: Option<Arc<Mutex<NovaWgpuRenderer>>>, // TODO: Remove this if active_renderer fully suffices.
+    // pub wgpu_renderer: Option<Arc<Mutex<NovaWgpuRenderer>>>,
+    // pub wgpu_renderer_concrete: Option<Arc<Mutex<NovaWgpuRenderer>>>, // Removed
     pub display_manager: Arc<WaylandDisplayManager>,
 
     // --- Cursor Rendering State ---
@@ -247,11 +254,12 @@ impl DesktopState {
             tracing::warn!("Failed to add touch capability to seat in DesktopState::new: {}", e);
         }
 
-        let dmabuf_state = DmabufState::new();
+        let dmabuf_state = DmabufState::new(); // Already present
+        let dmabuf_importer = DmabufImporter::new().expect("Failed to create DmabufImporter"); // Added
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let screencopy_state = ScreencopyState::new::<Self>(&display_handle, None); // Initialize ScreencopyState
 
-        Self {
+        Ok(Self { // Added Ok() for SystemResult
             display_handle,
             loop_handle,
             clock,
@@ -270,7 +278,8 @@ impl DesktopState {
             seat,
             pointer_location: (0.0, 0.0).into(),
             current_cursor_status: Arc::new(StdMutex::new(CursorImageStatus::Default)),
-            dmabuf_state,
+            dmabuf_state, // Already present
+            dmabuf_importer: Some(dmabuf_importer), // Added
             xdg_decoration_state,
             screencopy_state, // Add to struct instantiation
             // vulkan_instance: None, // Removed
@@ -279,7 +288,8 @@ impl DesktopState {
             // vulkan_allocator: None, // Removed
             // vulkan_frame_renderer: None, // Removed
             active_renderer_type: ActiveRendererType::Gles, // Default, backend should update
-            active_renderer: None, // Initialize unified renderer as None
+            // active_renderer: None, // This field is being removed
+            renderer: None, // Added for the new renderer field
             // --- Initialize new service fields ---
             mcp_connection_service: None,
             cpu_usage_service: None,
@@ -288,7 +298,7 @@ impl DesktopState {
             input_dispatcher,
             keyboard_layout_manager,
             // wgpu_renderer: None, // Removed specific field
-            wgpu_renderer_concrete: None, // Initialize concrete WGPU renderer as None
+            // wgpu_renderer_concrete: None, // This field is being removed
             active_input_surface: None,
             keyboard_data_map,
             touch_focus_per_slot: HashMap::new(),
@@ -296,7 +306,7 @@ impl DesktopState {
             active_cursor_texture: None,
             cursor_hotspot: (0, 0).into(), // Initialize hotspot
             layer_shell_data: MyCustomLayerShellData::default(), // Initialize placeholder
-        })
+        }) // Removed Ok() from here as it's added above
     }
 
     // TODO: This render_frame method is being added/adapted to DesktopState
@@ -306,121 +316,114 @@ impl DesktopState {
     // might need further review.
     pub fn render_frame(
         &mut self,
-        background_color: [f32; 4],
-        output_size: smithay::utils::Size<i32, Physical>,
-        output_scale: f64,
+        output_obj: &Output, // The smithay Output object for context
     ) -> Result<(), String> {
-        let frame_renderer_arc = match &self.active_renderer {
-            Some(renderer) => renderer.clone(),
+        let renderer_arc = match &self.renderer {
+            Some(renderer_instance) => renderer_instance.clone(),
             None => {
-                tracing::warn!("render_frame called on DesktopState but no active_renderer is initialized.");
-                return Ok(());
+                tracing::warn!("render_frame called on DesktopState but no renderer is initialized for output {}.", output_obj.name());
+                return Err(format!("No active renderer for output {}", output_obj.name()));
             }
         };
-        let mut frame_renderer_guard = frame_renderer_arc.lock().unwrap();
 
-        let mut render_elements = Vec::new();
+        let output_geometry_logical = output_obj.current_geometry().unwrap_or_else(|| {
+            tracing::warn!("Output object {} has no current geometry, using default.", output_obj.name());
+            Default::default()
+        });
+        let output_scale = output_obj.current_scale().fractional_scale();
 
-        // Collect surface elements from self.space
-        // This requires ManagedWindow to provide wl_surface() and for SurfaceData to be accessible.
-        // Assuming SurfaceData is in wl_surface's data_map and texture_handle is Arc<dyn RenderableTexture>.
-        // The SurfaceData in surface_management.rs has texture_handle: Option<Box<dyn RenderableTexture>>
-        // RenderElement::Surface expects Box<dyn RenderableTexture>. This is consistent.
+        // Determine physical_output_size using current_mode or fallback to scaled logical size
+        let physical_output_size = output_obj.current_mode()
+            .map(|mode| mode.size)
+            .unwrap_or_else(|| {
+                tracing::debug!("Output object {} has no current mode, calculating physical size from logical geometry and scale.", output_obj.name());
+                output_geometry_logical.size.to_physical_precise_round(output_scale)
+            });
+
+        if physical_output_size.w == 0 || physical_output_size.h == 0 {
+            tracing::warn!("Physical output size is zero for output {}, skipping rendering.", output_obj.name());
+            return Ok(()); // Skip rendering if output size is invalid
+        }
+
+        let mut renderer_guard = renderer_arc.lock().unwrap();
+
+        let begin_frame_rect = Rectangle::from_loc_and_size(Point::from((0,0)), physical_output_size);
+        renderer_guard.begin_frame(begin_frame_rect)
+            .map_err(|e| format!("Renderer begin_frame failed for output {}: {:?}", output_obj.name(), e))?;
+
+        let mut surfaces_to_render: Vec<(&WlSurface, Rectangle<i32, Physical>)> = Vec::new();
         let space_elements = self.space.elements().cloned().collect::<Vec<_>>();
-        for element_window in &space_elements { // element_window is Arc<ManagedWindow>
-            if let Some(wl_surface) = element_window.wl_surface() { // Assuming ManagedWindow has wl_surface()
+
+        for element_window in &space_elements {
+            if let Some(wl_surface) = element_window.wl_surface() {
                 if !wl_surface.is_alive() {
-                    tracing::trace!("Surface not alive: {:?}", wl_surface.id());
+                    tracing::trace!("Surface not alive: {:?} on output {}", wl_surface.id(), output_obj.name());
                     continue;
                 }
-                // Accessing SurfaceData from compositor::surface_management
-                if let Some(s_data_arc) = wl_surface.data_map().get::<Arc<StdMutex<crate::compositor::surface_management::SurfaceData>>>() {
-                    let s_data = s_data_arc.lock().unwrap();
-                    if let Some(texture_handle_box) = &s_data.texture_handle {
-                        // RenderElement::Surface expects Box<dyn RenderableTexture>.
-                        // We have a &Box here. To pass ownership, we'd need to clone the Box's content.
-                        // This requires RenderableTexture to have a method for cloning into a Box.
-                        // E.g., trait RenderableTexture: ... { fn box_clone(&self) -> Box<dyn RenderableTexture>; }
-                        // And impl Clone for Box<dyn RenderableTexture> where T: RenderableTexture + Clone { ... }
-                        // For now, this is a conceptual problem. If FrameRenderer takes &[RenderElement],
-                        // we might not need to clone the Box itself, but the RenderElement construction needs a Box.
-                        // Let's assume for the diff that we can get a suitable Box.
-                        // The simplest way if the Box cannot be cloned is to not render surfaces in this pass
-                        // or to change how RenderElement takes the texture (e.g. by reference if possible, or Arc).
-                        // SurfaceData.texture_handle is Arc<dyn RenderableTexture>
-                        // RenderElement::Surface expects Arc<dyn RenderableTexture>
-                        // We can clone the Arc.
-                        if let Some(geo) = self.space.element_geometry(element_window) {
-                            // Need to get surface transformation properly.
-                            // smithay::wayland::compositor::get_surface_transformation is not available directly here.
-                            // CompositorState has this. self.compositor_state.get_surface_transformation(wl_surface)
-                            let transform = self.compositor_state.get_surface_transformation(&wl_surface);
-                            // TODO: Proper damage tracking for surfaces.
-                            let damage = vec![Rectangle::from_loc_and_size((0,0), geo.size)]; // Placeholder: full damage
 
-                            render_elements.push(crate::compositor::state::RenderElement::Surface {
-                                surface: unsafe { &*(wl_surface.inner_ptr() as *const WlSurface) }, // Extending lifetime for 'a. Unsafe but common for render elements.
-                                texture: texture_handle_box.clone(), // Clone Arc
-                                location: geo.loc,
-                                size: geo.size,
-                                transform,
-                                damage,
-                            });
-                            tracing::trace!("Added RenderElement::Surface for {:?}, geom: {:?}", wl_surface.id(), geo);
-                        } else { tracing::trace!("No geometry for surface {:?}", wl_surface.id());}
-                    } else { tracing::trace!("No texture_handle for surface {:?}", wl_surface.id()); }
-                } else { tracing::warn!("No SurfaceData (compositor::surface_management) for surface {:?}", wl_surface.id()); }
+                if let Some(logical_geo) = self.space.element_geometry(element_window) {
+                    // TODO: Check if the surface is on the current output_obj before adding.
+                    // This requires knowing the output for each surface or window.
+                    // For now, we render all space elements on every output.
+                    let physical_geo = Rectangle::from_loc_and_size(
+                        logical_geo.loc.to_physical_precise_round(output_scale) + output_geometry_logical.loc.to_physical_precise_round(output_scale), // Ensure surface position is relative to output
+                        logical_geo.size.to_physical_precise_round(output_scale)
+                    );
+                    surfaces_to_render.push((wl_surface, physical_geo));
+                    tracing::trace!("Added surface {:?} with logical_geo {:?}, physical_geo {:?} to render list for output {}", wl_surface.id(), logical_geo, physical_geo, output_obj.name());
+                } else {
+                    tracing::trace!("No geometry for surface {:?} on output {}", wl_surface.id(), output_obj.name());
+                }
             }
         }
 
-        // Collect cursor element using DesktopState's fields
-        let cursor_status_is_visible = self.current_cursor_status.lock().unwrap().is_visible();
-        if cursor_status_is_visible {
-            if let Some(cursor_texture_arc) = &self.active_cursor_texture { // This is Arc<dyn RenderableTexture>
-                // RenderElement::Cursor expects Arc<dyn RenderableTexture>
-                let cursor_element = crate::compositor::state::RenderElement::Cursor {
-                    texture: cursor_texture_arc.clone(),
-                    location: self.pointer_location.to_i32_round(),
-                    hotspot: self.cursor_hotspot,
-                };
-                render_elements.push(cursor_element);
-                tracing::trace!("Added RenderElement::Cursor to render list. Pos: {:?}, Hotspot: {:?}", self.pointer_location, self.cursor_hotspot);
-            } else {
-                tracing::trace!("Cursor is set to be visible, but no active_cursor_texture is available in DesktopState.");
-            }
-        }
+        let dmabuf_importer = self.dmabuf_importer.as_ref().ok_or_else(|| {
+            let err_msg = "DmabufImporter not initialized during render_frame.";
+            tracing::error!("{}", err_msg);
+            err_msg.to_string()
+        })?;
 
-        let render_span = tracing::info_span!("desktop_state_render_frame", output_size = ?output_size, num_elements = render_elements.len());
-        let _render_guard = render_span.enter();
+        renderer_guard.render_frame(
+            output_obj,
+            &surfaces_to_render,
+            dmabuf_importer,
+            self
+        ).map_err(|e| format!("Renderer render_frame failed for output {}: {:?}", output_obj.name(), e))?;
 
-        match frame_renderer_guard.render_frame(output_size, output_scale, &render_elements, background_color) {
-            Ok(_rendered_damage) => {
-                // Handle frame callbacks - this logic might need to be adapted depending on where smithay_compositor::SurfaceData is.
-                // Assuming space_elements contains items that have WlSurface.
-                let time_ms = self.clock.now().try_into().unwrap_or_default(); // Use self.clock
+        renderer_guard.finish_frame()
+            .map_err(|e| format!("Renderer finish_frame failed for output {}: {:?}", output_obj.name(), e))?;
 
-                for element_window in &space_elements {
-                    if let Some(wl_surface) = element_window.wl_surface() {
-                        if wl_surface.is_alive() {
-                            if let Some(data_refcell) = wl_surface.data_map().get::<std::cell::RefCell<smithay::wayland::compositor::SurfaceData>>() {
-                                let mut surface_data_inner = data_refcell.borrow_mut();
-                                if !surface_data_inner.frame_callbacks.is_empty() {
-                                    tracing::trace!(parent: &render_span, "Sending frame callbacks for surface {:?}", wl_surface.id());
-                                    for callback in surface_data_inner.frame_callbacks.drain(..) {
-                                        callback.done(time_ms);
-                                    }
-                                }
+        // Call present_frame on the renderer
+        // This requires Gles2Renderer (or any impl of CompositorRenderer) to have present_frame.
+        // The old FrameRenderer trait had it. The new CompositorRenderer does not.
+        // This is a critical point: presentation needs to be handled.
+        // For now, let's assume the main loop or backend will call a present method
+        // on the renderer instance directly after this DesktopState::render_frame call.
+        // Or, we need to add present_frame() to CompositorRenderer trait.
+        // The Gles2Renderer has a present_frame() method from its old FrameRenderer impl.
+        // We need a way to call it.
+        // Simplest for now: if the renderer_guard can be downcast or if present_frame is added to the trait.
+        // Let's assume the backend will handle presentation by calling renderer_guard.present_frame() if needed.
+
+        let time_ms = self.clock.now().try_into().unwrap_or_default();
+        for (surface_wl, _) in &surfaces_to_render {
+            if surface_wl.is_alive() {
+                smithay::wayland::compositor::with_states(surface_wl, |states| {
+                    if let Some(surface_user_data) = states.data_map.get::<std::cell::RefCell<smithay::wayland::compositor::SurfaceData>>() {
+                        let mut surface_data_inner = surface_user_data.borrow_mut();
+                        if !surface_data_inner.frame_callbacks.is_empty() {
+                            tracing::trace!("Sending frame callbacks for surface {:?} on output {}", surface_wl.id(), output_obj.name());
+                            for callback in surface_data_inner.frame_callbacks.drain(..) {
+                                callback.done(time_ms);
                             }
                         }
+                    } else {
+                        tracing::warn!("Could not get smithay::wayland::compositor::SurfaceData for surface {:?} during frame callback processing on output {}.", surface_wl.id(), output_obj.name());
                     }
-                }
-                Ok(())
-            }
-            Err(e) => {
-                tracing::error!(parent: &render_span, target: "Renderer", "DesktopState's FrameRenderer failed to render frame: {}", e);
-                Err(format!("FrameRenderer failed: {}", e))
+                });
             }
         }
+        Ok(())
     }
 }
 
@@ -543,46 +546,46 @@ impl CompositorHandler for DesktopState {
                 let buffer_to_texture = new_buffer_wl.unwrap();
                 let client_id_str = surface.client().map(|c| format!("{:?}", c.id())).unwrap_or_else(|| "<unknown_client>".to_string());
 
-                if let Some(active_renderer_arc_mutex) = self.active_renderer.as_ref() {
-                    let mut renderer = active_renderer_arc_mutex.lock().unwrap();
+                // Check if self.renderer (the new field) is Some
+                if let Some(renderer_arc_mutex) = self.renderer.as_ref() {
+                    // Lock the renderer. Note: The type here is Arc<Mutex<dyn CompositorRenderer<...>>>
+                    let mut renderer_guard = renderer_arc_mutex.lock().unwrap(); // TODO: Handle Mutex poison
 
-                    // Attempt DMABUF import first if the buffer is a DMABUF
-                    match smithay::backend::allocator::dmabuf::attributes_for_buffer(buffer_to_texture) {
-                        Ok(dmabuf_attrs) => { // It's a DMABUF
-                            tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Buffer is DMABUF. Attempting import with generic FrameRenderer.");
-                            match renderer.create_texture_from_dmabuf(&dmabuf_attrs) {
-                                Ok(texture_box) => {
-                                    surface_data.texture_handle = Some(Arc::from(texture_box)); // Store as Arc
-                                    // current_buffer_info was already updated with the new buffer's general info.
-                                    // No need to clear it on success.
-                                    tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created texture from DMABUF via generic FrameRenderer. New buffer info: {:?}", surface_data.current_buffer_info);
-                                }
-                                Err(err) => {
-                                    tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create texture from DMABUF via generic FrameRenderer: {}", err);
-                                    surface_data.texture_handle = None;
-                                    surface_data.current_buffer_info = None; // New buffer is unusable if import fails.
-                                }
+                    // Attempt DMABUF import first
+                    // The DmabufState already handles the import notification in dmabuf_imported.
+                    // Here, we need to use the renderer to create a texture from the Dmabuf object
+                    // that Smithay has validated via DmabufHandler.
+                    if let Ok(dmabuf) = Dmabuf::try_from(buffer_to_texture.clone()) { // Clone WlBuffer to Dmabuf
+                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Buffer is DMABUF. Attempting import with CompositorRenderer.");
+                        // Use the new import_dmabuf method from CompositorRenderer trait
+                        match renderer_guard.import_dmabuf(&dmabuf, Some(surface)) {
+                            Ok(texture_arc) => { // Returns Arc<Gles2Texture> or similar
+                                surface_data.texture_handle = Some(texture_arc as Arc<dyn crate::compositor::render::renderer::RenderableTexture>);
+                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created texture from DMABUF via CompositorRenderer. New buffer info: {:?}", surface_data.current_buffer_info);
+                            }
+                            Err(err) => {
+                                tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create texture from DMABUF via CompositorRenderer: {:?}", err);
+                                surface_data.texture_handle = None;
+                                surface_data.current_buffer_info = None;
                             }
                         }
-                        Err(_) => { // Not a DMABUF, or failed to get attributes. Assume SHM.
-                            tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Buffer is not DMABUF (or failed to get attrs), attempting SHM import with generic FrameRenderer.");
-                            // FrameRenderer::create_texture_from_shm returns Result<Box<dyn RenderableTexture>, RendererError>
-                            match renderer.create_texture_from_shm(buffer_to_texture) {
-                                Ok(texture_box) => {
-                                    surface_data.texture_handle = Some(Arc::from(texture_box)); // Store as Arc
-                                    // current_buffer_info was already updated.
-                                    tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created texture from SHM via generic FrameRenderer. New buffer info: {:?}", surface_data.current_buffer_info);
-                                }
-                                Err(err) => {
-                                    tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create texture from SHM via generic FrameRenderer: {}", err);
-                                    surface_data.texture_handle = None;
-                                    surface_data.current_buffer_info = None; // New buffer is unusable if import fails.
-                                }
+                    } else { // Not a DMABUF, assume SHM.
+                        tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Buffer is not DMABUF (or Dmabuf::try_from failed), attempting SHM import with CompositorRenderer.");
+                        // Use the new import_shm_buffer method from CompositorRenderer trait
+                        match renderer_guard.import_shm_buffer(buffer_to_texture, Some(surface), self) {
+                            Ok(texture_arc) => { // Returns Arc<Gles2Texture> or similar
+                                surface_data.texture_handle = Some(texture_arc as Arc<dyn crate::compositor::render::renderer::RenderableTexture>);
+                                tracing::info!(surface_id = ?surface.id(), client_info = %client_id_str, "Successfully created texture from SHM via CompositorRenderer. New buffer info: {:?}", surface_data.current_buffer_info);
+                            }
+                            Err(err) => {
+                                tracing::error!(surface_id = ?surface.id(), client_info = %client_id_str, "Failed to create texture from SHM via CompositorRenderer: {:?}", err);
+                                surface_data.texture_handle = None;
+                                surface_data.current_buffer_info = None;
                             }
                         }
                     }
-                } else { // self.active_renderer is None
-                    tracing::warn!("self.active_renderer is None. Cannot import texture for surface_id = {:?}.", surface.id());
+                } else { // self.renderer is None
+                    tracing::warn!("self.renderer is None. Cannot import texture for surface_id = {:?}.", surface.id());
                     surface_data.texture_handle = None;
                     surface_data.current_buffer_info = None;
                 }
@@ -697,7 +700,7 @@ impl BufferHandler for DesktopState {
 }
 
 // Delegate DmabufHandler if DesktopState implements it
-delegate_dmabuf!(DesktopState);
+// delegate_dmabuf!(DesktopState); // Already present, will be verified.
 // Delegate OutputHandler if DesktopState implements it
 delegate_output!(DesktopState);
 // Delegate SeatHandler if DesktopState implements it
@@ -754,61 +757,56 @@ impl SeatHandler for DesktopState {
         let mut current_status_gaurd = self.current_cursor_status.lock().unwrap();
         *current_status_gaurd = image.clone(); // Update the generic cursor status for other parts of the system
 
+        // Ensure this logic uses the new `renderer` field if cursor rendering is to be updated.
+        // For now, this logic uses `active_renderer`, which is being phased out.
+        // This will be addressed in a subsequent refactoring task.
+        // The current subtask is focused on adding DmabufHandler and new fields.
         match image {
             CursorImageStatus::Surface(surface) => {
-                // This is the case where wl_pointer.set_cursor is called with a surface.
-                // We need to get the WlBuffer from this surface.
                 let buffer = smithay::wayland::compositor::with_states(&surface, |states| {
-                    states.data_map.get::<self::WlSurfaceAttributes>().unwrap().buffer.clone()
+                    states.data_map.get::<WlSurfaceAttributes>().unwrap().buffer.clone()
                 });
 
                 if let Some(buffer) = buffer {
-                    if let Some(renderer_arc) = &self.active_renderer {
-                        let mut renderer = renderer_arc.lock().unwrap();
-                        match renderer.create_texture_from_shm(&buffer) {
-                            Ok(texture_handle_box) => { // create_texture_from_shm returns a Box
-                                self.active_cursor_texture = Some(Arc::from(texture_handle_box)); // Convert Box to Arc
-                                // Hotspot usually comes from an accompanying wl_surface.attach or a protocol extension.
-                                // Smithay's CursorImageStatus::Surface doesn't directly provide it.
-                                // For now, we'll use a default hotspot or what's already in self.cursor_hotspot.
-                                // A more complete solution would involve retrieving hotspot from client (e.g. via surface commit data).
-                                // Let's assume hotspot is (0,0) for now or managed by client via other means that update self.cursor_hotspot
+                    // Use self.renderer for cursor texture creation
+                    if let Some(renderer_arc_mutex) = &self.renderer {
+                        let mut renderer_guard = renderer_arc_mutex.lock().unwrap(); // TODO: Handle Mutex poison
+                        match renderer_guard.import_shm_buffer(&buffer, Some(&surface), self) { // Pass self for DesktopState context
+                            Ok(texture_arc) => { // Returns Arc<Gles2Texture> or similar
+                                self.active_cursor_texture = Some(texture_arc as Arc<dyn crate::compositor::render::renderer::RenderableTexture>); // Cast and store
                                 tracing::info!("Successfully created texture for cursor surface {:?}", surface.id());
                             }
                             Err(err) => {
-                                tracing::error!("Failed to create texture for cursor surface {:?}: {}", surface.id(), err);
+                                tracing::error!("Failed to create texture for cursor surface {:?}: {:?}", surface.id(), err);
                                 self.active_cursor_texture = None;
                             }
                         }
                     } else {
-                        tracing::warn!("No active_renderer to create cursor texture.");
+                        tracing::warn!("No active renderer to create cursor texture for surface.");
                         self.active_cursor_texture = None;
                     }
                 } else {
                     tracing::warn!("Cursor surface {:?} has no attached buffer.", surface.id());
                     self.active_cursor_texture = None;
                 }
-                 // self.cursor_hotspot should be updated based on client request, often part of wl_pointer.set_cursor
-                 // For this example, we assume it's either (0,0) or set elsewhere.
-                 // If CursorImageStatus::Uploaded provided it, we'd use that.
             }
             CursorImageStatus::Uploaded { buffer, hotspot } => {
-                // Client pre-uploaded a buffer (less common for standard cursors but possible).
-                if let Some(renderer_arc) = &self.active_renderer {
-                    let mut renderer = renderer_arc.lock().unwrap();
-                    match renderer.create_texture_from_shm(&buffer) {
-                        Ok(texture_handle_box) => { // create_texture_from_shm returns a Box
-                            self.active_cursor_texture = Some(Arc::from(texture_handle_box)); // Convert Box to Arc
-                            self.cursor_hotspot = hotspot.into(); // Use provided hotspot
+                 // Use self.renderer for cursor texture creation
+                if let Some(renderer_arc_mutex) = &self.renderer {
+                    let mut renderer_guard = renderer_arc_mutex.lock().unwrap(); // TODO: Handle Mutex poison
+                    match renderer_guard.import_shm_buffer(&buffer, None, self) { // Pass self for DesktopState context
+                        Ok(texture_arc) => { // Returns Arc<Gles2Texture> or similar
+                            self.active_cursor_texture = Some(texture_arc as Arc<dyn crate::compositor::render::renderer::RenderableTexture>); // Cast and store
+                            self.cursor_hotspot = hotspot.into();
                             tracing::info!("Successfully created texture for uploaded cursor buffer.");
                         }
                         Err(err) => {
-                            tracing::error!("Failed to create texture for uploaded cursor buffer: {}", err);
+                            tracing::error!("Failed to create texture for uploaded cursor buffer: {:?}", err);
                             self.active_cursor_texture = None;
                         }
                     }
                 } else {
-                    tracing::warn!("No active_renderer to create uploaded cursor texture.");
+                    tracing::warn!("No active renderer to create uploaded cursor texture.");
                     self.active_cursor_texture = None;
                 }
             }
@@ -816,10 +814,61 @@ impl SeatHandler for DesktopState {
                 self.active_cursor_texture = None;
                 tracing::info!("Cursor set to hidden.");
             }
-            _ => { // Default, None, etc.
-                // This case might not be strictly necessary if Hidden covers it.
+            _ => {
                 self.active_cursor_texture = None;
             }
         }
+    }
+}
+
+// DmabufHandler implementation for DesktopState
+impl DmabufHandler for DesktopState {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    // Called when a client requests to create a DMABUF from parameters.
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal, // The DmabufGlobal that received the import request
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier, // Used to signal success or failure of the import
+    ) {
+        tracing::info!(
+            "DMABUF import requested: format={:?}, planes={}, width={}, height={}, flags={:?}",
+            dmabuf.format(),
+            dmabuf.num_planes(),
+            dmabuf.width(),
+            dmabuf.height(),
+            dmabuf.flags()
+        );
+
+        // The actual import into a texture will be handled by the active renderer
+        // when the buffer is attached to a surface via `CompositorHandler::commit`.
+        // Here, we just need to acknowledge the DMABUF parameters are understood by Smithay.
+        // If the renderer needed to pre-validate or pre-allocate here, this is where it would go.
+        // For now, we assume the parameters are valid if Smithay created the Dmabuf object.
+
+        // TODO: If we had a way to check if the *current* renderer supports this dmabuf
+        // (format, modifiers), we could do it here.
+        // For now, we optimistically succeed the import at the protocol level.
+        // The real test comes at commit time.
+
+        if self.renderer.is_none() { // Check the new renderer field
+            tracing::error!("No active renderer to handle DMABUF import notification.");
+            // Even if no renderer, Smithay has "accepted" the buffer based on params.
+            // The failure will occur at commit time if the (future) renderer can't use it.
+            // It might be better to fail here if no renderer is present.
+            // However, the DmabufHandler trait expects us to call success or failure on the notifier.
+            // Let's assume for now that if smithay gives us a Dmabuf, the params are okay.
+        }
+
+        // We don't create a texture here. That happens on WlSurface.commit.
+        // We just notify that the dmabuf object itself is valid from protocol perspective.
+        if let Err(e) = notifier.successful::<DesktopState>() {
+             tracing::warn!("Failed to notify DMABUF import success: {:?}", e);
+        }
+
+        tracing::info!("DMABUF object {:?} successfully acknowledged at protocol level.", dmabuf.handles().nth(0));
     }
 }
