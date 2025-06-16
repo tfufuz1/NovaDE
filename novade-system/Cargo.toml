@@ -14,11 +14,13 @@ smithay = { version = "=0.3.0", default-features = false } # Downgraded signific
 zbus = "3"
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8" # For future config file parsing
-tracing = "0.1"
+tracing = "0.1" # Already present, version matches
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
-input = "0.7.0"
+libinput = "0.9.0" # Renamed from 'input' and version updated
 udev = "0.7.0"
-xkbcommon = "0.7.0"
+xkbcommon = { version = "0.7.0", features = ["default", "wayland"] } # Added features
+thiserror = "1.0" # Added
+libc = "0.2" # Added
 drm = "0.11.0"
 gbm = "0.11.0"
 nix = { version = "0.27.1", features = ["fs", "mount"] }
