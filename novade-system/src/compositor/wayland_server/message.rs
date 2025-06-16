@@ -1,7 +1,12 @@
-use byteorder::{ByteOrder, NativeEndian, ReadBytesExt}; // NativeEndian should align with Wayland's spec (usually little-endian)
-use std::io::{Cursor, Read};
+use byteorder::{ByteOrder, NativeEndian}; // ReadBytesExt not directly used if using slices primarily
 use std::os::unix::io::RawFd;
-use std::convert::TryInto;
+// std::io::{Cursor, Read} are not directly used by current deserializers.
+// std::convert::TryInto is not explicitly used.
+
+// Import protocol specification types and ObjectRegistry
+use super::protocol_spec::{ArgumentType, ProtocolManager}; // Assuming ArgumentType is also in protocol_spec
+use super::object_registry::ObjectRegistry;
+
 
 #[derive(Debug, PartialEq, Clone)]
 pub enum Argument {
@@ -210,42 +215,54 @@ fn deserialize_array(bytes: &mut &[u8]) -> Result<Argument, MessageParseError> {
     Ok(Argument::Array(arr_data))
 }
 
-#[allow(unused_variables)] // ancillary_data might not be used if FD passing is basic
-fn deserialize_fd(bytes: &mut &[u8], ancillary_data: Option<&[RawFd]>) -> Result<Argument, MessageParseError> {
-    // File descriptors are not in the main byte stream.
-    // They are sent as ancillary data with the sendmsg() call.
-    // The `ancillary_data` parameter would typically be a slice of FDs received.
-    // This function would take the next available FD from that slice.
-    // For now, this is a placeholder.
-    // A real implementation would need to manage the FDs passed alongside the message.
-    if let Some(fds) = ancillary_data {
-        if !fds.is_empty() {
-            // This is a simplification. The caller of parse_message needs to manage which FD belongs to which argument.
-            // Let's assume for parse_message that it passes the correct FD slice for *this* argument.
-            // For wl_display.sync, there are no FDs.
-            // Ok(Argument::Fd(fds[0])) // and then the caller would advance the slice.
-            return Err(MessageParseError::InvalidArgument("FD deserialization not fully implemented yet, but got FD data.".to_string()));
-        }
+#[allow(unused_variables)] // bytes is not used for FD deserialization as FDs come from ancillary data
+fn deserialize_fd(
+    _bytes: &mut &[u8], // FDs are not in the byte stream, so _bytes is not used for data extraction here.
+                        // It might be used by a higher-level parser to check alignment or skip space if FDs had placeholders.
+    available_fds: &mut Vec<RawFd>, // Changed to a mutable Vec to consume FDs.
+) -> Result<Argument, MessageParseError> {
+    // File descriptors are not in the main byte stream. They are sent as ancillary data.
+    // This function consumes the next available FD from the list provided.
+    if let Some(fd) = available_fds.pop() { // Take from the end, assuming FDs are ordered as expected.
+                                           // Or .remove(0) if they are in order of arguments.
+                                           // Wayland spec implies FDs are ordered with messages.
+                                           // Let's assume .remove(0) for FIFO order matching argument list.
+        // Re-evaluating: if multiple FDs are for a single message, they should be consumed in order.
+        // If `available_fds` is specifically for *this message*, then .remove(0) is correct.
+        Ok(Argument::Fd(fd))
+    } else {
+        // This error means the protocol expected an FD, but none were available in the ancillary data
+        // provided for this message.
+        Err(MessageParseError::InvalidArgument(
+            "Expected file descriptor, but none were available in the provided ancillary data.".to_string(),
+        ))
     }
-    // If an FD argument is expected but no FDs are available, it's an error.
-    // This depends on the protocol definition.
-    Err(MessageParseError::InvalidArgument("Expected file descriptor, but none provided in ancillary data.".to_string()))
 }
 
 
-/// Parses a single Wayland message from the buffer.
-/// buffer: The current data read from the client.
-/// ancillary_fds: File descriptors received alongside the message.
-/// Returns the parsed Message and the remaining unconsumed portion of the buffer.
+/// Parses a single Wayland message from the buffer using protocol specifications.
+///
+/// Args:
+///     initial_buffer: Slice of bytes containing the raw message data.
+///     protocol_manager: A reference to the ProtocolManager for looking up interface and request specs.
+///     object_registry: A reference to the ObjectRegistry for finding the sender object's interface.
+///     ancillary_fds: A mutable option containing a vector of file descriptors received with this message batch.
+///                    FDs are consumed from this vector as they are parsed into arguments.
+///
+/// Returns:
+///     A Result containing the parsed `Message` and a slice of the remaining unconsumed portion of `initial_buffer`,
+///     or a `MessageParseError` if parsing fails.
 pub fn parse_message<'a>(
     initial_buffer: &'a [u8],
-    ancillary_fds: &mut Option<Vec<RawFd>>, // Consumes FDs as they are parsed
+    protocol_manager: &ProtocolManager,
+    object_registry: &ObjectRegistry,
+    ancillary_fds: &mut Option<Vec<RawFd>>,
 ) -> Result<(Message, &'a [u8]), MessageParseError> {
     let (sender_id, opcode, len) = parse_message_header(initial_buffer)?;
 
     if initial_buffer.len() < len as usize {
         return Err(MessageParseError::NotEnoughData(format!(
-            "Message requires {} bytes, but buffer only has {} bytes",
+            "Message header indicates length {}, but buffer only has {} bytes",
             len,
             initial_buffer.len()
         )));
@@ -255,76 +272,64 @@ pub fn parse_message<'a>(
     let rest_of_buffer = &initial_buffer[len as usize..];
     let mut args = Vec::new();
 
-    // --- Protocol-specific parsing logic ---
-    // This is where knowledge of the Wayland protocol is required.
-    // For this subtask, we will only implement parsing for wl_display.sync (object_id=1, opcode=0)
-    // wl_display.sync takes one argument: new_id (type wl_callback).
+    // 1. Determine the interface of the sender_id
+    let sender_entry = object_registry.get_entry(sender_id).ok_or_else(|| {
+        // If sender_id is not found, it's a critical error, client sent message for non-existent object.
+        MessageParseError::InvalidArgument(format!("Sender object ID {} not found in registry.", sender_id))
+    })?;
+    let interface_name = &sender_entry.interface_name;
 
-    if sender_id == 1 { // wl_display
-        match opcode {
-            0 => { // sync request
-                // Expected argument: new_id (wl_callback)
-                if message_body_buffer.len() < 4 {
-                     return Err(MessageParseError::NotEnoughData(
-                        "wl_display.sync expects a new_id (4 bytes), not enough data.".to_string()
-                    ));
+    // 2. Get the RequestSpec for this interface and opcode
+    let request_spec = protocol_manager
+        .get_request_spec(interface_name, opcode)
+        .ok_or_else(|| MessageParseError::UnsupportedOpcode(opcode))?; // TODO: Include interface name in error
+
+    // 3. Iterate through ArgumentSpecs and deserialize
+    // let mut total_consumed_body_bytes = 0usize; // For precise tracking if needed
+    for arg_spec in &request_spec.args {
+        // let initial_body_len_for_arg = message_body_buffer.len(); // For tracking consumption per arg
+        let arg = match arg_spec.arg_type {
+            ArgumentType::Int => deserialize_int(&mut message_body_buffer)?,
+            ArgumentType::Uint => deserialize_uint(&mut message_body_buffer)?,
+            ArgumentType::Fixed => deserialize_fixed(&mut message_body_buffer)?,
+            ArgumentType::String => deserialize_string(&mut message_body_buffer)?,
+            ArgumentType::Object => deserialize_object_id(&mut message_body_buffer)?,
+            ArgumentType::NewId => deserialize_new_id(&mut message_body_buffer)?,
+            ArgumentType::Array => deserialize_array(&mut message_body_buffer)?,
+            ArgumentType::Fd => {
+                if let Some(ref mut fds_vec) = ancillary_fds {
+                    // Pass a mutable slice of the specific FD vector for this message
+                    deserialize_fd(&mut message_body_buffer, fds_vec)?
+                } else {
+                    // This case: ancillary_fds itself is None, meaning no FD list was even available for any message in the batch.
+                    return Err(MessageParseError::InvalidArgument(format!(
+                        "Arg type FD expected for '{}', but no FD list (ancillary_fds was None) provided to parse_message.",
+                        arg_spec.name
+                    )));
                 }
-                args.push(deserialize_new_id(&mut message_body_buffer)?);
             }
-            1 => { // get_registry request
-                // Expected argument: new_id (wl_registry)
-                 if message_body_buffer.len() < 4 {
-                     return Err(MessageParseError::NotEnoughData(
-                        "wl_display.get_registry expects a new_id (4 bytes), not enough data.".to_string()
-                    ));
-                }
-                args.push(deserialize_new_id(&mut message_body_buffer)?);
-            }
-            _ => return Err(MessageParseError::UnsupportedOpcode(opcode)),
-        }
-    } else {
-        // For other interfaces, we don't know the argument types yet.
-        // A full implementation would use protocol definitions (e.g., from XML)
-        // to determine expected arguments.
-        // For now, if it's not wl_display, we can't parse its args.
-        // Or, we could consume the rest of message_body_buffer as a raw array if appropriate.
-        // This would require careful handling of padding and FDs.
-        // Let's return an error for unsupported interfaces for now.
-        return Err(MessageParseError::UnsupportedInterface(sender_id));
+        };
+        args.push(arg);
+        // total_consumed_body_bytes += initial_body_len_for_arg - message_body_buffer.len();
     }
 
-    // Ensure all data in message_body_buffer has been consumed if args were expected.
-    // Some messages might have no arguments but still have a body (e.g., for padding).
-    // The `len` in the header is the source of truth for message boundaries.
-    // If `message_body_buffer` is not empty after parsing known args, it could be an error
-    // or represent arguments we haven't parsed (due to incomplete protocol impl).
-    if !message_body_buffer.is_empty() && !args.is_empty() {
-        // This might indicate that not all arguments were parsed, or there's extra data.
-        // For strict parsing, this should be an error.
-        // However, Wayland messages are padded to 32-bit boundaries.
-        // The total length `len` includes this padding.
-        // Individual argument parsers should handle their own data + padding.
-        // If after all args are parsed, message_body_buffer is not empty, it means
-        // the sum of (data+padding) for each arg was less than (message_len - header_len).
-        // This usually means an issue with parsing logic or message construction.
-        // For now, let's be strict: if we parsed args, the buffer should be empty.
-        // This needs refinement as some messages might have trailing padding not tied to a specific arg.
-        // The total message length `len` already accounts for all padding.
-        // So, if `message_body_buffer` (which is `initial_buffer[8..len]`) is not fully consumed
-        // by argument deserializers, it's an issue.
-
-        // Let's re-evaluate: message_body_buffer is `len - 8` bytes.
-        // The argument deserializers consume from it. If they consume exactly that much, it's fine.
-        // If they consume less, and `message_body_buffer` is not empty, it's an error.
-        // This means our argument list for the opcode was incomplete.
-        // This check is implicitly handled by the fact that `parse_message` returns the `rest_of_buffer`.
-        // The caller is responsible for using `rest_of_buffer`.
-        // The current argument parsers (e.g. string, array) try to consume padding.
-        // Others (u32, i32) do not, relying on 4-byte alignment.
-        // This needs to be consistent. For now, we assume the protocol definition correctly
-        // leads to consuming the whole message_body_buffer.
+    // 4. Sanity check: Ensure the entire message body declared by `len` was consumed
+    //    by the argument deserializers, considering padding.
+    //    The `message_body_buffer` should be empty if all arguments (and their padding) consumed `len - 8` bytes.
+    if !message_body_buffer.is_empty() {
+        eprintln!(
+            "Warning: Message body not fully consumed for {} op {}. {} bytes remaining. This might be due to padding or an incomplete/mismatched protocol specification for args.",
+            interface_name, opcode, message_body_buffer.len()
+        );
+        // Depending on strictness, this could be an error:
+        // return Err(MessageParseError::InvalidArgument(format!(
+        //     "Message body not fully consumed. {} bytes remaining. Interface: {}, Opcode: {}",
+        //     message_body_buffer.len(), interface_name, opcode
+        // )));
     }
 
+    // The old hardcoded logic has been replaced by the dynamic parsing loop above.
+    // The TODO for FD parsing logic is still relevant for the dynamic loop if an FD arg is encountered.
 
     Ok((
         Message {
@@ -337,29 +342,116 @@ pub fn parse_message<'a>(
     ))
 }
 
+// --- Message Serialization ---
+
+/// Calculates the padded length for a Wayland string or array.
+fn padded_len(len: usize) -> usize {
+    (len + 3) & !3
+}
+
+/// Serializes a single argument into a byte vector.
+/// Does not handle FDs as they are sent via ancillary data.
+fn serialize_argument(arg: &Argument, bytes: &mut Vec<u8>) -> Result<(), String> {
+    match arg {
+        Argument::Int(val) | Argument::Fixed(val) => bytes.extend_from_slice(&val.to_ne_bytes()),
+        Argument::Uint(val) | Argument::Object(val) | Argument::NewId(val) => {
+            bytes.extend_from_slice(&val.to_ne_bytes())
+        }
+        Argument::String(s) => {
+            let string_bytes = s.as_bytes();
+            let len_with_null = string_bytes.len() + 1;
+            if len_with_null == 0 { // Should not happen with Rust strings typically
+                return Err("String length with null cannot be zero for serialization.".to_string());
+            }
+            bytes.extend_from_slice(&(len_with_null as u32).to_ne_bytes());
+            bytes.extend_from_slice(string_bytes);
+            bytes.push(0); // Null terminator
+            let current_len = bytes.len();
+            let padded_total_len = padded_len(current_len - (string_bytes.len() + 1 + 4) + len_with_null); // len based on string + null
+            let num_padding_bytes = padded_total_len - (string_bytes.len() + 1);
+
+
+            let padding_needed = padded_len(len_with_null) - len_with_null;
+            for _ in 0..padding_needed {
+                bytes.push(0);
+            }
+        }
+        Argument::Array(arr_data) => {
+            bytes.extend_from_slice(&(arr_data.len() as u32).to_ne_bytes());
+            bytes.extend_from_slice(arr_data);
+            let padding_needed = padded_len(arr_data.len()) - arr_data.len();
+            for _ in 0..padding_needed {
+                bytes.push(0);
+            }
+        }
+        Argument::Fd(_) => {
+            return Err("Argument::Fd cannot be serialized into the main byte stream. FDs must be passed via ancillary data.".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Serializes a Wayland message (header + arguments) into a byte vector.
+/// FDs are not included in the byte vector; they must be handled separately.
+pub fn serialize_message(
+    sender_id: u32,
+    opcode: u16,
+    args: &[Argument],
+) -> Result<Vec<u8>, String> {
+    let mut arg_bytes = Vec::new();
+    for arg in args {
+        serialize_argument(arg, &mut arg_bytes)?;
+    }
+
+    let total_len = 8 + arg_bytes.len(); // 8 bytes for header
+    if total_len > u16::MAX as usize {
+        return Err(format!(
+            "Serialized message length {} exceeds u16::MAX.",
+            total_len
+        ));
+    }
+
+    let mut message_bytes = Vec::with_capacity(total_len);
+    message_bytes.extend_from_slice(&sender_id.to_ne_bytes());
+    let len_opcode = ((total_len as u32) << 16) | (opcode as u32);
+    message_bytes.extend_from_slice(&len_opcode.to_ne_bytes());
+    message_bytes.extend_from_slice(&arg_bytes);
+
+    Ok(message_bytes)
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::io::AsRawFd;
+    use std::sync::Arc;
+    use super::super::protocol_spec::{self as spec, ArgumentType, ProtocolManager}; // Use alias for protocol_spec module
+    use crate::compositor::wayland_server::object_registry::{ObjectRegistry, WlDisplay}; // For test setup
+
+    // Helper to create a mock ProtocolManager and ObjectRegistry for tests
+    fn setup_test_protocols_and_registry() -> (ProtocolManager, ObjectRegistry) {
+        let mut pm = ProtocolManager::new();
+        spec::load_core_protocols(&mut pm);
+
+        // ObjectRegistry::new() already creates wl_display with ID 1 and interface "wl_display"
+        let registry = ObjectRegistry::new();
+        (pm, registry)
+    }
+
 
     #[test]
     fn test_parse_message_header_valid() {
         // sender_id=1, opcode=0, len=12
-        let bytes = [1, 0, 0, 0,  0, 0, 12, 0]; // Little Endian for opcode_len_raw: (0<<16)|12
-        // Actually, opcode is high bits, len is low bits. So (opcode << 16) | len
-        // For opcode=0, len=12: (0 << 16) | 12 = 12.  NativeEndian::write_u32(&mut buf[4..], 12);
-        // For opcode=1, len=12: (1 << 16) | 12 = 65536 | 12 = 65548
+        // For opcode=0, len=12: (0 << 16) | 12 = 12.
+        // For opcode=1, len=16: (1 << 16) | 16 = 65536 | 16 = 65552
         let mut header_bytes = [0u8; 8];
         NativeEndian::write_u32(&mut header_bytes[0..4], 1); // sender_id = 1
         NativeEndian::write_u32(&mut header_bytes[4..8], (0u32 << 16) | 12u32); // opcode=0, len=12
-
-        let result = parse_message_header(&header_bytes);
-        assert_eq!(result, Ok((1, 0, 12)));
+        assert_eq!(parse_message_header(&header_bytes), Ok((1, 0, 12)));
 
         NativeEndian::write_u32(&mut header_bytes[4..8], (1u32 << 16) | 16u32); // opcode=1, len=16
-        let result2 = parse_message_header(&header_bytes);
-        assert_eq!(result2, Ok((1, 1, 16)));
+        assert_eq!(parse_message_header(&header_bytes), Ok((1, 1, 16)));
     }
 
     #[test]
@@ -476,82 +568,108 @@ mod tests {
 
     #[test]
     fn test_parse_wl_display_sync() {
-        // wl_display.sync:
-        // sender_id (wl_display) = 1
-        // opcode (sync) = 0
-        // total length = header (8) + new_id (4) = 12 bytes
-        // Arguments: new_id (wl_callback), let's say ID 2
-
+        let (pm, registry) = setup_test_protocols_and_registry();
+        // wl_display.sync: sender_id=1, opcode=0, new_id callback_id=2, len=12
         let mut msg_bytes = Vec::new();
-        // Header
-        msg_bytes.extend_from_slice(&1u32.to_ne_bytes()); // sender_id = 1
-        let opcode = 0u16;
-        let len = 12u16;
-        msg_bytes.extend_from_slice(&((opcode as u32) << 16 | (len as u32)).to_ne_bytes());
-        // Arguments
-        msg_bytes.extend_from_slice(&2u32.to_ne_bytes()); // new_id (callback_id) = 2
+        msg_bytes.extend_from_slice(&1u32.to_ne_bytes()); // sender_id
+        msg_bytes.extend_from_slice(&((0u32 << 16) | 12u32).to_ne_bytes()); // opcode 0, len 12
+        msg_bytes.extend_from_slice(&2u32.to_ne_bytes()); // new_id (callback) = 2
 
-        let (msg, rest) = parse_message(&msg_bytes, &mut None).unwrap();
+        let (msg, rest) = parse_message(&msg_bytes, &pm, &registry, &mut None).unwrap();
 
         assert_eq!(msg.sender_id, 1);
-        assert_eq!(msg.opcode, 0);
+        assert_eq!(msg.opcode, 0); // sync
         assert_eq!(msg.len, 12);
         assert_eq!(msg.args.len(), 1);
-        assert_eq!(msg.args[0], Argument::NewId(2));
+        assert_eq!(msg.args[0], Argument::NewId(2)); // callback id
         assert!(rest.is_empty());
     }
 
      #[test]
     fn test_parse_wl_display_get_registry() {
-        // wl_display.get_registry:
-        // sender_id (wl_display) = 1
-        // opcode (get_registry) = 1
-        // total length = header (8) + new_id (wl_registry) (4) = 12 bytes
-        // Arguments: new_id (wl_registry), let's say ID 3
-
+        let (pm, registry) = setup_test_protocols_and_registry();
+        // wl_display.get_registry: sender_id=1, opcode=1, new_id registry_id=3, len=12
         let mut msg_bytes = Vec::new();
-        // Header
-        msg_bytes.extend_from_slice(&1u32.to_ne_bytes()); // sender_id = 1
-        let opcode = 1u16;
-        let len = 12u16;
-        msg_bytes.extend_from_slice(&((opcode as u32) << 16 | (len as u32)).to_ne_bytes());
-        // Arguments
-        msg_bytes.extend_from_slice(&3u32.to_ne_bytes()); // new_id (registry_id) = 3
+        msg_bytes.extend_from_slice(&1u32.to_ne_bytes()); // sender_id
+        msg_bytes.extend_from_slice(&((1u32 << 16) | 12u32).to_ne_bytes()); // opcode 1, len 12
+        msg_bytes.extend_from_slice(&3u32.to_ne_bytes()); // new_id (registry) = 3
 
-        let (msg, rest) = parse_message(&msg_bytes, &mut None).unwrap();
+        let (msg, rest) = parse_message(&msg_bytes, &pm, &registry, &mut None).unwrap();
 
         assert_eq!(msg.sender_id, 1);
-        assert_eq!(msg.opcode, 1);
+        assert_eq!(msg.opcode, 1); // get_registry
         assert_eq!(msg.len, 12);
         assert_eq!(msg.args.len(), 1);
-        assert_eq!(msg.args[0], Argument::NewId(3));
+        assert_eq!(msg.args[0], Argument::NewId(3)); // registry id
         assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn test_parse_message_shm_create_pool_with_fd() {
+        let (pm, mut registry) = setup_test_protocols_and_registry();
+        // Manually register a wl_shm object for the test, assuming client created it with ID 2.
+        let shm_object_id = 2u32;
+        registry.new_object(
+            1, // client_id
+            shm_object_id,
+            super::super::object_registry::WlDisplay {}, // Placeholder object, type doesn't matter for this test path
+            "wl_shm".to_string(),
+            1
+        ).unwrap();
+
+        // wl_shm.create_pool: sender_id=shm_object_id(2), opcode=0
+        // args: new_id (pool_id)=3, fd=DUMMY_FD, size=4096
+        // len = header(8) + new_id(4) + fd(0, ancillary) + size(4) = 16
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&shm_object_id.to_ne_bytes()); // sender_id
+        msg_bytes.extend_from_slice(&((0u32 << 16) | 16u32).to_ne_bytes()); // opcode 0, len 16
+        msg_bytes.extend_from_slice(&3u32.to_ne_bytes()); // new_id (pool_id) = 3
+        // FD is not in byte stream
+        msg_bytes.extend_from_slice(&4096i32.to_ne_bytes()); // size = 4096
+
+        let dummy_fd = 5; // Example FD
+        let mut ancillary_fds = Some(vec![dummy_fd]); // deserialize_fd pops, so last FD for first arg.
+                                                    // If create_pool expects FD as 2nd arg, and it's the only FD, this is fine.
+                                                    // The spec for wl_shm.create_pool is (new_id, fd, size). FD is 2nd.
+                                                    // If `pending_fds` in client.rs is reversed (as it is now),
+                                                    // then `vec![dummy_fd]` results in `pop()` correctly getting `dummy_fd`.
+
+        let (msg, rest) = parse_message(&msg_bytes, &pm, &registry, &mut ancillary_fds).unwrap();
+
+        assert_eq!(msg.sender_id, shm_object_id);
+        assert_eq!(msg.opcode, 0); // create_pool
+        assert_eq!(msg.len, 16);
+        assert_eq!(msg.args.len(), 3);
+        assert_eq!(msg.args[0], Argument::NewId(3)); // pool_id
+        assert_eq!(msg.args[1], Argument::Fd(dummy_fd)); // The FD
+        assert_eq!(msg.args[2], Argument::Int(4096));  // size
+        assert!(rest.is_empty());
+        assert!(ancillary_fds.unwrap().is_empty(), "FD should have been consumed");
     }
 
 
     #[test]
     fn test_parse_message_not_enough_data_for_body() {
+        let (pm, registry) = setup_test_protocols_and_registry();
         let mut msg_bytes = Vec::new();
-        // Header: sender_id=1, opcode=0, len=12
-        msg_bytes.extend_from_slice(&1u32.to_ne_bytes());
-        msg_bytes.extend_from_slice(&((0u32 << 16) | 12u32).to_ne_bytes());
-        // Body: only 2 bytes, but expected 4 for new_id
-        msg_bytes.extend_from_slice(&2u16.to_ne_bytes());
+        msg_bytes.extend_from_slice(&1u32.to_ne_bytes()); // sender_id = wl_display (1)
+        msg_bytes.extend_from_slice(&((0u32 << 16) | 12u32).to_ne_bytes()); // opcode 0 (sync), len 12
+        msg_bytes.extend_from_slice(&2u16.to_ne_bytes()); // Body: only 2 bytes, but NewId needs 4.
 
-        let result = parse_message(&msg_bytes, &mut None);
+        let result = parse_message(&msg_bytes, &pm, &registry, &mut None);
+        // The error should come from deserialize_new_id due to insufficient data for the argument.
         assert_matches!(result, Err(MessageParseError::NotEnoughData(_)));
     }
 
     #[test]
     fn test_parse_message_buffer_too_short_for_declared_len() {
+        let (pm, registry) = setup_test_protocols_and_registry();
         let mut msg_bytes = Vec::new();
-        // Header: sender_id=1, opcode=0, len=12 (but buffer will be shorter)
         msg_bytes.extend_from_slice(&1u32.to_ne_bytes());
-        msg_bytes.extend_from_slice(&((0u32 << 16) | 12u32).to_ne_bytes());
-        // Missing body, total buffer length 8, but header says 12.
+        msg_bytes.extend_from_slice(&((0u32 << 16) | 12u32).to_ne_bytes()); // len 12, but buffer is only 8.
 
-        let result = parse_message(&msg_bytes, &mut None);
-         assert_matches!(result, Err(MessageParseError::NotEnoughData(msg)) if msg.contains("Message requires 12 bytes, but buffer only has 8 bytes"));
+        let result = parse_message(&msg_bytes, &pm, &registry, &mut None);
+        assert_matches!(result, Err(MessageParseError::NotEnoughData(msg)) if msg.contains("Message header indicates length 12, but buffer only has 8 bytes"));
     }
 
     #[test]
@@ -565,5 +683,162 @@ mod tests {
         let fixed_neg = Argument::f64_to_fixed(f_val_neg);
         assert_eq!(fixed_neg, -704);
         assert_eq!(Argument::fixed_to_f64(fixed_neg), f_val_neg);
+    }
+
+    #[test]
+    fn test_deserialize_fd_success() {
+        let fd1 = 5;
+        let fd2 = 10;
+        let mut available_fds = vec![fd2, fd1]; // Simulating FDs received, order might matter (e.g. pop vs remove)
+                                               // If deserialize_fd uses pop, it gets fd1 then fd2.
+                                               // If it uses remove(0), it gets fd2 then fd1.
+                                               // Let's assume remove(0) for now, meaning FDs are in order of arguments.
+                                               // To test pop(), reverse the order in `available_fds`.
+                                               // Current implementation of deserialize_fd uses pop(). So fd1 then fd2.
+
+        let mut dummy_buffer_slice = &[][..]; // Not used by deserialize_fd
+
+        match deserialize_fd(&mut dummy_buffer_slice, &mut available_fds) {
+            Ok(Argument::Fd(received_fd)) => assert_eq!(received_fd, fd1),
+            _ => panic!("deserialize_fd failed or returned wrong type"),
+        }
+        assert_eq!(available_fds.len(), 1);
+        assert_eq!(available_fds[0], fd2); // fd1 was consumed
+
+        match deserialize_fd(&mut dummy_buffer_slice, &mut available_fds) {
+            Ok(Argument::Fd(received_fd)) => assert_eq!(received_fd, fd2),
+            _ => panic!("deserialize_fd failed or returned wrong type"),
+        }
+        assert!(available_fds.is_empty()); // All FDs consumed
+    }
+
+    #[test]
+    fn test_deserialize_fd_not_enough_fds() {
+        let mut available_fds: Vec<RawFd> = vec![];
+        let mut dummy_buffer_slice = &[][..];
+
+        match deserialize_fd(&mut dummy_buffer_slice, &mut available_fds) {
+            Err(MessageParseError::InvalidArgument(msg)) => {
+                assert!(msg.contains("Expected file descriptor, but none were available"));
+            }
+            _ => panic!("deserialize_fd should have failed with InvalidArgument"),
+        }
+    }
+
+    // Example of how parse_message might be called with FDs (conceptual)
+    // This test won't pass without a message type that actually expects an FD in its definition
+    // within the hardcoded part of parse_message, or with dynamic protocol parsing.
+    // The test `test_parse_message_shm_create_pool_with_fd` now covers FD argument parsing.
+    /*
+    #[test]
+    fn test_parse_message_with_fd_argument() {
+        // ... (conceptual test as before, now less needed due to specific test above) ...
+    }
+    */
+
+    // --- Serialization Tests ---
+    #[test]
+    fn test_serialize_argument_simple_types() {
+        let mut bytes = Vec::new();
+        serialize_argument(&Argument::Int(-10), &mut bytes).unwrap();
+        assert_eq!(bytes, (-10i32).to_ne_bytes().to_vec());
+        bytes.clear();
+
+        serialize_argument(&Argument::Uint(100), &mut bytes).unwrap();
+        assert_eq!(bytes, 100u32.to_ne_bytes().to_vec());
+        bytes.clear();
+
+        serialize_argument(&Argument::Fixed(2560), &mut bytes).unwrap(); // 10.0 * 256
+        assert_eq!(bytes, 2560i32.to_ne_bytes().to_vec());
+        bytes.clear();
+
+        serialize_argument(&Argument::Object(123), &mut bytes).unwrap();
+        assert_eq!(bytes, 123u32.to_ne_bytes().to_vec());
+        bytes.clear();
+
+        serialize_argument(&Argument::NewId(456), &mut bytes).unwrap();
+        assert_eq!(bytes, 456u32.to_ne_bytes().to_vec());
+    }
+
+    #[test]
+    fn test_serialize_argument_string() {
+        let mut bytes = Vec::new();
+        serialize_argument(&Argument::String("hello".to_string()), &mut bytes).unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&(6u32).to_ne_bytes()); // len_with_null
+        expected.extend_from_slice(b"hello\0");
+        expected.extend_from_slice(&[0u8, 0u8]); // padding
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn test_serialize_argument_array() {
+        let mut bytes = Vec::new();
+        let arr_data = vec![1, 2, 3, 4, 5];
+        serialize_argument(&Argument::Array(arr_data.clone()), &mut bytes).unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&(arr_data.len() as u32).to_ne_bytes());
+        expected.extend_from_slice(&arr_data);
+        expected.extend_from_slice(&[0u8, 0u8, 0u8]); // padding for 5 bytes data
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn test_serialize_argument_fd_error() {
+        let mut bytes = Vec::new();
+        let result = serialize_argument(&Argument::Fd(0), &mut bytes);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Argument::Fd cannot be serialized into the main byte stream. FDs must be passed via ancillary data.");
+    }
+
+    #[test]
+    fn test_serialize_message_simple() {
+        let sender_id = 1;
+        let opcode = 0;
+        let args = vec![Argument::NewId(2)]; // wl_display.sync example
+
+        let bytes = serialize_message(sender_id, opcode, &args).unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&sender_id.to_ne_bytes());
+        let total_len = 8 + 4; // header + u32
+        let len_opcode = ((total_len as u32) << 16) | (opcode as u32);
+        expected.extend_from_slice(&len_opcode.to_ne_bytes());
+        expected.extend_from_slice(&2u32.to_ne_bytes()); // NewId(2)
+
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn test_serialize_message_with_string_and_padding() {
+        let sender_id = 1;
+        let opcode = 1; // wl_display.error (object_id, code, message)
+                        // For this test, let's make object_id an Uint for simplicity of arg list
+        let args = vec![
+            Argument::Uint(123), // object_id that caused error
+            Argument::Uint(5),   // error code
+            Argument::String("short".to_string()), // 5 chars + null = 6 bytes, pads to 8
+        ];
+
+        let bytes = serialize_message(sender_id, opcode, &args).unwrap();
+
+        let mut expected_arg_bytes = Vec::new();
+        serialize_argument(&args[0], &mut expected_arg_bytes).unwrap();
+        serialize_argument(&args[1], &mut expected_arg_bytes).unwrap();
+        serialize_argument(&args[2], &mut expected_arg_bytes).unwrap();
+
+        let total_len = 8 + expected_arg_bytes.len();
+        let mut expected_header = Vec::new();
+        expected_header.extend_from_slice(&sender_id.to_ne_bytes());
+        let len_opcode = ((total_len as u32) << 16) | (opcode as u32);
+        expected_header.extend_from_slice(&len_opcode.to_ne_bytes());
+
+        let mut expected_total = expected_header;
+        expected_total.append(&mut expected_arg_bytes);
+
+        assert_eq!(bytes, expected_total);
+        assert_eq!(total_len, 8 + 4 + 4 + (4 + 5 + 1 + 2)); // header + u32 + u32 + (len_str + str_data + null + pad)
     }
 }
