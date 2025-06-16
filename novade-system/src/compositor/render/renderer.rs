@@ -1,107 +1,142 @@
 // novade-system/src/compositor/render/renderer.rs
 
-use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Physical, Rectangle, Size}; // Added Size
-use smithay::output::Output; // Smithay's Output type
+use smithay::reexports::wayland_server::protocol::{
+    wl_buffer::WlBuffer,
+    wl_surface::WlSurface,
+};
+use smithay::utils::{Physical, Rectangle, Size, Point, Transform};
+use smithay::backend::allocator::{Fourcc, dmabuf::Dmabuf};
+use crate::compositor::core::state::DesktopState; // Assuming DesktopState remains relevant
+use raw_window_handle::DisplayHandle; // For the new() method
+use std::any::Any;
+use std::fmt;
+use std::sync::Arc;
 
-// Assuming DmabufImporter is accessible from the parent module (super)
-use super::dmabuf_importer::DmabufImporter;
-// Assuming DesktopState is accessible from crate::compositor::core::state
-// This creates a dependency from render module to core module.
-// Consider if DesktopState access should be more limited or passed differently.
-use crate::compositor::core::state::DesktopState;
-// Assuming CompositorError is accessible
-use crate::compositor::core::errors::CompositorError;
-// Assuming RenderableTexture and other renderer-specific types might be defined here or in a sub-module
-// For now, let's assume RenderableTexture will be part of the renderer's responsibility.
-// use smithay::backend::renderer::Texture as SmithayTexture; // Example if using Smithay's Texture trait directly
-use smithay::backend::allocator::dmabuf::Dmabuf;
-use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 
+/// Errors that can occur during rendering operations.
+#[derive(Debug, thiserror::Error)]
+pub enum RenderError {
+    #[error("Backend initialization failed: {0}")]
+    BackendInitializationFailed(String),
+    #[error("Failed to allocate texture: {0}")]
+    TextureAllocationFailed(String),
+    #[error("Failed to allocate buffer: {0}")]
+    BufferAllocationFailed(String),
+    #[error("Failed to import DMABUF: {0}")]
+    DmabufImportFailed(String),
+    #[error("Failed to import SHM buffer: {0}")]
+    ShmBufferImportFailed(String),
+    #[error("Invalid render state: {0}")]
+    InvalidRenderState(String),
+    #[error("Shader compilation failed: {0}")]
+    ShaderCompilationFailed(String),
+    #[error("Draw call failed: {0}")]
+    DrawCallFailed(String),
+    #[error("OpenGL error: {0}")]
+    OpenGL(String),
+    #[error("Vulkan error: {0}")]
+    Vulkan(String),
+    #[error("WGPU error: {0}")]
+    Wgpu(String),
+    #[error("Unsupported pixel format: {0:?}")]
+    UnsupportedFormat(Option<Fourcc>),
+    #[error("Invalid buffer: {0}")]
+    InvalidBuffer(String),
+    #[error("Smithay error: {0}")]
+    SmithayError(String),
+    #[error("An internal error occurred: {0}")]
+    Internal(String), // Generic internal error
+}
 
 /// Trait for abstracting a texture that can be rendered by the CompositorRenderer.
-/// This mirrors smithay::backend::renderer::Texture but is defined here for clarity
-/// and potential future extensions if needed.
-use std::any::Any; // Required for as_any
-
-pub trait RenderableTexture: std::fmt::Debug + Send + Sync + 'static {
+pub trait RenderableTexture: fmt::Debug + Send + Sync + 'static {
     /// Returns the dimensions of the texture.
     fn dimensions(&self) -> Size<i32, Physical>;
-    // Add other methods like format, id, etc., if they become necessary for the trait.
-    // fn format(&self) -> Option<Fourcc>; // Example
+    /// Returns the pixel format of the texture.
+    fn format(&self) -> Option<Fourcc>;
+    /// Returns a unique identifier for this texture instance.
+    fn unique_id(&self) -> u64;
+    /// Returns the texture as a dynamic type.
     fn as_any(&self) -> &dyn Any;
 }
 
+/// Represents different types of elements the compositor needs to render.
+#[derive(Debug)]
+pub enum RenderElement<'a, T: RenderableTexture> {
+    Surface {
+        texture: Arc<T>,
+        geometry: Rectangle<i32, Physical>,
+        damage: &'a [Rectangle<i32, Physical>], // Changed to slice
+        alpha: f32,
+        transform: Transform,
+    },
+    Cursor {
+        texture: Arc<T>,
+        position: Point<i32, Physical>,
+        hotspot: Point<i32, Physical>, // Hotspot relative to texture's top-left
+        damage: &'a [Rectangle<i32, Physical>], // Changed to slice
+    },
+    SolidColor {
+        color: [f32; 4], // RGBA
+        geometry: Rectangle<i32, Physical>,
+        damage: &'a [Rectangle<i32, Physical>], // Changed to slice
+    },
+    CompositorUi { // Optional, for compositor's own UI
+        texture: Arc<T>,
+        geometry: Rectangle<i32, Physical>,
+        damage: &'a [Rectangle<i32, Physical>], // Changed to slice
+    }
+}
+
+
 /// Defines the capabilities of a compositor renderer.
-///
-/// This trait abstracts over different rendering backends (e.g., GLES2, Vulkan, WGPU)
-/// allowing the compositor to be relatively backend-agnostic in its core logic.
 pub trait CompositorRenderer: Send + 'static {
     /// The specific type of texture this renderer works with.
-    /// Must implement the `RenderableTexture` trait.
-    type Texture: RenderableTexture + Clone; // Added Clone bound
+    type Texture: RenderableTexture + Clone + 'static;
 
     /// Creates a new instance of the renderer.
-    ///
-    /// This might involve initializing the graphics API, loading shaders,
-    /// and setting up initial rendering resources.
-    fn new() -> Result<Self, CompositorError>
+    fn new<'a>(display_handle: DisplayHandle<'a>, /* other necessary params */) -> Result<Self, RenderError>
     where
         Self: Sized;
 
-    /// Renders a single frame.
-    ///
-    /// # Arguments
-    ///
-    /// * `output`: A reference to smithay's `Output` object, representing the display
-    ///   or screen area onto which the frame will be rendered. It provides geometry,
-    ///   scale, and other relevant output properties.
-    /// * `surfaces`: A slice of tuples, where each tuple contains a reference to a
-    ///   `WlSurface` to be rendered and its `Rectangle` defining its position and size
-    ///   in logical coordinates on the output.
-    /// * `dmabuf_importer`: A reference to the `DmabufImporter`, which can be used by
-    ///   the renderer to import DMABUF-backed buffers from clients if not already handled.
-    /// * `desktop_state`: A reference to the global `DesktopState` of the compositor.
-    ///   This provides access to shared memory (SHM) buffers, client data, and other
-    ///   compositor-wide information that might be needed for rendering.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` indicating success or a `CompositorError` if rendering fails.
-    fn render_frame(
-        &mut self,
-        output: &Output,
-        surfaces: &[(&WlSurface, Rectangle<i32, Physical>)], // Changed to Physical for geometry
-        dmabuf_importer: &DmabufImporter, // Kept for potential direct use or if renderer needs it
-        desktop_state: &DesktopState,   // For accessing SHM buffers, etc.
-    ) -> Result<(), CompositorError>;
+    /// Called at the beginning of a frame rendering sequence.
+    /// Prepares the renderer for drawing a new frame.
+    fn begin_frame(&mut self, output_transform: Transform, output_physical_size: Size<i32, Physical>) -> Result<(), RenderError>;
+
+    /// Renders a list of `RenderElement`s to the current target.
+    /// `output_damage` represents the regions of the output that need repainting.
+    fn render_elements<'a>(&mut self, elements: Vec<RenderElement<'a, Self::Texture>>, output_damage: &[Rectangle<i32, Physical>]) -> Result<(), RenderError>;
+
+    /// Called after all elements for the current frame have been submitted.
+    /// Finalizes the frame and presents it to the output.
+    fn finish_frame(&mut self) -> Result<(), RenderError>;
 
     /// Imports a `WlBuffer` (typically SHM) into a renderer-specific texture.
+    /// The resulting texture is wrapped in an `Arc` for shared ownership.
     fn import_shm_buffer(
         &mut self,
         buffer: &WlBuffer,
-        surface: Option<&WlSurface>, // For context, like damage or scale
-        desktop_state: &DesktopState, // For shm_state access
-    ) -> Result<Self::Texture, CompositorError>;
+        surface: Option<&WlSurface>,
+        desktop_state: &DesktopState, // Access to shm_state might be needed
+    ) -> Result<Arc<Self::Texture>, RenderError>;
 
     /// Imports a `Dmabuf` into a renderer-specific texture.
+    /// The resulting texture is wrapped in an `Arc` for shared ownership.
     fn import_dmabuf(
         &mut self,
         dmabuf: &Dmabuf,
-        surface: Option<&WlSurface>, // For context
-    ) -> Result<Self::Texture, CompositorError>;
+        surface: Option<&WlSurface>, // For context, e.g. damage tracking
+    ) -> Result<Arc<Self::Texture>, RenderError>;
 
-    /// Optional: Method to perform any necessary actions before client buffers are processed,
-    /// e.g., beginning a render pass.
-    fn begin_frame(&mut self, output_geometry: Rectangle<i32, Physical>) -> Result<(), CompositorError>;
+    /// Clears a specific texture from any internal caches, if the renderer uses them.
+    /// This is important when a texture (e.g., from a client buffer) is no longer valid.
+    fn clear_texture_cache(&mut self, texture_id: u64);
 
-    /// Optional: Method to perform any necessary actions after all client surfaces are rendered,
-    /// e.g., rendering compositor UI, cursors.
-    fn finish_frame(&mut self) -> Result<(), CompositorError>;
+    /// Informs the renderer about a change in the output's scale factor.
+    /// This can be used to adjust rendering parameters, like font sizes or UI scaling.
+    fn set_output_scale(&mut self, scale: f64) -> Result<(), RenderError>;
 
-    // TODO: Consider adding methods for:
-    // - Resizing (if the renderer needs to explicitly handle output size changes)
-    // - Querying capabilities (e.g., supported DMABUF formats)
-    // - Managing renderer-specific resources (e.g., shader programs, pipelines)
-    // - Cursor rendering (if not handled by render_frame directly)
+    /// Returns a list of preferred FourCC codes for DMABUF formats.
+    /// This helps clients choose efficient buffer formats.
+    fn preferred_formats(&self) -> Option<Vec<Fourcc>>;
 }
