@@ -10,6 +10,7 @@ pub mod filesystem_service; // Added for assistant integration
 pub mod system_services;
 pub mod system_settings_service; // Added for assistant integration
 pub mod window_info_provider;
+pub mod window_mechanics;
 pub use application_manager::{ApplicationManager, AppInfo}; // Added for assistant integration
 pub use filesystem_service::{FileSystemService, FileInfo, UserContext}; // Added for assistant integration
 pub use system_settings_service::{SystemSettingsService, SystemSettingInfo}; // Added for assistant integration
