@@ -10,6 +10,7 @@ async-trait = "0.1.68"
 tokio = { version = "1", features = ["full"] }
 wayland-server = "0.31.0"
 wayland-protocols = "0.31.0"
+wayland-protocols-wlr = { version = "0.3.0", features = ["server"] } # Trying server feature only
 smithay = { version = "=0.3.0", default-features = false } # Downgraded significantly & disabled default features
 zbus = "3"
 serde = { version = "1.0", features = ["derive"] }
@@ -23,9 +24,14 @@ drm = "0.11.0"
 gbm = "0.11.0"
 nix = { version = "0.27.1", features = ["fs", "mount"] }
 glob = "0.3"
-sd-journal = "2"
+sd-journal = "0.1.0" # Using an available older version
 futures-core = "0.3"
 async-stream = "0.3"
+egl = "0.2.7" # Using an available older version
+khronos-egl = "4.0"
+glow = "0.13"
+drm-fourcc = "2.2.0" # For DMABUF format handling
+wgpu = { version = "^0.15" } # Aligning with novade-ui's apparent wgpu version requirement
 
 [features]
 default = []
@@ -38,3 +44,9 @@ default = []
 # which is the intended outcome for a pure stub implementation.
 
 # Conditional dependency sections for libinput/udev are also removed.
+
+# It's possible wgpu is a transitive dependency via smithay or another crate.
+# If direct WGPU HAL access is needed, we might need to make wgpu a direct dependency
+# and enable the "wgpu-hal" feature.
+# For now, let's assume it might be available transitively or add it later if needed.
+# If smithay 0.3.0 uses an older wgpu, we might face version conflicts.

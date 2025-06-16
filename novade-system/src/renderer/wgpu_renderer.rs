@@ -12,6 +12,24 @@ use smithay::reexports::wayland_server::protocol::wl_shm::Format as WlShmFormat;
 use smithay::wayland::shm::with_buffer_contents_data;
 use wgpu::util::DeviceExt; // For create_buffer_init
 
+// EGL and GLES imports for DMABUF
+use khronos_egl as egl_types;
+use egl::{Instance as EglInstance, EGL1_4}; // Using egl crate's Instance
+use glow; // For GLES bindings
+use drm_fourcc::{DrmFourcc, DrmModifier}; // For interpreting DMABUF format and modifier
+
+// WGPU HAL imports (assuming wgpu 0.7 based on Cargo.toml addition)
+// For wgpu 0.7, the path might be wgpu_hal::gles rather than wgpu_hal::api::Gles
+// and Device::from_hal might not exist. Need to check wgpu 0.7 docs.
+// Wgpu 0.7's HAL structure:
+// Adapter<B: wgpu_hal::Api>
+// Device<B: wgpu_hal::Api>
+// Instance::new takes hal_api::Instance
+// For GLES, it would be wgpu_hal::gles::Adapter, wgpu_hal::gles::Device
+// The from_hal pattern is more common in later WGPU versions (e.g., 0.9+).
+// For wgpu 0.7, unsafe access to raw GL context might be via Adapter::raw_adapter_handle() if available
+// or by assuming the EGL context used by Winit/WGPU is current.
+
 // Placeholder for WgpuRenderableTexture to be defined in wgpu_texture.rs
 // For now, we'll use a simple struct that doesn't fully implement RenderableTexture
 // #[derive(Debug)] // Commented out as WgpuRenderableTexture is now imported
@@ -95,6 +113,7 @@ pub struct NovaWgpuRenderer {
     // --- Solid Color Rendering ---
     solid_color_pipeline: wgpu::RenderPipeline,
     solid_color_bind_group_layout: wgpu::BindGroupLayout,
+    cursor_render_pipeline: wgpu::RenderPipeline, // Added for cursor alpha blending
     dummy_white_texture: Arc<WgpuRenderableTexture>, // For fallback
 }
 
@@ -276,11 +295,12 @@ impl NovaWgpuRenderer {
         });
 
         // Render Pipeline for Textured Quads (self.render_pipeline)
+        // This pipeline is used for elements that should replace the content behind them (e.g. opaque Wayland surfaces)
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Textured Quad Render Pipeline"),
-            layout: Some(&textured_pipeline_layout), // Use the new layout
+            label: Some("Textured Quad Render Pipeline (Replace)"),
+            layout: Some(&textured_pipeline_layout),
             vertex: wgpu::VertexState {
-                module: &shader_module, // Shader already updated for transform_matrix
+                module: &shader_module,
                 entry_point: "vs_main",
                 buffers: &[Vertex::desc()],
             },
@@ -289,23 +309,55 @@ impl NovaWgpuRenderer {
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_config.format, // Use the surface's format
-                    // MVP: Using BlendState::REPLACE for simple opaque compositing.
-                    // TODO Post-MVP: Enable alpha blending for transparency:
-                    // blend: Some(wgpu::BlendState::ALPHA_BLENDING), // or wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING
-                    // which are shorthand for:
-                    // blend: Some(wgpu::BlendState {
+                    blend: Some(wgpu::BlendState::REPLACE), // Opaque surfaces replace what's behind.
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
+        // Cursor Render Pipeline (for alpha blending)
+        let cursor_render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Cursor Render Pipeline (Alpha Blend)"),
+            layout: Some(&textured_pipeline_layout), // Reuse layout from textured quads
+            vertex: wgpu::VertexState {
+                module: &shader_module, // Reuse vertex shader
+                entry_point: "vs_main",
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_module, // Reuse fragment shader
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_config.format, // Use the surface's format
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING), // Enable alpha blending for cursors
+                    // blend: Some(wgpu::BlendState { // More explicit version of ALPHA_BLENDING
                     //     color: wgpu::BlendComponent {
                     //         src_factor: wgpu::BlendFactor::SrcAlpha,
                     //         dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
                     //         operation: wgpu::BlendOperation::Add,
                     //     },
-                    //     alpha: wgpu::BlendComponent { // Or use PREMULTIPLIED_ALPHA_BLENDING defaults
-                    //         src_factor: wgpu::BlendFactor::One,
+                    //     alpha: wgpu::BlendComponent {
+                    //         src_factor: wgpu::BlendFactor::One, // Often One for pre-multiplied, SrcAlpha for non-pre-multiplied
                     //         dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
                     //         operation: wgpu::BlendOperation::Add,
                     //     },
                     // }),
-                    blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -456,6 +508,7 @@ impl NovaWgpuRenderer {
             transform_bind_group_layout,
             solid_color_pipeline,
             solid_color_bind_group_layout,
+            cursor_render_pipeline, // Store the new pipeline
             dummy_white_texture: dummy_white_renderable_texture,
         })
     }
@@ -547,8 +600,11 @@ impl FrameRenderer for NovaWgpuRenderer {
             for element in elements {
                 match element {
                     RenderElement::WaylandSurface { surface_data_arc, geometry, .. } => {
-                        let surface_data = surface_data_mutex_arc.lock().unwrap(); // Corrected variable name from abstraction.rs
-                        if let Some(renderable_texture_arc) = surface_data.texture_handle.as_ref() {
+                        // The surface_data_arc is Arc<Mutex<WaylandSurfaceData>>
+                        // Lock it to access WaylandSurfaceData
+                        let surface_data_guard = surface_data_arc.lock().unwrap();
+
+                        if let Some(renderable_texture_arc) = surface_data_guard.texture_handle.as_ref() {
                             // Downcast Arc<dyn RenderableTexture> to &WgpuRenderableTexture
                             if let Some(wgpu_tex) = renderable_texture_arc.as_any().downcast_ref::<WgpuRenderableTexture>() {
                                 // Create a new bind group for this texture
@@ -679,15 +735,23 @@ impl FrameRenderer for NovaWgpuRenderer {
                         render_pass.set_pipeline(&self.render_pipeline);
                     }
                     RenderElement::Cursor { texture_arc, position_logical, hotspot_logical, .. } => {
-                        // hotspot_logical is relative to the cursor image's top-left.
-                        // position_logical is the desired top-left position of the cursor on screen.
-                        // The actual rendering position of the quad needs to be adjusted by the hotspot.
-                        let render_pos_x = position_logical.x - hotspot_logical.x;
-                        let render_pos_y = position_logical.y - hotspot_logical.y;
+                        // --- Cursor Rendering ---
+                        // The cursor's `position_logical` is its top-left point on the screen.
+                        // The `hotspot_logical` is an offset from the cursor image's top-left corner
+                        // to the actual pointer location (e.g., the tip of an arrow cursor).
+                        // To render the cursor image correctly, its top-left on the screen should be:
+                        // `position_logical - hotspot_logical`.
+                        let actual_top_left_x = position_logical.x as f32 - hotspot_logical.x as f32;
+                        let actual_top_left_y = position_logical.y as f32 - hotspot_logical.y as f32;
 
                         let (tex_view, tex_sampler, tex_width_u32, tex_height_u32) =
                             if let Some(wgpu_tex) = texture_arc.as_any().downcast_ref::<WgpuRenderableTexture>() {
-                                (wgpu_tex.view(), wgpu_tex.sampler(), wgpu_tex.width_px(), wgpu_tex.height_px())
+                                if wgpu_tex.width_px() == 0 || wgpu_tex.height_px() == 0 {
+                                    tracing::warn!("Cursor texture has zero dimension, using fallback.");
+                                     (self.dummy_white_texture.view(), self.dummy_white_texture.sampler(), self.dummy_white_texture.width_px(), self.dummy_white_texture.height_px())
+                                } else {
+                                    (wgpu_tex.view(), wgpu_tex.sampler(), wgpu_tex.width_px(), wgpu_tex.height_px())
+                                }
                             } else {
                                 tracing::warn!("Failed to downcast RenderableTexture to WgpuRenderableTexture for cursor. Using dummy texture.");
                                 (self.dummy_white_texture.view(), self.dummy_white_texture.sampler(), self.dummy_white_texture.width_px(), self.dummy_white_texture.height_px())
@@ -705,73 +769,45 @@ impl FrameRenderer for NovaWgpuRenderer {
                             label: Some("Cursor Texture Bind Group"),
                         });
 
-                        render_pass.set_pipeline(&self.render_pipeline); // Ensure textured pipeline
+                        // Use the dedicated cursor pipeline for alpha blending
+                        render_pass.set_pipeline(&self.cursor_render_pipeline);
                         render_pass.set_bind_group(0, &cursor_tex_bind_group, &[]);
 
-                        // Transformation for cursor quad
+                        // Transformation for cursor quad:
+                        // The quad vertices are from -1.0 to 1.0 (a 2x2 square centered at origin).
+                        // 1. Scale: Scale the 2x2 quad to match the texture's dimensions in NDC.
+                        //    - Quad width is 2, so scale_x_model = (tex_width / screen_width) / 2.0 * 2.0 = tex_width / screen_width.
+                        //    - Or, simply, scale by (tex_width / screen_width, tex_height / screen_height).
+                        //      The shader receives vertex positions in [-1,1]. If matrix scales by S, result is [-S, S].
+                        //      So, effective size becomes 2S. We want effective size to be tex_width_ndc. So 2S = tex_width_ndc => S = tex_width_ndc / 2.
+                        //      No, if shader does `matrix * pos`, and pos is [-1,1], then scale factor in matrix should be (width_ndc/2, height_ndc/2).
                         let screen_w = self.screen_size_physical.w as f32;
                         let screen_h = self.screen_size_physical.h as f32;
 
-                        // position_logical is top-left. Quad vertices are -1 to 1 (center at 0,0 for unit quad).
-                        // Hotspot is already applied to position_logical by the caller (RenderElement construction).
-                        // Adjust position_logical by hotspot before this, if hotspot is part of RenderElement::Cursor.
-                        // The RenderElement::Cursor has `position_logical` which should already account for hotspot.
+                        let quad_scale_x = (tex_width / screen_w);
+                        let quad_scale_y = (tex_height / screen_h);
 
-                        // 1. Scale factors for quad (size of cursor texture in NDC)
-                        let scale_x = tex_width / screen_w; // Scale from unit quad width (2) to texture width in NDC
-                        let scale_y = tex_height / screen_h;
+                        // 2. Translate: Position the quad's center.
+                        //    The quad's top-left should be at `actual_top_left_x/y`.
+                        //    So, its center should be at `actual_top_left_x + tex_width / 2`, `actual_top_left_y + tex_height / 2`.
+                        let center_x_screen = actual_top_left_x + tex_width / 2.0;
+                        let center_y_screen = actual_top_left_y + tex_height / 2.0;
 
-                        // 2. Translation factors for quad (position of cursor's center in NDC)
-                        // position_logical is top-left. We want to position the center of the quad.
-                        let center_x_logical = position_logical.x as f32 + tex_width / 2.0;
-                        let center_y_logical = position_logical.y as f32 + tex_height / 2.0;
+                        // Convert center to NDC
+                        let translate_x_ndc = (center_x_screen / screen_w) * 2.0 - 1.0;
+                        let translate_y_ndc = (center_y_screen / screen_h) * -2.0 + 1.0; // Y is inverted
 
-                        let translate_x_ndc = (center_x_logical / screen_w) * 2.0 - 1.0;
-                        let translate_y_ndc = (center_y_logical / screen_h) * -2.0 + 1.0; // Y is inverted in NDC
-
-                        // Build mat3x3: column-major
-                        // [ sx,  0, tx  ]
-                        // [  0, sy, ty  ]
-                        // [  0,  0,  1  ]
-                        let transform_matrix = [ // Column 1, Column 2, Column 3
-                            scale_x, 0.0, 0.0,         // Column 1 (scales x, then y-shear, then x-perspective)
-                            0.0, scale_y, 0.0,         // Column 2 (x-shear, scales y, then y-perspective)
-                            translate_x_ndc, translate_y_ndc, 1.0, // Column 3 (translates x, then y, then global scale)
-                        ]; // This is row-major representation for bytemuck. WGSL mat3x3 constructor takes columns.
-                           // So, this needs to be transposed if passed directly or constructed carefully for WGSL.
-                           // WGSL mat3x3(col0, col1, col2)
-                           // col0 = vec3(m[0],m[1],m[2]), col1 = vec3(m[3],m[4],m[5]), col2 = vec3(m[6],m[7],m[8])
-                           // Our matrix above is laid out for bytemuck as if it's [col0.x, col0.y, col0.z, col1.x, ... ]
-                           // The shader expects mat3x3<f32>.
-                           // A common way to represent scale(S) then translate(T) for a point P is T * S * P.
-                           // If unit quad is [-1,1], first scale by (tex_width/2, tex_height/2) then translate.
-                           // Let's adjust vertices of QUAD_VERTICES to be [0,1] range.
-                           // Current QUAD_VERTICES: [-1.0, -1.0] to [1.0, 1.0] (2x2 size)
-                           // Scale: (tex_width / screen_w, tex_height / screen_h) to make it size of texture in NDC
-                           // Translate: ( (pos.x / screen_w)*2-1 + tex_width_ndc/2, (pos.y / screen_h)*-2+1 - tex_height_ndc/2 )
-                           // This is getting complex. Simpler:
-                           // Scale matrix S = mat3x3(scale_x, 0, 0,  0, scale_y, 0,  0,0,1)
-                           // Translate matrix T = mat3x3(1,0,translate_x_ndc,  0,1,translate_y_ndc, 0,0,1)
-                           // Final matrix = T * S.
-                           // Shader applies M * P (where P is original unit quad vertex)
-                           // So, M = T*S
-                           // M[0][0]=scale_x, M[0][2]=translate_x_ndc
-                           // M[1][1]=scale_y, M[1][2]=translate_y_ndc
-                           // M[2][2]=1
-                           // In column major for shader:
-                           // col0: (scale_x, 0, 0)
-                           // col1: (0, scale_y, 0)
-                           // col2: (translate_x_ndc, translate_y_ndc, 1)
+                        // Final matrix (column-major for WGSL)
+                        // Scales the [-1,1] quad to the desired size, then translates its center.
                         let final_transform_col_major = [
-                            scale_x, 0.0, 0.0,
-                            0.0, scale_y, 0.0,
-                            translate_x_ndc, translate_y_ndc, 1.0,
+                            quad_scale_x, 0.0, 0.0,          // Column 1: scales X
+                            0.0, quad_scale_y, 0.0,          // Column 2: scales Y
+                            translate_x_ndc, translate_y_ndc, 1.0, // Column 3: translates
                         ];
-
 
                         let transform_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                             label: Some("Cursor Transform Uniform Buffer"),
-                            contents: bytemuck::cast_slice(&final_transform_col_major), // mat3x3<f32>
+                            contents: bytemuck::cast_slice(&final_transform_col_major),
                             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                         });
 
@@ -785,36 +821,19 @@ impl FrameRenderer for NovaWgpuRenderer {
                             ],
                             label: Some("Cursor Transform Bind Group"),
                         });
-
-                        // If we had a real texture, we'd set self.render_pipeline (textured)
-                        // For the fallback, solid_color_pipeline is already set.
-                        // If we successfully downcasted and created tex_bind_group:
-                        // render_pass.set_pipeline(&self.render_pipeline);
-                        // render_pass.set_bind_group(0, &tex_bind_group, &[]); // For texture
-                        // render_pass.set_bind_group(1, &transform_bind_group, &[]); // For transform
-
-                        // If using fallback (solid_color_pipeline), it doesn't use group 1 for transform.
-                        // This means the current solid_color_pipeline's shader also needs the transform.
-                        // This is a further complication: solid color elements might also need transform.
-                        // For now, the cursor (even fallback) will use the textured pipeline,
-                        // and if texture is missing, it might result in undefined texture sampling (e.g. black).
-                        // Or, we use the textured pipeline and bind a dummy 1x1 white texture if cursor texture fails.
-
-                        render_pass.set_pipeline(&self.render_pipeline); // Use textured pipeline
-                        // If wgpu_texture_view_sampler was None, we need a fallback texture bind group
-                        // or ensure the shader handles unbound texture gracefully (not typical).
-                        // For now, this will crash if texture is not properly bound.
-                        // This part needs a robust fallback texture if downcast fails.
-                        // For the sake of this diff, assume a valid (but maybe dummy) tex_bind_group if actual one fails.
-                        // This part of the logic is incomplete without robust fallback for texture binding.
-
-                        // render_pass.set_bind_group(0, &tex_bind_group_or_fallback, &[]); // Bind group 0 for texture
-                        render_pass.set_bind_group(1, &transform_bind_group, &[]); // Bind group 1 for transform matrix
+                        render_pass.set_bind_group(1, &transform_bind_group, &[]);
 
                         render_pass.draw_indexed(0..self.quad_num_indices, 0, 0..1);
-                        tracing::trace!("Attempted to render Cursor element at ({}, {}), size ~({}x{}) transformed to NDC ({}, {}) with scale ({}, {}).",
-                                        position_logical.x, position_logical.y, tex_width, tex_height,
-                                        translate_x_ndc, translate_y_ndc, scale_x, scale_y);
+
+                        // Reset pipeline to default for other elements (Wayland surfaces, etc.)
+                        render_pass.set_pipeline(&self.render_pipeline);
+
+                        tracing::trace!(
+                            "Rendered Cursor: pos_logical=({},{}), hotspot=({},{}), actual_top_left=({},{}), tex_size=({}x{}), screen_size=({}x{}), quad_scale=({}, {}), ndc_center=({}, {})",
+                            position_logical.x, position_logical.y, hotspot_logical.x, hotspot_logical.y,
+                            actual_top_left_x, actual_top_left_y, tex_width, tex_height,
+                            screen_w, screen_h, quad_scale_x, quad_scale_y, translate_x_ndc, translate_y_ndc
+                        );
                     }
                 }
             }
@@ -966,13 +985,225 @@ impl FrameRenderer for NovaWgpuRenderer {
             dmabuf.format().code, // DrmFourcc code
             dmabuf.width(),
             dmabuf.height()
-        );
-        // TODO: A full implementation would require EGL interop to create an EGLImage
-        // from the DMABUF, then import that into WGPU. This is highly platform-specific
-        // and backend-specific (e.g. requires EGL context to be current).
-        Err(RendererError::Unsupported(
-            "DMABUF texture import not yet fully implemented for WGPU. Requires EGL interop or specific WGPU extensions.".to_string()
-        ))
+        ); // Note: Dmabuf part is mostly a stub that returns error due to wgpu 0.7 limitations.
+
+        // --- EGL and GLES setup ---
+        // This is highly dependent on how WGPU was initialized and what backend it's using.
+        // We need access to the EGLDisplay and potentially EGLContext WGPU is using.
+
+        // 1. Get EGLDisplay
+        // Winit's RawDisplayHandle might give us this if it's an EGL display.
+        // However, NovaWgpuRenderer::new takes a window_handle_target, but doesn't store the display handle.
+        // This is a problem. We need to assume it's available globally or modify `new` to store it.
+        // For now, let's try to get it dynamically. This is a common challenge.
+        // A common way is eglGetCurrentDisplay(), but that requires an EGL context to be current.
+
+        // Let's assume we need to initialize EGL here, which might conflict if WGPU already did.
+        // A safer approach would be to get it from WGPU's HAL if possible.
+        // Given wgpu 0.7, direct HAL access to EGLDisplay/Context is not straightforward.
+
+        // Try to load EGL functions. We need EGL1_4 for KHR_image_base.
+        // It's crucial that this EGL instance is compatible with the one WGPU/Winit might be using.
+        // If WGPU is initialized with a different EGL display/context, operations might fail or be undefined.
+        let egl_instance = match EglInstance::new(egl::DynamicLibrary::open_default()) {
+            Ok(instance) => instance,
+            Err(e) => {
+                let err_msg = format!("Failed to load EGL library: {}", e);
+                tracing::error!("{}", err_msg);
+                return Err(RendererError::Generic(err_msg)); // Consider a more specific error like EglNotAvailable
+            }
+        };
+        tracing::info!("EGL instance loaded dynamically via default library path.");
+
+        // Get EGLDisplay:
+        // Ideally, this should come from `raw_display_handle()` of the windowing system
+        // that WGPU is also using, to ensure compatibility.
+        // Using EGL_DEFAULT_DISPLAY is a fallback and might not be the correct display if multiple are present
+        // or if WGPU was initialized on a non-default display.
+        let egl_display = unsafe { egl_instance.get_display(egl_types::DEFAULT_DISPLAY) };
+        if egl_display == egl_types::NO_DISPLAY {
+            let egl_error = unsafe { egl_instance.get_error() };
+            let err_msg = format!("Failed to get EGL default display. EGL Error: {:#x}", egl_error);
+            tracing::error!("{}", err_msg);
+            return Err(RendererError::Generic(err_msg)); // Consider EglDisplayNotAvailable
+        }
+
+        // Initialize EGL:
+        // This is generally safe to call multiple times; it's idempotent.
+        let mut major = 0i32;
+        let mut minor = 0i32;
+        if unsafe { egl_instance.initialize(egl_display, &mut major, &mut minor) } == egl_types::FALSE {
+            let egl_error = unsafe { egl_instance.get_error() };
+            let err_msg = format!("Failed to initialize EGL display. EGL Error: {:#x}", egl_error);
+            tracing::error!("{}", err_msg);
+            return Err(RendererError::Generic(err_msg)); // Consider EglInitializationFailed
+        }
+        tracing::info!("EGL initialized: version {}.{}. Display: {:?}", major, minor, egl_display);
+
+        // Check for required EGL extensions:
+        // These are crucial for DMABUF import.
+        let extensions_str = unsafe {
+            let ptr = egl_instance.query_string(egl_display, egl_types::EXTENSIONS);
+            if ptr.is_null() {
+                let egl_error = unsafe { egl_instance.get_error() };
+                let err_msg = format!("Failed to query EGL extensions string. EGL Error: {:#x}", egl_error);
+                tracing::error!("{}", err_msg);
+                return Err(RendererError::Generic(err_msg)); // Consider EglExtensionQueryFailed
+            }
+            std.ffi::CStr::from_ptr(ptr).to_str().unwrap_or("") // unwrap_or: if CStr is not valid UTF-8
+        };
+        tracing::debug!("EGL Extensions: {}", extensions_str);
+
+        if !extensions_str.contains("EGL_KHR_image_base") {
+            return Err(RendererError::Unsupported("EGL extension EGL_KHR_image_base not supported".to_string()));
+        }
+        if !extensions_str.contains("EGL_EXT_image_dma_buf_import") {
+            return Err(RendererError::Unsupported("EGL extension EGL_EXT_image_dma_buf_import not supported".to_string()));
+        }
+        let has_modifier_support = extensions_str.contains("EGL_EXT_image_dma_buf_import_modifiers");
+        tracing::info!("EGL DMABUF import extensions found. Modifier support: {}", has_modifier_support);
+
+        // --- EGLImage Creation ---
+        let mut egl_attribs = Vec::<egl_types::Attrib>::new();
+        egl_attribs.push(egl_types::WIDTH as egl_types::Attrib);
+        egl_attribs.push(dmabuf.width() as egl_types::Attrib);
+        egl_attribs.push(egl_types::HEIGHT as egl_types::Attrib);
+        egl_attribs.push(dmabuf.height() as egl_types::Attrib);
+        egl_attribs.push(egl_types::LINUX_DRM_FOURCC_EXT as egl_types::Attrib);
+        egl_attribs.push(dmabuf.format().code as egl_types::Attrib);
+
+        let num_planes = dmabuf.num_planes();
+        if num_planes == 0 || num_planes > drm::control::MAX_PLANES { // drm::control::MAX_PLANES is usually 4
+             let err_msg = format!("Invalid number of DMABUF planes: {}. Must be > 0 and <= {}.", num_planes, drm::control::MAX_PLANES);
+             tracing::error!("{}", err_msg);
+             return Err(RendererError::InvalidBufferFormat(err_msg));
+        }
+
+        const PLANE_ATTRIBS_CORE: [(i32, (i32, i32)); 3] = [
+            (egl_types::DMA_BUF_PLANE0_FD_EXT, (egl_types::DMA_BUF_PLANE0_OFFSET_EXT, egl_types::DMA_BUF_PLANE0_PITCH_EXT)),
+            (egl_types::DMA_BUF_PLANE1_FD_EXT, (egl_types::DMA_BUF_PLANE1_OFFSET_EXT, egl_types::DMA_BUF_PLANE1_PITCH_EXT)),
+            (egl_types::DMA_BUF_PLANE2_FD_EXT, (egl_types::DMA_BUF_PLANE2_OFFSET_EXT, egl_types::DMA_BUF_PLANE2_PITCH_EXT)),
+        ];
+        const PLANE_ATTRIBS_MODIFIER: [(i32, i32); 3] = [
+            (egl_types::DMA_BUF_PLANE0_MODIFIER_LO_EXT, egl_types::DMA_BUF_PLANE0_MODIFIER_HI_EXT),
+            (egl_types::DMA_BUF_PLANE1_MODIFIER_LO_EXT, egl_types::DMA_BUF_PLANE1_MODIFIER_HI_EXT),
+            (egl_types::DMA_BUF_PLANE2_MODIFIER_LO_EXT, egl_types::DMA_BUF_PLANE2_MODIFIER_HI_EXT),
+        ];
+
+
+        for i in 0..num_planes {
+            let plane_fd = dmabuf.plane_fd(i).map_err(|e| RendererError::InvalidBufferFormat(format!("Failed to get DMABUF plane {} FD: {}", i, e)))?;
+            let plane_offset = dmabuf.plane_offset(i).map_err(|e| RendererError::InvalidBufferFormat(format!("Failed to get DMABUF plane {} offset: {}", i, e)))?;
+            let plane_stride = dmabuf.plane_stride(i).map_err(|e| RendererError::InvalidBufferFormat(format!("Failed to get DMABUF plane {} stride: {}", i, e)))?;
+
+            egl_attribs.push(PLANE_ATTRIBS_CORE[i].0 as egl_types::Attrib);
+            egl_attribs.push(plane_fd as egl_types::Attrib);
+            egl_attribs.push(PLANE_ATTRIBS_CORE[i].1.0 as egl_types::Attrib);
+            egl_attribs.push(plane_offset as egl_types::Attrib);
+            egl_attribs.push(PLANE_ATTRIBS_CORE[i].1.1 as egl_types::Attrib);
+            egl_attribs.push(plane_stride as egl_types::Attrib);
+
+            if let Some(modifier) = dmabuf.modifier() {
+                if has_modifier_support {
+                    if i < PLANE_ATTRIBS_MODIFIER.len() { // Ensure we don't go out of bounds for modifier array
+                        egl_attribs.push(PLANE_ATTRIBS_MODIFIER[i].0 as egl_types::Attrib);
+                        egl_attribs.push((modifier.into_raw() & 0xFFFFFFFF) as egl_types::Attrib);
+                        egl_attribs.push(PLANE_ATTRIBS_MODIFIER[i].1 as egl_types::Attrib);
+                        egl_attribs.push((modifier.into_raw() >> 32) as egl_types::Attrib);
+                    }
+                } else if i == 0 { // Log warning only once for the first plane
+                    tracing::warn!("DMABUF has modifier ({:?}) but EGL_EXT_image_dma_buf_import_modifiers not supported. Importing without modifier.", modifier);
+                }
+            }
+        }
+        egl_attribs.push(egl_types::NONE as egl_types::Attrib); // Terminate the list
+
+        // Create EGLImageKHR:
+        // For EGL_LINUX_DMA_BUF_EXT target, eglContext should be EGL_NO_CONTEXT.
+        // clientBuffer is also typically NULL or not used for this target.
+        let egl_image = unsafe {
+            egl_instance.create_image_khr(
+                egl_display,
+                egl_types::NO_CONTEXT, // Must be EGL_NO_CONTEXT for EGL_LINUX_DMA_BUF_EXT
+                egl_types::LINUX_DMA_BUF_EXT, // Target type
+                std::ptr::null_mut(), // client_buffer (not used for this target)
+                egl_attribs.as_ptr(), // Pointer to attribute list
+            )
+        };
+
+        if egl_image == egl_types::NO_IMAGE_KHR {
+            let egl_error = unsafe { egl_instance.get_error() };
+            let err_msg = format!("Failed to create EGLImageKHR from DMABUF. EGL Error: {:#x}", egl_error);
+            tracing::error!("{}", err_msg);
+            // Consider more specific error mapping based on egl_error if possible
+            return Err(RendererError::Generic(err_msg)); // E.g. EglImageCreationFailed
+        }
+        tracing::info!("EGLImageKHR created successfully from DMABUF attributes.");
+
+        // --- Attempt to use EGLImage with GLES and WGPU (Known Limitation with wgpu 0.7) ---
+
+        // At this point, an EGLImageKHR (egl_image) has been created.
+        // The next conceptual steps would be:
+        // 1. Ensure WGPU is using an OpenGL ES (GLES) backend.
+        // 2. Obtain the `glow::Context` that WGPU's GLES backend is using.
+        // 3. Create a GLES texture (`glow::Texture`).
+        // 4. Bind this GLES texture to the `GL_TEXTURE_EXTERNAL_OES` target.
+        // 5. Use `glEGLImageTargetTexture2DOES` to link the EGLImage data to the GLES texture.
+        // 6. Wrap this GLES texture ID into a `wgpu::Texture` using WGPU's HAL (Hardware Abstraction Layer).
+
+        // **Roadblock with wgpu 0.7:**
+        // Steps 2 and 6 are problematic with wgpu 0.7's public API.
+        // - Step 2: WGPU 0.7 does not provide a stable/public way to get its internal `glow::Context`.
+        //           Creating a new `glow::Context` here would not be the same one WGPU uses, leading to issues.
+        // - Step 6: WGPU 0.7's HAL, while present, does not offer straightforward public functions
+        //           like `Device::from_hal_gles_texture` (found in later versions) to import an arbitrary
+        //           GLES texture ID into WGPU's tracking.
+        //
+        // Therefore, even if the EGLImage is valid, integrating it into WGPU as a usable texture
+        // is not feasible without internal HAL knowledge or unsupported operations for this WGPU version.
+
+        // Check WGPU adapter backend to confirm if it's even GL.
+        let adapter_info = self.adapter.get_info();
+        if adapter_info.backend != wgpu::Backend::Gl {
+            unsafe { egl_instance.destroy_image_khr(egl_display, egl_image); } // Clean up EGLImage
+            let err_msg = format!(
+                "WGPU backend is not OpenGL (it's {:?}). DMABUF import via EGL/GLES is not applicable.",
+                adapter_info.backend
+            );
+            tracing::warn!("{}", err_msg); // Warn, as EGLImage was made, but backend mismatch.
+            return Err(RendererError::Unsupported(err_msg));
+        }
+
+        // Even if the backend is GL, the interop issue remains.
+        // We can load `glEGLImageTargetTexture2DOES` to show the EGL side is ready,
+        // but we can't proceed with creating and binding a GLES texture *within WGPU's context*.
+        let gl_egl_image_target_texture_2d_oes_ptr = unsafe {
+            egl_instance.get_proc_address("glEGLImageTargetTexture2DOES")
+        };
+
+        if gl_egl_image_target_texture_2d_oes_ptr.is_null() {
+            unsafe { egl_instance.destroy_image_khr(egl_display, egl_image); } // Clean up EGLImage
+            let egl_error = unsafe { egl_instance.get_error() }; // Unlikely to be an EGL error, more like function not found.
+            let err_msg = format!("EGL function glEGLImageTargetTexture2DOES not found. EGL GetProcAddress Error: {:#x}", egl_error);
+            tracing::error!("{}", err_msg);
+            return Err(RendererError::Unsupported(err_msg));
+        }
+        // Transmuting to function pointer is not needed here as we won't call it without a glow::Context.
+        tracing::info!("EGL function glEGLImageTargetTexture2DOES loaded successfully.");
+
+        // Cleanup the created EGLImage as we cannot proceed further.
+        unsafe {
+            if egl_instance.destroy_image_khr(egl_display, egl_image) == egl_types::FALSE {
+                let egl_error = unsafe { egl_instance.get_error() };
+                tracing::warn!("Failed to destroy EGLImageKHR. EGL Error: {:#x}", egl_error);
+            } else {
+                tracing::info!("EGLImageKHR destroyed as GLES/WGPU interop is not supported in this version.");
+            }
+        }
+
+        let final_error_message = "DMABUF EGLImage created successfully, but GLES texture import and subsequent WGPU texture wrapping is not supported with this WGPU version (wgpu 0.7) due to HAL limitations.".to_string();
+        tracing::error!("{}", final_error_message);
+        Err(RendererError::Unsupported(final_error_message))
     }
 }
 
