@@ -10,17 +10,19 @@ rust-version = "1.70.0"
 [dependencies]
 thiserror = "1.0.59"
 uuid = { version = "1.8.0", features = ["v4", "serde"] }
-chrono = { version = "0.4.38", features = ["serde"] }
-tracing = { version = "0.1.40" }
-tracing-subscriber = { version = "0.3.18", features = ["fmt", "env-filter", "std", "registry", "json"] }
-tracing-appender = { version = "0.2.3" }
-serde = { version = "1.0.203", features = ["derive"] }
+chrono = "0.4" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for timestamping in log rotation
+tracing = "0.1" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for structured logging
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] } #ANCHOR [NovaDE Developers <dev@novade.org>] Added for structured logging
+tracing-appender = "0.2" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for log rotation
+serde = { version = "1.0", features = ["derive"] } #ANCHOR [NovaDE Developers <dev@novade.org>] Added for serialization
 toml = { version = "0.8.13" }
 directories-next = { version = "2.0.0" }
 log = { version = "0.4.21" }
 atty = { version = "0.2.14" }
 once_cell = { version = "1.19.0" }
 num-traits = { version = "0.2.18" }
+sentry = { version = "0.31", features = ["backtrace", "contexts", "panic", "transport"] } #ANCHOR [NovaDE Developers <dev@novade.org>] Added for error tracking
+sentry-tracing = "0.31" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for Sentry integration with Tracing
 
 # Added for tests, but good to have as explicit dev-dependencies
 [dev-dependencies]

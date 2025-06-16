@@ -77,6 +77,9 @@ pub mod types;
 pub mod config;
 /// Logging infrastructure for NovaDE.
 pub mod logging;
+/// Error tracking and reporting system.
+//ANCHOR [NovaDE Developers <dev@novade.org>] Added error_tracking module.
+pub mod error_tracking;
 /// Utility functions for common tasks.
 pub mod utils;
 
@@ -165,6 +168,8 @@ pub use utils::{
     get_app_cache_dir,
     get_app_state_dir,
 };
+//ANCHOR [NovaDE Developers <dev@novade.org>] Re-export error_tracking functions.
+pub use error_tracking::{init_error_tracking, capture_error, add_breadcrumb, get_sentry_tracing_layer};
 
 #[cfg(test)]
 mod init_tests {

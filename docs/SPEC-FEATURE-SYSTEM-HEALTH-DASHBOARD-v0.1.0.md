@@ -117,6 +117,10 @@ graph TD
     I -- zeigt an --> A;
 ```
 
+### 4.3 Backend-Systeme für Datenerfassung und Diagnose
+<!-- ANCHOR [NovaDE Developers <dev@novade.org>] Verweis auf Backend-Monitoring Dokument -->
+Die detaillierte Spezifikation der Backend-Systeme für die Sammlung von Systemmetriken, Fehlerverfolgung (Error Tracking), den Export von Metriken (z.B. via Prometheus) und erweiterte Diagnose-/Debug-Schnittstellen befindet sich im Dokument `docs/features/SYSTEM-HEALTH-MONITORING-AND-DIAGNOSTICS-v1.0.0.md`. Dieses Dashboard nutzt die von diesen Backend-Systemen bereitgestellten Daten und Fähigkeiten.
+
 ## 5. Schnittstellen
 
 ### 5.1 UI-Schicht zu Domänenschicht (`SystemHealthService`)

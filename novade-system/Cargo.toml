@@ -13,6 +13,7 @@ wayland-protocols = "0.31.0"
 smithay = { version = "=0.3.0", default-features = false, features = ["wayland-server"] } # Downgraded significantly & disabled default features
 zbus = "3"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for state dump serialization
 toml = "0.8" # For future config file parsing
 tracing = "0.1" # Already present, version matches
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
@@ -36,10 +37,17 @@ ash = "0.37" # For Vulkan bindings
 ash-window = "0.12" # For Wayland surface creation with Ash
 gpu-allocator = { version = "0.22", features = ["ash"] } # Rust wrapper for VMA
 raw-window-handle = "0.5" # For integrating with Wayland surfaces
+psutil = "3.2" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for CPU and memory metrics
+once_cell = "1.10" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for static metric collectors
+nvml-wrapper = "0.7" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for NVIDIA GPU monitoring (optional)
+#TODO [NovaDE Developers <dev@novade.org>] Research and add AMD GPU monitoring crate (e.g., amdgpu-sysfs or similar)
+prometheus = { version = "0.13", features = ["process"] } #ANCHOR [NovaDE Developers <dev@novade.org>] Added for Prometheus metrics exposition
+warp = "0.3" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for exposing HTTP metrics endpoint
 
 
 [features]
-default = []
+default = ["prometheus_exporter"] #ANCHOR [NovaDE Developers <dev@novade.org>] Added default feature for exporter
+prometheus_exporter = [] #ANCHOR [NovaDE Developers <dev@novade.org>] Feature flag for enabling metrics exporter
 # The enable-libinput-integration feature is removed as the dependencies are gone.
 # If this feature flag was used for other purposes in the .rs files, those #[cfg] attributes
 # will now effectively be false, which should be fine as we are providing pure stubs.

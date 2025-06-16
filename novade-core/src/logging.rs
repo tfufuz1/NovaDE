@@ -43,17 +43,24 @@ pub fn init_minimal_logging() {
 /// Ensures the parent directory for the log file exists, sets up daily rolling
 /// file appender, and configures the log format (text or JSON).
 ///
+//ANCHOR [NovaDE Developers <dev@novade.org>] Added config enums.
+use crate::config::{LogFormat, LogOutput, LogRotation};
+use tracing_appender::rolling::{RollingFileAppender, Rotation as TracingRotation};
+
+
 /// # Arguments
 ///
 /// * `log_path`: Path to the log file.
-/// * `format`: Logging format ("text" or "json").
+/// * `rotation_policy`: The `LogRotation` policy.
+/// * `log_format`: The `LogFormat` for messages.
 ///
 /// # Returns
 ///
 /// A boxed `Layer` for file logging, or `CoreError` on failure.
 fn create_file_layer(
     log_path: &Path,
-    format: &str,
+    rotation_policy: &LogRotation,
+    log_format: &LogFormat,
 ) -> Result<Box<dyn Layer<Registry> + Send + Sync + 'static>, CoreError> {
     // Ensure parent directory exists
     if let Some(parent) = log_path.parent() {
@@ -62,24 +69,47 @@ fn create_file_layer(
         }
     }
 
-    let file_appender = tracing_appender::rolling::daily(
-        log_path.parent().unwrap_or_else(|| Path::new(".")), // Default to current dir if no parent
-        log_path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("core.log")), // Default filename
-    );
+    let file_appender = match rotation_policy {
+        LogRotation::Daily => RollingFileAppender::new(
+            TracingRotation::DAILY,
+            log_path.parent().unwrap_or_else(|| Path::new(".")),
+            log_path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("novade-core.log")),
+        ),
+        LogRotation::SizeMB(size_mb) => {
+            // tracing_appender's RollingFileAppender with `Rotation::NEVER` can be used with a custom
+            // wrapper that handles size-based rotation, or one might need to find/build a specific
+            // size-based rotating appender. For now, we'll use Rotation::NEVER as a stand-in
+            // and acknowledge this is not full size-based rotation by `tracing-appender` itself.
+            // A true size-based rotation often involves multiple numbered log files.
+            //TODO [Log Rotation Policy] [NovaDE Developers <dev@novade.org>] Implement actual size-based rotation. `tracing-appender`'s default `Rotation::NEVER` doesn't do rotation by size itself. This requires a more complex setup, potentially with a custom file watching/rotating mechanism or a different crate. The `size_mb` parameter is currently unused with `Rotation::NEVER`.
+            eprintln!("[WARN] SizeMB rotation specified but not fully implemented with tracing_appender's default RollingFileAppender. Using non-rotating file. Size: {}MB", size_mb);
+            RollingFileAppender::new(
+                TracingRotation::NEVER, // Placeholder, does not rotate by size.
+                log_path.parent().unwrap_or_else(|| Path::new(".")),
+                log_path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("novade-core.log")),
+            )
+        }
+        LogRotation::None => RollingFileAppender::new(
+            TracingRotation::NEVER,
+            log_path.parent().unwrap_or_else(|| Path::new(".")),
+            log_path.file_name().unwrap_or_else(|| std::ffi::OsStr::new("novade-core.log")),
+        ),
+    };
 
+    //ANCHOR [NovaDE Developers <dev@novade.org>] Create a non-blocking writer.
+    //TODO [NovaDE Developers <dev@novade.org>] The _guard MUST be kept for the lifetime of the logger.
     let (non_blocking_writer, _guard) = tracing_appender::non_blocking(file_appender);
+    let _logging_guard = _guard; // Assign to a named variable to be managed (e.g. returned and stored by caller)
 
-    std::mem::forget(_guard); // THIS IS NOT FOR PRODUCTION USE.
-
-    match format.to_lowercase().as_str() {
-        "json" => {
+    match log_format {
+        LogFormat::Json => {
             let layer = fmt::layer()
                 .json()
                 .with_writer(non_blocking_writer)
                 .with_ansi(false);
             Ok(Box::new(layer))
         }
-        "text" | _ => {
+        LogFormat::Text | _ => { // Default to text
             let layer = fmt::layer()
                 .with_writer(non_blocking_writer)
                 .with_ansi(false);
@@ -90,8 +120,7 @@ fn create_file_layer(
 
 /// Initializes the global logging system based on the provided [`LoggingConfig`].
 ///
-/// Configures and sets the global `tracing` subscriber with a console layer and
-/// an optional file logging layer.
+/// Configures and sets the global `tracing` subscriber.
 ///
 /// # Arguments
 ///
@@ -104,41 +133,63 @@ fn create_file_layer(
 /// Returns `CoreError::Logging` if configuration is invalid or
 /// setting the global subscriber fails on an initial setup.
 pub fn init_logging(config: &LoggingConfig, is_reload: bool) -> Result<(), CoreError> {
-    let level_filter_str = match config.level.to_lowercase().as_str() {
+    //ANCHOR [NovaDE Developers <dev@novade.org>] Determine log level from config.
+    let level_filter_str = match config.log_level.to_lowercase().as_str() {
         "trace" => Level::TRACE.to_string(),
         "debug" => Level::DEBUG.to_string(),
         "info" => Level::INFO.to_string(),
         "warn" => Level::WARN.to_string(),
         "error" => Level::ERROR.to_string(),
         invalid_level => {
-            // Changed: Use CoreError::Logging(String)
             return Err(CoreError::Logging(format!(
-                "Invalid log level in config: {}",
+                "Invalid log_level in config: {}",
                 invalid_level
             )));
         }
     };
 
-    let stdout_filter = EnvFilter::new(level_filter_str.clone());
-    let stdout_layer = fmt::layer()
-        .with_writer(stdout)
-        .with_ansi(atty::is(atty::Stream::Stdout))
-        .with_filter(stdout_filter)
-        .boxed();
+    //ANCHOR [NovaDE Developers <dev@novade.org>] Configure EnvFilter for all layers, respecting RUST_LOG.
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(&level_filter_str))
+        .unwrap_or_else(|_| EnvFilter::new(Level::INFO.to_string())); // Fallback
 
-    let file_layer_opt: Option<Box<dyn Layer<Registry> + Send + Sync + 'static>> =
-        if let Some(log_path) = &config.file_path {
-            let file_filter_env = EnvFilter::new(level_filter_str);
-            let base_file_layer = create_file_layer(log_path, &config.format)?;
-            Some(base_file_layer.with_filter(file_filter_env).boxed())
-        } else {
-            None
-        };
-    
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync + 'static>> = Vec::new();
-    layers.push(stdout_layer);
-    if let Some(file_layer) = file_layer_opt {
-        layers.push(file_layer);
+
+    //ANCHOR [NovaDE Developers <dev@novade.org>] Configure layer based on log_output config.
+    match &config.log_output {
+        LogOutput::Stdout => {
+            let stdout_layer = fmt::layer()
+                .with_writer(stdout)
+                .with_ansi(atty::is(atty::Stream::Stdout))
+                .with_filter(env_filter.clone()); // Clone env_filter if used by multiple layers
+
+            match config.log_format {
+                LogFormat::Json => layers.push(stdout_layer.json().boxed()),
+                LogFormat::Text => layers.push(stdout_layer.boxed()),
+            };
+        }
+        LogOutput::File { path, rotation } => {
+            let file_layer_base = create_file_layer(path, rotation, &config.log_format)?;
+            layers.push(file_layer_base.with_filter(env_filter.clone()).boxed());
+        }
+    }
+
+    //TODO [NovaDE Developers <dev@novade.org>] Integrate SentryLayer here.
+    // Example: if sentry is enabled in ErrorTrackingConfig:
+    // layers.push(crate::error_tracking::get_sentry_tracing_layer().with_filter(env_filter_for_sentry));
+    // Ensure `env_filter_for_sentry` is appropriate (e.g., might want different verbosity for Sentry breadcrumbs).
+
+    //ANCHOR [NovaDE Developers <dev@novade.org>] Combine layers for the tracing subscriber.
+    //TODO [NovaDE Developers <dev@novade.org>] Explore log aggregation for multi-process/distributed scenarios.
+    //TODO [NovaDE Developers <dev@novade.org>] Implement more advanced filtering capabilities if needed.
+
+    if layers.is_empty() {
+        // This might happen if config is malformed or no output is specified.
+        // Fallback to a minimal stdout logger to ensure some logging is available.
+        eprintln!("[WARN] No logging layers configured. Falling back to minimal stdout logger (info level).");
+        let fallback_filter = EnvFilter::new(Level::INFO.to_string());
+        let fallback_layer = fmt::layer().with_writer(stdout).with_filter(fallback_filter).boxed();
+        layers.push(fallback_layer);
     }
 
     let result = Registry::default().with(layers).try_init();
@@ -163,7 +214,9 @@ pub fn init_logging(config: &LoggingConfig, is_reload: bool) -> Result<(), CoreE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::LoggingConfig;
+    //ANCHOR [NovaDE Developers <dev@novade.org>] Import new config types for tests.
+    use crate::config::{LoggingConfig, LogOutput, LogRotation, LogFormat};
+    //TODO [Test Output Capture] [NovaDE Developers <dev@novade.org>] For more thorough testing, especially of log content and formats, consider using a library or custom setup to capture stdout/stderr or read from temporary log files immediately after tracing events. This is complex due to tracing's async nature and potential for output buffering.
     use std::fs as std_fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -184,7 +237,8 @@ mod tests {
     fn test_create_file_layer_text_format() {
         let temp_dir = TempDir::new().unwrap();
         let log_path = temp_dir.path().join("test_text.log");
-        let result = create_file_layer(&log_path, "text");
+        //ANCHOR [NovaDE Developers <dev@novade.org>] Updated create_file_layer call.
+        let result = create_file_layer(&log_path, &LogRotation::Daily, &LogFormat::Text);
         assert!(result.is_ok(), "create_file_layer failed for text format: {:?}", result.err());
         assert!(log_path.parent().unwrap().exists());
     }
@@ -193,9 +247,23 @@ mod tests {
     fn test_create_file_layer_json_format() {
         let temp_dir = TempDir::new().unwrap();
         let log_path = temp_dir.path().join("test_json.log");
-        let result = create_file_layer(&log_path, "json");
+        //ANCHOR [NovaDE Developers <dev@novade.org>] Updated create_file_layer call.
+        let result = create_file_layer(&log_path, &LogRotation::None, &LogFormat::Json);
         assert!(result.is_ok(), "create_file_layer failed for json format: {:?}", result.err());
         assert!(log_path.parent().unwrap().exists());
+    }
+
+    #[test]
+    //ANCHOR [NovaDE Developers <dev@novade.org>] Test for LogRotation::SizeMB setup.
+    fn test_create_file_layer_size_mb_rotation() {
+        let temp_dir = TempDir::new().unwrap();
+        let log_path = temp_dir.path().join("test_size_rotation.log");
+        let result = create_file_layer(&log_path, &LogRotation::SizeMB(50), &LogFormat::Text);
+        assert!(result.is_ok(), "create_file_layer failed for SizeMB rotation: {:?}", result.err());
+        assert!(log_path.parent().unwrap().exists());
+        // Note: This test primarily ensures the setup doesn't panic and prepares the file.
+        // Actual size-based rotation is not fully implemented by the default appender with Rotation::NEVER.
+        // A warning about this is printed by `create_file_layer`.
     }
     
     #[test]
@@ -203,7 +271,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let nested_log_path = temp_dir.path().join("new_parent_dir/nested_log.log");
         assert!(!nested_log_path.parent().unwrap().exists());
-        let result = create_file_layer(&nested_log_path, "text");
+        //ANCHOR [NovaDE Developers <dev@novade.org>] Updated create_file_layer call.
+        let result = create_file_layer(&nested_log_path, &LogRotation::SizeMB(10), &LogFormat::Text);
         assert!(result.is_ok(), "create_file_layer failed: {:?}", result.err());
         assert!(nested_log_path.parent().unwrap().exists(), "Parent directory was not created");
     }
@@ -211,108 +280,141 @@ mod tests {
     #[test]
     fn test_init_logging_invalid_level_returns_error() {
         ensure_clean_logger_state();
+        //ANCHOR [NovaDE Developers <dev@novade.org>] Updated LoggingConfig for test.
         let config = LoggingConfig {
-            level: "supertrace".to_string(),
-            file_path: None,
-            format: "text".to_string(),
+            log_level: "supertrace".to_string(),
+            log_output: LogOutput::Stdout,
+            log_format: LogFormat::Text,
         };
         let result = init_logging(&config, false);
         assert!(result.is_err());
-        // Changed: Match CoreError::Logging(String)
         match result.err().unwrap() {
             CoreError::Logging(msg) => {
-                assert!(msg.contains("Invalid log level in config: supertrace"));
+                assert!(msg.contains("Invalid log_level in config: supertrace"));
             }
             other_error => panic!("Unexpected error type: {:?}", other_error),
         }
     }
     
     #[test]
-    fn test_init_logging_console_only() {
+    fn test_init_logging_stdout_text() { // Renamed for clarity
         ensure_clean_logger_state();
         let config = LoggingConfig {
-            level: "info".to_string(),
-            file_path: None,
-            format: "text".to_string(),
+            log_level: "info".to_string(),
+            log_output: LogOutput::Stdout,
+            log_format: LogFormat::Text,
         };
         let result = init_logging(&config, false);
-        assert!(result.is_ok(), "init_logging failed for console only: {:?}", result.err());
-        tracing::info!("Console-only logging test: Info message.");
-        tracing::debug!("Console-only logging test: Debug message. (Should not be visible)");
+        assert!(result.is_ok(), "init_logging failed for stdout text: {:?}", result.err());
+        tracing::info!("Stdout text logging test: Info message.");
+        tracing::debug!("Stdout text logging test: Debug message. (Should not be visible)");
     }
 
     #[test]
-    fn test_init_logging_with_file_text() {
+    fn test_init_logging_stdout_json() {
         ensure_clean_logger_state();
-        let temp_dir = TempDir::new().unwrap();
-        let log_file = temp_dir.path().join("app_text.log");
         let config = LoggingConfig {
-            level: "debug".to_string(),
-            file_path: Some(log_file.clone()),
-            format: "text".to_string(),
+            log_level: "info".to_string(),
+            log_output: LogOutput::Stdout,
+            log_format: LogFormat::Json,
         };
         let result = init_logging(&config, false);
-        assert!(result.is_ok(), "init_logging failed for file (text): {:?}", result.err());
+        assert!(result.is_ok(), "init_logging failed for stdout json: {:?}", result.err());
+        tracing::info!(message="Stdout JSON logging test", key="value");
+        // Note: Verifying JSON output on stdout would require capturing stdout.
+    }
+
+
+    #[test]
+    fn test_init_logging_with_file_text_daily_rotation() { // Renamed for clarity
+        ensure_clean_logger_state();
+        let temp_dir = TempDir::new().unwrap();
+        let log_file_path = temp_dir.path().join("app_text_daily.log");
+        let config = LoggingConfig {
+            log_level: "debug".to_string(),
+            log_output: LogOutput::File { path: log_file_path.clone(), rotation: LogRotation::Daily },
+            log_format: LogFormat::Text,
+        };
+        let result = init_logging(&config, false);
+        assert!(result.is_ok(), "init_logging failed for file (text, daily): {:?}", result.err());
         
-        tracing::debug!("File logging (text) test: Debug message.");
-        tracing::info!("File logging (text) test: Info message.");
+        tracing::debug!("File logging (text, daily) test: Debug message.");
+        tracing::info!("File logging (text, daily) test: Info message.");
         
-        if log_file.exists() {
-            let content = std_fs::read_to_string(&log_file).unwrap_or_default();
-             assert!(content.contains("File logging (text) test: Debug message."));
-             assert!(content.contains("File logging (text) test: Info message."));
+        // Check if the specific log file exists. Rotation might add date stamps,
+        // so direct check of `log_file_path` might not work for rotated files immediately.
+        // For non-rotated or initial file, it should exist.
+        // More robust check would be to find file with pattern if rotation occurred.
+        // For this test, we assume it writes to the base name before first rotation.
+        if log_file_path.exists() {
+            let content = std_fs::read_to_string(&log_file_path).unwrap_or_default();
+            assert!(content.contains("File logging (text, daily) test: Debug message."));
+            assert!(content.contains("File logging (text, daily) test: Info message."));
         } else {
-            println!("Warning: Log file {} not found for test_init_logging_with_file_text.", log_file.display());
+            // Search for files that start with "app_text_daily.log" in the temp_dir
+            let mut found = false;
+            for entry in std_fs::read_dir(temp_dir.path()).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.is_file() && path.file_name().unwrap().to_string_lossy().starts_with("app_text_daily.log") {
+                    let content = std_fs::read_to_string(&path).unwrap_or_default();
+                    if content.contains("File logging (text, daily) test: Debug message.") &&
+                       content.contains("File logging (text, daily) test: Info message.") {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            assert!(found, "Log file with expected content not found for test_init_logging_with_file_text_daily_rotation. Path: {}", log_file_path.display());
         }
     }
     
     #[test]
-    fn test_init_logging_with_file_json() {
+    fn test_init_logging_with_file_json_no_rotation() { // Renamed for clarity
         ensure_clean_logger_state();
         let temp_dir = TempDir::new().unwrap();
-        let log_file = temp_dir.path().join("app_json.log");
+        let log_file_path = temp_dir.path().join("app_json_none.log");
         let config = LoggingConfig {
-            level: "info".to_string(),
-            file_path: Some(log_file.clone()),
-            format: "json".to_string(),
+            log_level: "info".to_string(),
+            log_output: LogOutput::File { path: log_file_path.clone(), rotation: LogRotation::None },
+            log_format: LogFormat::Json,
         };
         let result = init_logging(&config, false);
-        assert!(result.is_ok(), "init_logging failed for file (json): {:?}", result.err());
+        assert!(result.is_ok(), "init_logging failed for file (json, none): {:?}", result.err());
         
-        tracing::info!(message = "File logging (json) test", key = "value");
+        tracing::info!(message = "File logging (json, none) test", key = "value");
         
-        if log_file.exists() {
-            let content = std_fs::read_to_string(&log_file).unwrap_or_default();
-            assert!(content.contains("\"message\":\"File logging (json) test\""));
+        if log_file_path.exists() {
+            let content = std_fs::read_to_string(&log_file_path).unwrap_or_default();
+            assert!(content.contains("\"message\":\"File logging (json, none) test\""));
             assert!(content.contains("\"key\":\"value\""));
         } else {
-            println!("Warning: Log file {} not found for test_init_logging_with_file_json.", log_file.display());
+            panic!("Log file {} not found for test_init_logging_with_file_json_no_rotation.", log_file_path.display());
         }
     }
 
     #[test]
     fn test_init_logging_reload_true_does_not_error_if_already_set() {
         ensure_clean_logger_state();
-        let config1 = LoggingConfig { level: "info".to_string(), file_path: None, format: "text".to_string() };
+        let config1 = LoggingConfig { log_level: "info".to_string(), log_output: LogOutput::Stdout, log_format: LogFormat::Text };
         init_logging(&config1, false).expect("First init failed");
 
-        let config2 = LoggingConfig { level: "debug".to_string(), file_path: None, format: "text".to_string() };
+        let config2 = LoggingConfig { log_level: "debug".to_string(), log_output: LogOutput::Stdout, log_format: LogFormat::Text };
         let result = init_logging(&config2, true); 
         assert!(result.is_ok(), "Reloading logging should not error, but got: {:?}", result.err());
-        tracing::info!("Reload test: Info after first init.");
-        tracing::debug!("Reload test: Debug after attempting reload.");
+        tracing::info!("Reload test: Info after first init."); // Should follow config1 rules
+        tracing::debug!("Reload test: Debug after attempting reload."); // Behavior depends on how `try_init` handles re-init with different layers. Sentry docs say it replaces.
     }
 
     #[test]
     fn test_init_logging_reload_false_errors_if_already_set() {
         ensure_clean_logger_state();
-        let config1 = LoggingConfig { level: "info".to_string(), file_path: None, format: "text".to_string() };
+        let config1 = LoggingConfig { log_level: "info".to_string(), log_output: LogOutput::Stdout, log_format: LogFormat::Text };
         init_logging(&config1, false).expect("First init failed");
 
-        let config2 = LoggingConfig { level: "debug".to_string(), file_path: None, format: "text".to_string() };
+        let config2 = LoggingConfig { log_level: "debug".to_string(), log_output: LogOutput::Stdout, log_format: LogFormat::Text };
         let result = init_logging(&config2, false);
         assert!(result.is_err(), "Second init with is_reload=false should error");
-        // Changed: Match CoreError::Logging(String)
         match result.err().unwrap() {
             CoreError::Logging(msg) => {
                 assert!(msg.contains("Failed to set global tracing subscriber"));

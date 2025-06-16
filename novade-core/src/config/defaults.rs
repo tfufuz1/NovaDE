@@ -4,40 +4,94 @@
 //! structures to provide sensible default values when they are not specified in
 //! the configuration file.
 
-use crate::config::{LoggingConfig, FeatureFlags}; // Use types from config::mod
+//ANCHOR [NovaDE Developers <dev@novade.org>] Import new config types.
+use crate::config::{
+    LoggingConfig, FeatureFlags, LogOutput, LogRotation, LogFormat,
+    ErrorTrackingConfig, MetricsExporterConfig, DebugInterfaceConfig
+};
 use crate::types::system_health::SystemHealthDashboardConfig;
 use std::path::PathBuf;
 
+// --- Logging Defaults ---
+
+//ANCHOR [NovaDE Developers <dev@novade.org>] Default LoggingConfig.
 /// Returns the default `LoggingConfig`.
-///
-/// Used by `CoreConfig` if the `logging` section is missing from `config.toml`.
 pub(super) fn default_logging_config() -> LoggingConfig {
     LoggingConfig {
-        level: default_log_level(),
-        file_path: default_log_file_path(),
-        format: default_log_format(),
+        log_level: default_log_level_string(),
+        log_output: default_log_output(),
+        log_format: default_log_format_enum(),
     }
 }
 
+//ANCHOR [NovaDE Developers <dev@novade.org>] Default log level string.
 /// Returns the default log level string (`"info"`).
-///
-/// Used by `LoggingConfig` if `level` is not specified.
-pub(super) fn default_log_level() -> String {
+pub(super) fn default_log_level_string() -> String {
     "info".to_string()
 }
 
-/// Returns the default log file path (`None`).
-///
-/// Used by `LoggingConfig` if `file_path` is not specified.
-pub(super) fn default_log_file_path() -> Option<PathBuf> {
-    None // No log file by default
+//ANCHOR [NovaDE Developers <dev@novade.org>] Default LogOutput.
+/// Returns the default `LogOutput` (`Stdout`).
+pub(super) fn default_log_output() -> LogOutput {
+    LogOutput::Stdout // Default to stdout
 }
 
-/// Returns the default log format string (`"text"`).
-///
-/// Used by `LoggingConfig` if `format` is not specified.
-pub(super) fn default_log_format() -> String {
-    "text".to_string()
+//ANCHOR [NovaDE Developers <dev@novade.org>] Default LogFormat enum.
+/// Returns the default `LogFormat` (`Text`).
+pub(super) fn default_log_format_enum() -> LogFormat {
+    LogFormat::Text // Default to text format
+}
+
+// Note: default_log_file_path and default_log_format (string version) are no longer directly used by LoggingConfig
+// but might be useful if other parts of the system expect these specific default values.
+// For now, they are effectively replaced by default_log_output and default_log_format_enum.
+
+// --- Error Tracking Defaults ---
+
+//ANCHOR [NovaDE Developers <dev@novade.org>] Default ErrorTrackingConfig.
+/// Returns the default `ErrorTrackingConfig`.
+pub(super) fn default_error_tracking_config() -> ErrorTrackingConfig {
+    ErrorTrackingConfig {
+        sentry_dsn: default_optional_string(),
+        sentry_environment: default_optional_string(),
+        sentry_release: default_optional_string(),
+    }
+}
+
+// --- Metrics Exporter Defaults ---
+
+//ANCHOR [NovaDE Developers <dev@novade.org>] Default MetricsExporterConfig.
+/// Returns the default `MetricsExporterConfig`.
+pub(super) fn default_metrics_exporter_config() -> MetricsExporterConfig {
+    MetricsExporterConfig {
+        metrics_exporter_enabled: default_bool_false(),
+        metrics_exporter_address: default_metrics_exporter_address(),
+    }
+}
+
+//ANCHOR [NovaDE Developers <dev@novade.org>] Default metrics exporter address.
+/// Returns the default metrics exporter address (`"0.0.0.0:9090"`).
+pub(super) fn default_metrics_exporter_address() -> String {
+    "0.0.0.0:9090".to_string()
+}
+
+// --- Debug Interface Defaults ---
+
+//ANCHOR [NovaDE Developers <dev@novade.org>] Default DebugInterfaceConfig.
+/// Returns the default `DebugInterfaceConfig`.
+pub(super) fn default_debug_interface_config() -> DebugInterfaceConfig {
+    DebugInterfaceConfig {
+        debug_interface_enabled: default_bool_false(),
+        debug_interface_address: default_optional_string(),
+    }
+}
+
+// --- General Defaults ---
+
+//ANCHOR [NovaDE Developers <dev@novade.org>] Default Option<String>.
+/// Returns a default `Option<String>` which is `None`.
+pub(super) fn default_optional_string() -> Option<String> {
+    None
 }
 
 /// Returns the default `FeatureFlags` configuration.
@@ -127,30 +181,62 @@ fn default_assistant_preferences() -> crate::types::assistant::AssistantPreferen
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf; // For testing LogOutput::File
 
     #[test]
-    fn test_default_log_level() {
-        assert_eq!(default_log_level(), "info");
+    fn test_default_log_level_string() { // Renamed test
+        assert_eq!(default_log_level_string(), "info");
+    }
+
+    // Tests for default_log_file_path and default_log_format (string versions) can be removed
+    // if they are no longer used, or kept if they serve other purposes.
+    // For now, removing them as LoggingConfig has changed.
+
+    #[test]
+    fn test_default_log_output() {
+        assert_eq!(default_log_output(), LogOutput::Stdout);
     }
 
     #[test]
-    fn test_default_log_file_path() {
-        assert_eq!(default_log_file_path(), None);
-    }
-
-    #[test]
-    fn test_default_log_format() {
-        assert_eq!(default_log_format(), "text");
+    fn test_default_log_format_enum() { // Renamed test
+        assert_eq!(default_log_format_enum(), LogFormat::Text);
     }
 
     #[test]
     fn test_default_logging_config_values() {
         let lc = default_logging_config();
-        assert_eq!(lc.level, "info");
-        assert_eq!(lc.file_path, None);
-        assert_eq!(lc.format, "text");
+        assert_eq!(lc.log_level, "info");
+        assert_eq!(lc.log_output, LogOutput::Stdout); // Check new field
+        assert_eq!(lc.log_format, LogFormat::Text);   // Check new field
+    }
+
+    #[test]
+    fn test_default_error_tracking_config_values() {
+        let etc = default_error_tracking_config();
+        assert_eq!(etc.sentry_dsn, None);
+        assert_eq!(etc.sentry_environment, None);
+        assert_eq!(etc.sentry_release, None);
+    }
+
+    #[test]
+    fn test_default_metrics_exporter_config_values() {
+        let mec = default_metrics_exporter_config();
+        assert_eq!(mec.metrics_exporter_enabled, false);
+        assert_eq!(mec.metrics_exporter_address, "0.0.0.0:9090");
+    }
+
+    #[test]
+    fn test_default_debug_interface_config_values() {
+        let dic = default_debug_interface_config();
+        assert_eq!(dic.debug_interface_enabled, false);
+        assert_eq!(dic.debug_interface_address, None);
     }
     
+    #[test]
+    fn test_default_optional_string() {
+        assert_eq!(default_optional_string(), None);
+    }
+
     #[test]
     fn test_default_feature_flags_values() {
         let ff = default_feature_flags();
