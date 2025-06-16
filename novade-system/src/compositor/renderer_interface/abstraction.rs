@@ -52,13 +52,86 @@ pub enum BufferFormat {
 
 // Represents raw buffer data from a client
 // This will likely need to be more sophisticated in a real scenario.
-pub struct ClientBuffer<'a> {
-    pub id: u64, // A unique ID for this buffer content
-    pub data: &'a [u8],
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DmabufPlaneFormat {
+    R8,       // Single component, commonly for Y, U, or V planes
+    Rg88,     // Two components, commonly for interleaved UV planes (like NV12's UV plane)
+    Argb8888, // RGBA format, often used for primary display buffers or single-plane graphics
+    Xrgb8888, // RGBX format, similar to ARGB but alpha is ignored
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DmabufDescriptor {
+    pub fd: i32, // File descriptor for the DMABUF plane
+    // Width of this specific plane's data buffer in pixels.
+    // For subsampled planes (like U/V in YUV420), this will be smaller than the image's overall width.
     pub width: u32,
+    // Height of this specific plane's data buffer in pixels.
+    // For subsampled planes, this will be smaller than the image's overall height.
     pub height: u32,
-    pub stride: u32,
-    pub format: BufferFormat,
+    pub plane_index: u32, // Index of this plane (e.g., 0 for Y, 1 for U, 2 for V; or 0 for Y, 1 for UV)
+    pub offset: u32,    // Offset into the FD where this plane's data begins
+    pub stride: u32,    // Stride for this plane
+    pub format: DmabufPlaneFormat, // Format of this plane
+    pub modifier: u64,  // DRM format modifier
+}
+
+pub enum BufferContent<'a> {
+    Shm {
+        id: u64,
+        data: &'a [u8],
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat, // Existing enum (Argb8888, Xrgb8888)
+    },
+    Dmabuf {
+        id: u64, // To identify the buffer object
+        descriptors: [Option<DmabufDescriptor>; 4], // Max 4 planes
+        width: u32, // Overall image width
+        height: u32, // Overall image height
+    },
+}
+
+// Debug implementation for BufferContent manually, as #[derive(Debug)] doesn't work well with &'a [u8]
+impl<'a> std::fmt::Debug for BufferContent<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BufferContent::Shm { id, data: _, width, height, stride, format } => f
+                .debug_struct("Shm")
+                .field("id", id)
+                .field("width", width)
+                .field("height", height)
+                .field("stride", stride)
+                .field("format", format)
+                .field("data_len", &self.data_len_for_debug()) // Avoid printing entire data slice
+                .finish(),
+            BufferContent::Dmabuf { id, descriptors, width, height } => f
+                .debug_struct("Dmabuf")
+                .field("id", id)
+                .field("descriptors", descriptors)
+                .field("width", width)
+                .field("height", height)
+                .finish(),
+        }
+    }
+}
+
+impl<'a> BufferContent<'a> {
+    // Helper for Debug impl
+    fn data_len_for_debug(&self) -> usize {
+        if let BufferContent::Shm { data, .. } = self {
+            data.len()
+        } else {
+            0
+        }
+    }
+}
+
+
+pub struct ClientBuffer<'a> {
+    pub content: BufferContent<'a>,
 }
 
 pub trait RenderableTexture: Send + Sync + std::fmt::Debug + std::any::Any {

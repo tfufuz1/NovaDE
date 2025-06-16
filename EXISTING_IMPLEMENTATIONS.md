@@ -151,8 +151,15 @@ Handles direct hardware interaction, system-level services, and the Wayland comp
     - **Renderers:**
         - `compositor/renderers/`: Modules for GLES2, Vulkan (aligns with original plans).
         - `src/renderer/wgpu_renderer.rs` (`NovaWgpuRenderer`): Implements `FrameRenderer` using WGPU. Appears to be the current primary rendering path.
-        - `src/renderer/wgpu_texture.rs` (`WgpuRenderableTexture`): Concrete WGPU texture.
+        - `src/renderer/wgpu_texture.rs` (`WgpuRenderableTexture`): Concrete WGPU texture, updated to support multi-planar representations conceptually.
     - **Surface Management (`surface_management/`):** `SurfaceData` for per-surface state.
+    - **Buffer Handling (DMABUF Focus):**
+        - Data structures in `renderer_interface/abstraction.rs` (`ClientBuffer`, `BufferContent`, `DmabufDescriptor`, `DmabufPlaneFormat`) and `wgpu_texture.rs` (`WgpuRenderableTexture`) have been updated to represent SHM and DMABUF buffer types, including attributes for single and multi-planar DMABUF layouts (e.g., plane dimensions, formats like R8, Rg88).
+        - `CompositionEngine` (`compositor/composition_engine.rs`) simulates providing DMABUF attributes to the renderer. This includes simulation for both single-plane ARGB/XRGB-like formats and multi-planar formats (e.g., a 3-plane I420 layout triggered by specific test conditions).
+        - `NovaWgpuRenderer`'s (`renderer/wgpu_renderer.rs`) `upload_surface_texture` method can now distinguish DMABUF buffer types passed from `CompositionEngine`.
+        - **Conceptual GPU Import for DMABUF:** For DMABUFs, the renderer currently uses a placeholder approach. It logs DMABUF parameters (overall and per-plane) and creates visually distinct placeholder textures (e.g., magenta for single-plane RGBA-like, shades of gray for R8/Rg88 planes in multi-planar setups). Actual GPU hardware import of DMABUF FDs for zero-copy is a detailed TODO. (Ref: `//ANCHOR [DmabufUploadAttempted]`, `//ANCHOR [DmabufImportSinglePlane]`, `//ANCHOR [DmabufImportMultiPlane]`, `//ANCHOR [DmabufUploadPlaceholderActive]`, `//ANCHOR [WgpuDmabufImportFullOutline]`)
+        - **Multi-Planar DMABUF Handling:** The conceptual import logic processes individual planes of a multi-planar DMABUF, creating separate placeholder textures for each. `WgpuRenderableTexture` is structured to hold these multiple plane textures. Placeholders for a YUV-to-RGB conversion shader (`//ANCHOR [YuvToRgbFragmentShaderPlaceholder]`) and the associated WGPU pipeline are present in `NovaWgpuRenderer`.
+        - **DMABUF Synchronization:** Detailed TODO comments outlining the requirements and conceptual approaches for fence-based synchronization (acquire/release fences) are in place within `NovaWgpuRenderer`. (Ref: `//ANCHOR [DmabufSynchronizationOutline]`)
 - **Observations/Deviations from Spec (Compositor Plans):**
     - Smithay-based architecture aligns with plans.
     - Rendering has a strong WGPU focus, potentially superseding detailed Vulkan/GLES plans. Critical DMABUF support for WGPU is pending.
