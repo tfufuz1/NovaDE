@@ -8,8 +8,8 @@
    - Das Projekt folgt einer klaren Schichtenarchitektur, die eine saubere Trennung der Verantwortlichkeiten gewährleistet:
      - **Core:** Enthält die grundlegendsten Bausteine, Utilities, Konfigurationsmanagement, Logging, Fehlerbehandlung und Basis-Datentypen, die von allen anderen Schichten genutzt werden.
      - **Domain:** Implementiert die Geschäftslogik und Domain-spezifische Funktionalitäten gemäß den Prinzipien des Domain-Driven Design (DDD). Hier finden sich Dienste für KI-Assistenz, globale Einstellungen, Benachrichtigungen, Theming, Fenster-Management-Richtlinien und Workspace-Verwaltung.
-     - **System:** Dient als Schnittstelle zum Betriebssystem und handhabt systemnahe Aufgaben wie den Wayland-Compositor, Input-Verarbeitung (libinput, udev), D-Bus-Kommunikation und Systemdienste. Diese Schicht ist auch dafür verantwortlich, Executables zu bauen, insbesondere den Compositor.
-     - **UI:** Verantwortlich für die grafische Benutzeroberfläche. NovaDE verfolgt hier einen Dual-Toolkit-Ansatz, bei dem Iced für die Haupt-Desktop-Shell und GTK4/LibAdwaita für spezifische Anwendungen wie das System Health Dashboard und andere UI-Komponenten zum Einsatz kommen.
+     - **System:** Dient als Schnittstelle zum Betriebssystem und handhabt systemnahe Aufgaben wie den Wayland-Compositor, Input-Verarbeitung (libinput, udev), D-Bus-Kommunikation, Audio-Management, Systemmetriksammlung und weitere Systemdienste. Diese Schicht ist auch dafür verantwortlich, Executables zu bauen, insbesondere den Compositor.
+     - **UI:** Verantwortlich für die grafische Benutzeroberfläche. NovaDE verfolgt hier einen expliziten Dual-Toolkit-Ansatz: Iced wird für die Haupt-Desktop-Shell verwendet, während GTK4/LibAdwaita für spezifische Anwendungen (wie das System Health Dashboard) und andere UI-Komponenten zum Einsatz kommt.
    - Die Interaktion zwischen den Schichten erfolgt typischerweise von oben nach unten, wobei höhere Schichten auf Dienste und Funktionalitäten tieferliegender Schichten zugreifen.
    - Das Projekt nutzt Cargo Workspaces zur Strukturierung der Codebasis in die genannten Haupt-Crates (`novade-core`, `novade-domain`, `novade-system`, `novade-ui`). Rust ist die primäre Programmiersprache. Das Workspace-Konzept ermöglicht eine modulare Entwicklung und Verwaltung der Abhängigkeiten.
 
@@ -17,57 +17,238 @@
 
 #### 3.1. `novade-core`
    - **Zweck:** Stellt die fundamentalen Bausteine und Kernfunktionalitäten für das gesamte NovaDE-Projekt bereit. Dazu gehören Konfigurationsmanagement, Logging, Fehlerbehandlung und grundlegende Datentypen.
-   - **Wichtige Module und deren Inhalt:**
-     - `src/config/`: Verantwortlich für das statische Laden der `CoreConfig` aus einer TOML-Datei. Dies stellt die globale Konfiguration für die Core-Schicht bereit. Es wurde eine Abweichung von der ursprünglichen Spezifikation festgestellt, die eine dynamischere Konfiguration vorsah.
-     - `src/error.rs`: Definiert die zentralen Fehlertypen `CoreError`, `ConfigError`, `LoggingError` und `ColorParseError` unter Verwendung der `thiserror`-Crate für eine strukturierte Fehlerbehandlung.
-     - `src/logging.rs`: Implementiert ein `tracing`-basiertes Logging-System, das Ausgaben in die Konsole, in Dateien sowie im JSON- oder Textformat unterstützt. Eine temporäre Lösung mit `std::mem::forget` für `WorkerGuard` wurde identifiziert, die möglicherweise überarbeitet werden muss.
-     - `src/types/`: Enthält Definitionen für grundlegende Datentypen, die projektweit verwendet werden, wie z.B. für Geometrie (Punkte, Größen), Farben, Anwendungs-Identifikatoren (`AppIdentifier`) und Status-Enums.
-     - `src/utils/`: Bietet Utility-Funktionen für Dateisystemoperationen und Pfadmanipulationen, insbesondere im Kontext der XDG Base Directory Specification.
-   - **Verzeichnisstruktur:** Die Struktur ist logisch nach Funktionalität gegliedert, mit dedizierten Verzeichnissen für Konfiguration, Fehler, Logging, Typen und Utilities.
+   - **Verzeichnisstruktur und Dateibeschreibungen:**
+     - `src/lib.rs`: Hauptbibliothek-Datei der Crate. Re-exportiert öffentliche Module und Funktionalitäten aus den Untermodulen. Definiert die öffentliche API von `novade-core`.
+     - `src/error.rs`: Definiert die zentralen Fehlertypen für die Core-Schicht (`CoreError`) sowie spezifischere Fehler wie `ConfigError`, `LoggingError` und `ColorParseError`. Verwendet `thiserror` zur einfachen Erstellung von Fehlerarten.
+     - **`src/config/`**: Modul für das Konfigurationsmanagement.
+       - `config/mod.rs`: Deklariert das `config`-Modul und exportiert dessen Inhalte.
+       - `config/loader.rs`: Implementiert die Logik zum Laden der `CoreConfig` aus einer TOML-Datei (`config.toml`). Behandelt das Parsen der Konfigurationsdatei und die Deserialisierung in die `CoreConfig`-Struktur. Stellt die globale Konfiguration (schreibgeschützt) über die Funktionen `initialize_core_config()` und `get_core_config()` bereit. Weicht von der ursprünglichen Spezifikation ab, die ein dynamischeres Konfigurationssystem vorsah.
+       - `config/defaults.rs`: Definiert Standardwerte für die `CoreConfig`-Struktur, die verwendet werden, falls die Konfigurationsdatei nicht gefunden wird oder bestimmte Werte fehlen.
+     - **`src/logging.rs`**: Implementiert das Logging-System basierend auf dem `tracing`-Framework.
+       - Bietet `init_logging()` zur konfigurationsbasierten Initialisierung (Level, Dateipfad, Format) und `init_minimal_logging()` für Tests oder Fallbacks.
+       - Unterstützt Konsolen- (stdout/stderr) und optionale, täglich rotierende Dateiausgaben.
+       - Logformate sind "text" und "json".
+       - Nutzt `tracing_appender::non_blocking` für asynchrones Logging in Dateien. Der Hinweis bezüglich `std::mem::forget` für die `WorkerGuard` deutet auf einen Punkt hin, der in Produktionsumgebungen für eine korrekte Beendigung des Loggings noch Beachtung finden muss.
+     - **`src/types/`**: Modul für grundlegende, projektweit genutzte Datentypen.
+       - `types/mod.rs`: Deklariert das `types`-Modul und exportiert dessen Inhalte.
+       - `types/app_identifier.rs`: Definiert `AppIdentifier`, einen Newtype für validierte Anwendungs-IDs, mit `serde`-Unterstützung.
+       - `types/application.rs`: Enthält Typdefinitionen, die Applikationen repräsentieren oder beschreiben (z.B. `ApplicationMetadata`, `ApplicationState`).
+       - `types/assistant.rs`: Enthält Typdefinitionen für den KI-Assistenten auf Core-Ebene (z.B. `AssistantIntent`, `AssistantResponse`, `KnowledgeSource`).
+       - `types/color.rs`: Definiert die `Color`-Struktur (RGBA f32), Konvertierungsmethoden (rgba8, hex), Manipulationsmethoden, Farbkonstanten und `serde`-Unterstützung. Enthält auch `ColorParseError`.
+       - `types/display.rs`: Enthält Typdefinitionen für Display-bezogene Informationen auf Core-Ebene (z.B. `DisplayInfo`, `Resolution`, `OutputConfiguration`).
+       - `types/geometry.rs`: Definiert generische geometrische Typen wie `Point<T>`, `Size<T>`, `Rect<T>` (mit `serde`-Support und allgemeinen Methoden) sowie spezifische Integer-Varianten (`PointInt`, `SizeInt`, `RectInt`).
+       - `types/orientation.rs`: Definiert Enums `Orientation` (Horizontal, Vertikal) und `Direction` (Nord, Süd, Ost, West).
+       - `types/status.rs`: Definiert ein `Status`-Enum (`Enabled`, `Disabled`, `Pending`, `Error(i32)`) mit `serde`-Unterstützung.
+       - `types/system_health.rs`: Definiert Strukturen und Enums für Systemzustandsmetriken auf Core-Ebene, die von höheren Schichten verwendet werden (z.B. `CpuMetrics`, `MemoryMetrics`, `Alert`, `SystemHealthDashboardConfig`).
+     - **`src/utils/`**: Modul für Utility-Funktionen.
+       - `utils/mod.rs`: Deklariert das `utils`-Modul und exportiert dessen Inhalte.
+       - `utils/fs.rs`: Stellt Utility-Funktionen für das Dateisystem bereit, wie `ensure_dir_exists()` und `read_to_string()`.
+       - `utils/paths.rs`: Bietet Funktionen zur Auflösung von XDG Base Directories und anwendungsspezifischen Verzeichnispfaden unter Verwendung der `directories-next`-Crate.
 
 #### 3.2. `novade-domain`
-   - **Zweck:** Beinhaltet die Geschäftslogik und Domain-spezifische Funktionalitäten des NovaDE-Projekts, orientiert an den Prinzipien des Domain-Driven Design (DDD).
-   - **Wichtige Module und deren Inhalt:**
-     - `src/ai/`, `src/ai_interaction_service/`: Module für die KI-Assistenzfunktionen, einschließlich Interaktionslogik, Consent-Management und Verarbeitung natürlicher Sprache (NLP).
-     - `src/global_settings/`: Implementiert den `GlobalSettingsService` für die Verwaltung und Persistenz globaler Konfigurationen, die über die `CoreConfig` hinausgehen.
-     - `src/notifications_rules/`, `src/user_centric_services/notifications_core/`: Verantwortlich für die Benachrichtigungs-Engine und den dazugehörigen Service, der Regeln für Benachrichtigungen verarbeitet und diese dem Benutzer präsentiert.
-     - `src/theming/`: Enthält die Theming-Engine, Definitionen für Design-Tokens und Standard-Themes für das Erscheinungsbild der Desktop-Umgebung.
-     - `src/window_management_policy/`: Definiert Richtlinien für das Fenster-Management, wie z.B. Tiling-Verhalten und Fokus-Regeln.
-     - `src/workspaces/`: Implementiert das Workspace-Management, einschließlich CRUD-Operationen (Create, Read, Update, Delete) für Workspaces und die Zuweisung von Fenstern zu diesen.
-     - `src/lib.rs`: Definiert `DomainServices` als zentralen Zugriffspunkt auf die verschiedenen Domain-Dienste und enthält die Funktion `initialize_domain_layer` für deren initiales Setup.
-     - `src/error.rs`: Definiert `DomainError` als einen Wrapper-Fehlertyp, der spezifischere Fehler aus den einzelnen Domain-Modulen sowie `CoreError` kapseln kann.
-   - **Verzeichnisstruktur:** Die Verzeichnisstruktur spiegelt die verschiedenen Subdomänen und Dienste wider, die in dieser Schicht implementiert sind.
+   - **Zweck:** Beinhaltet die Geschäftslogik und Domain-spezifische Funktionalitäten des NovaDE-Projekts, orientiert an den Prinzipien des Domain-Driven Design (DDD). Diese Schicht definiert und verwaltet die Kernkonzepte, Regeln und Zustände der Desktop-Umgebung.
+   - **Verzeichnisstruktur und Dateibeschreibungen (Auswahl wichtiger Module):**
+     - `src/lib.rs`: Hauptbibliothek-Datei der Crate. Definiert die Struktur `DomainServices`, die als zentraler Zugriffspunkt für die verschiedenen Domain-Dienste dient (z.B. Settings, Theming, Workspaces). Enthält die asynchrone Funktion `initialize_domain_layer`, die für das initiale Setup aller Domain-Dienste und deren Abhängigkeiten (wie Persistenz-Provider) zuständig ist. Re-exportiert wichtige Typen und Dienste aus den Untermodulen.
+     - `src/error.rs`: Definiert `DomainError` als übergreifenden Fehlertyp für die Domain-Schicht. Dieser Typ umschließt spezifischere Fehler aus den einzelnen Modulen (z.B. `WorkspaceError`, `ThemingError`) sowie `CoreError` aus `novade-core`, um eine konsistente Fehlerbehandlung zu ermöglichen.
+     - `src/common_events.rs`: Definiert Ereignisse, die von mehreren Domain-Modulen gemeinsam genutzt oder ausgelöst werden können (z.B. `UserActivityDetectedEvent`, `SystemShutdownInitiatedEvent`).
+     - `src/shared_types.rs`: Enthält Datentypen, die über verschiedene Domain-Module hinweg verwendet werden (z.B. `ApplicationId`, `UserSessionState`).
+     - **`src/entities/`**: Definiert die Kernentitäten des Domain-Modells nach DDD.
+       - `entities/mod.rs`: Modul-Deklaration.
+       - `entities/configuration.rs`: Entität für Konfigurationsobjekte.
+       - `entities/project.rs`, `entities/task.rs`: Entitäten für Projekt- und Aufgabenmanagement (möglicherweise für interne Entwicklertools oder eine PIM-Funktion).
+       - `entities/user_profile.rs`: Entität für Benutzerprofile.
+       - `entities/value_objects.rs`: Wertobjekte, die als Attribute für Entitäten dienen.
+     - **`src/repositories/`**: Definiert Traits und Implementierungen für Repositories, die für die Persistenz von Entitäten zuständig sind.
+       - `repositories/mod.rs`: Modul-Deklaration.
+       - `repositories/configuration.rs`, `project.rs`, `task.rs`, `user_profile.rs`: Spezifische Repository-Interfaces oder -Implementierungen für die jeweiligen Entitäten.
+     - **`src/ai/` und `src/ai_interaction_service/`**: Module für KI-Assistenzfunktionen. `ai/` definiert grundlegende Typen und Default-Implementierungen, während `ai_interaction_service/` die detailliertere Logik für Interaktion, Kontextmanagement und Skill-Ausführung enthält.
+       - `ai/mod.rs`, `ai_interaction_service/mod.rs`: Modul-Deklarationen.
+       - `ai/default_consent_manager.rs`: Standardimplementierung für die Verwaltung von Benutzereinwilligungen für KI-Funktionen.
+       - `ai/default_interaction_service.rs`: Standardimplementierung des Hauptinteraktionsdienstes.
+       - `ai_interaction_service/logic_service.rs`: Enthält die Kernlogik für die Verarbeitung von KI-Interaktionen.
+       - `ai_interaction_service/consent_manager.rs`: Verwaltung von Einwilligungen.
+       - `ai_interaction_service/context_manager.rs`: Verwaltung des Kontexts für KI-Interaktionen.
+       - `ai_interaction_service/nlp_processor.rs`: Verarbeitung natürlicher Sprache.
+       - `ai_interaction_service/skills_executor.rs`: Ausführung von KI-Skills.
+       - `ai_interaction_service/types.rs`: Spezifische Datentypen für den KI-Dienst.
+     - **`src/global_settings/` und `src/global_settings_management/`**: Gemeinsam verantwortlich für die Verwaltung globaler Einstellungen der Desktop-Umgebung.
+       - `global_settings/mod.rs`, `global_settings_management/mod.rs`: Modul-Deklarationen.
+       - `global_settings/service.rs`: Definiert den `GlobalSettingsService` Trait und die `DefaultGlobalSettingsService`-Implementierung, die das Laden, Speichern und Zugreifen auf `GlobalDesktopSettings` ermöglicht.
+       - `global_settings/types.rs`: Definiert die Struktur `GlobalDesktopSettings` und verwandte Typen (z.B. `AppearanceSettings`, `FontSettings`).
+       - `global_settings/persistence_iface.rs`: Interface für die Persistenz von Einstellungen.
+       - `global_settings/providers/filesystem_provider.rs`: Implementierung für dateisystembasierte Persistenz.
+       - `global_settings/events.rs`: Ereignisse im Zusammenhang mit Einstellungsänderungen.
+     - **`src/notifications/`, `src/notifications_rules/`, `src/notification_service/` und `src/user_centric_services/notifications_core/`**: Umfassende Modulgruppe für das Benachrichtigungssystem, von der Regel-Engine bis zum Service für die Anzeige.
+       - `notifications_rules/engine.rs`: Die `DefaultNotificationRulesEngine` zur Verarbeitung von Benachrichtigungsregeln.
+       - `notifications_rules/types.rs`: Typen für Regeln (`NotificationRule`, `RuleCondition`, `RuleAction`).
+       - `notifications_rules/persistence_iface.rs`, `notifications_rules/persistence.rs`: Persistenz für Benachrichtigungsregeln.
+       - `user_centric_services/notifications_core/service.rs`: Der `DefaultNotificationService`, der Benachrichtigungen verwaltet und anzeigt.
+       - `user_centric_services/notifications_core/types.rs`: Typen für Benachrichtigungen (`Notification`, `NotificationInput`).
+     - **`src/theming/`**: Implementiert die Theming-Engine.
+       - `theming/mod.rs`: Modul-Deklaration.
+       - `theming/engine.rs`: Die `ThemingEngine` (bzw. `DefaultThemingEngine`), die für das Laden, Verwalten und Anwenden von Themes zuständig ist.
+       - `theming/types.rs`: Definiert Strukturen wie `ThemeDefinition`, `TokenSet`, `ColorSchemeType`.
+       - `theming/tokens.rs`: Logik zur Verarbeitung von Design-Tokens.
+       - `theming/provider.rs`: Interface für Theme-Provider.
+       - `theming/default_themes/`: Enthält JSON-Dateien für Standard-Themes.
+       - `theming/events.rs`: Ereignisse für Theme-Änderungen.
+     - **`src/window_management_policy/`**: Definiert Richtlinien für das Fenster-Management.
+       - `window_management_policy/mod.rs`: Modul-Deklaration.
+       - `window_management_policy/service.rs`: Der `DefaultWindowManagementPolicyService`, der Einstellungen für Fensterverhalten (Tiling, Fokus etc.) bereitstellt.
+       - `window_management_policy/types.rs`: Typen für verschiedene Policies (`TilingMode`, `FocusPolicy`).
+     - **`src/workspaces/`**: Umfassendes Modul für das Workspace-Management.
+       - `workspaces/mod.rs`: Modul-Deklaration.
+       - `workspaces/manager/mod.rs`, `workspaces/manager/default_workspace_manager.rs` (existiert basierend auf `DefaultWorkspaceManager` in `lib.rs` und vorheriger Analyse): Der `DefaultWorkspaceManager`, der für CRUD-Operationen, Fensterzuweisung und Verwaltung des aktiven Workspaces zuständig ist.
+       - `workspaces/core/workspace.rs`: Definition der `Workspace`-Entität.
+       - `workspaces/core/types.rs`: Kerntypen für Workspaces.
+       - `workspaces/config/provider.rs`: Persistenz für Workspace-Konfigurationen.
+       - `workspaces/events.rs`: Ereignisse im Zusammenhang mit Workspaces.
+     - **`src/display_configuration/`**: Verwaltung von Anzeigeeinstellungen.
+       - `display_configuration/service.rs`: `DefaultDisplayConfigService` zur Verwaltung von Monitor-Layouts, Auflösungen etc.
+       - `display_configuration/persistence.rs`: Persistenz für Anzeigekonfigurationen.
+       - `display_configuration/types.rs`: Datentypen für Anzeigeeinstellungen.
+     - **`src/system_health_service/`**: Stellt Dienste zur Überwachung des Systemzustands bereit.
+       - `system_health_service/service.rs`: `DefaultSystemHealthService`, der Daten von System-Collectoren aggregiert und Alarme auswertet.
+     - **`src/power_management/`**: Logik für Energieverwaltungsfunktionen.
+       - `power_management/services/default_power_management_service.rs`: Standardimplementierung des Dienstes.
+       - `power_management/dbus_proxies.rs`: Proxies für die Interaktion mit systemeigenen Energieverwaltungsdiensten über D-Bus.
+     - **`src/ports/`**: Definiert Ports (Schnittstellen) zu äußeren Schichten oder Diensten, z.B. `ports/config_service.rs`.
 
 #### 3.3. `novade-system`
-   - **Zweck:** Dient als Schnittstelle zum Betriebssystem und kümmert sich um systemnahe Aufgaben. Dazu gehören der Wayland-Compositor, die Eingabeverarbeitung, D-Bus-Integration und die Sammlung von Systemmetriken. Diese Crate ist auch dafür vorgesehen, die primären Executables des Projekts zu bauen.
-   - **Wichtige Module und deren Inhalt:**
-     - `src/compositor/`: Enthält den umfangreichen und komplexen Wayland-Compositor. Dieser basiert auf einer älteren Version von Smithay (0.3.0), was eine zukünftige Migration auf eine neuere Version oder eine alternative Lösung nahelegt.
-       - `backend/`: Implementierungen für verschiedene Backends, darunter DRM (Direct Rendering Manager) und Winit.
-       - `core/`, `shell/`, `wayland_server/`: Kernkomponenten des Compositors und Implementierungen verschiedener Wayland-Protokolle und Shell-Erweiterungen.
-       - `renderers/`: Beinhaltet GLES2- und Vulkan-Renderer. Der genaue Status und die Beziehung zum WGPU-Renderer sind noch unklar.
-     - `src/nova_compositor_logic/`: Enthält weitere Logik für den Compositor. Das genaue Verhältnis und die Abgrenzung zu `src/compositor/` bedürfen weiterer Klärung. Es gibt Hinweise auf ein geplantes Refactoring, bei dem diese Logik in `src/compositor/` integriert werden soll.
-     - `src/renderer/`: Hier findet sich `wgpu_renderer.rs`, was auf einen moderneren Rendering-Pfad mittels WGPU hindeutet. Dieser scheint der primär vorgesehene Renderer zu sein.
-     - `src/input/`: Verantwortlich für die Verarbeitung von Eingaben über `libinput` und `udev`. Trotz auskommentierter Abhängigkeiten in `Cargo.toml` sind `libinput_handler.rs` und `udev_handler.rs` im Code vorhanden und aktiv.
-     - `src/dbus_integration/`: Implementiert die Kommunikation mit anderen Anwendungen und Systemdiensten über D-Bus.
-     - `src/system_health_collectors/`: Sammelt Metriken über den Systemzustand (CPU-Auslastung, Speicherverbrauch etc.).
-     - `src/lib.rs`: Exponiert nur einen Teil der Funktionalität der Crate. Der Compositor wird voraussichtlich als separates Executable gebaut.
-     - `src/error.rs`: Definiert den `SystemError`-Typ für Fehler, die in dieser Schicht auftreten.
-   - **Verzeichnisstruktur:** Die Struktur ist komplex, was die Natur der systemnahen Aufgaben widerspiegelt, insbesondere im Bereich des Compositors.
+   - **Zweck:** Dient als Schnittstelle zum Betriebssystem und kümmert sich um systemnahe Aufgaben. Dazu gehören der Wayland-Compositor, die Eingabeverarbeitung, D-Bus-Integration, Audio-Management, Systemmetriksammlung und weitere Systemdienste. Diese Crate ist auch dafür vorgesehen, die primären Executables des Projekts zu bauen, insbesondere den Compositor.
+   - **Verzeichnisstruktur und Dateibeschreibungen (Auswahl wichtiger Module):**
+     - `src/lib.rs`: Hauptbibliothek-Datei der Crate. Exponiert einen Teil der Funktionalität der Crate als Bibliothek. Viele Kernkomponenten, wie der Compositor, sind jedoch primär für den Build als eigenständige Executables gedacht (siehe `src/main.rs`, `src/compositor/main.rs`, `src/nova_compositor_logic/main.rs`).
+     - `src/main.rs`: Einer der Einstiegspunkte für ein Executable, das von dieser Crate gebaut wird. Könnte einen Haupt-Systemdienst oder einen alternativen Compositor-Einstiegspunkt starten.
+     - `src/error.rs`: Definiert den `SystemError`-Typ für Fehler, die spezifisch für die System-Schicht sind (z.B. Prozessfehler, MCP-Fehler, Fehler bei der Metriksammlung).
+     - **`src/compositor/`**: Enthält den Großteil der Wayland-Compositor-Implementierung, basierend auf Smithay (Version 0.3.0).
+       - `compositor/mod.rs`: Deklariert das Haupt-Compositor-Modul.
+       - `compositor/main.rs`: Einstiegspunkt für das Starten des Compositors als Executable.
+       - `compositor/init.rs`: Initialisierungslogik für den Compositor.
+       - `compositor/state.rs`: Definiert die Hauptzustandsstruktur des Compositors (vermutlich `DesktopState` basierend auf früheren Analysen), die viele Smithay-Komponenten und Zustände aggregiert.
+       - `compositor/backend/`: Implementierungen für verschiedene Compositor-Backends.
+         - `backend/drm_backend.rs`: Backend für das direkte Rendering auf Hardware mittels DRM/KMS.
+         - `backend/winit_backend.rs`: Backend für das Ausführen des Compositors in einem Fenster mittels Winit (nützlich für Entwicklung und Tests).
+       - `compositor/core/`: Kernlogik des Compositors.
+         - `core/globals.rs`: Implementierung von Wayland-Globals.
+         - `core/handlers.rs`, `input_handlers.rs`, `output_handlers.rs`, `screencopy_handlers.rs`: Handler für verschiedene Wayland-Events und Protokolle.
+       - `compositor/shell/`: Implementierung von Wayland-Shell-Protokollen.
+         - `shell/xdg_shell/`: Spezifisch für das XDG Shell Protokoll (Standard-Fenster).
+         - `shell/mod.rs` (und `.gitkeep`): Platzhalter oder Basis für Shell-Implementierungen.
+       - `compositor/layer_shell/`: Implementierung für das `wlr-layer-shell` Protokoll (Panels, Wallpaper etc.).
+       - `compositor/wayland_server/`: Low-Level Wayland Server Aspekte.
+         - `wayland_server/client.rs`: Verwaltung von Client-Verbindungen.
+         - `wayland_server/dispatcher.rs`: Event-Dispatching.
+         - `wayland_server/protocol.rs`, `wayland_server/protocols/`: Implementierungen spezifischer Wayland-Protokolle.
+       - `compositor/surface_management.rs`: Logik zur Verwaltung von Wayland-Oberflächen (Surfaces).
+       - `compositor/shm/`: Shared Memory Buffer Management.
+       - `compositor/renderers/`: Rendering-Backends, die vom Compositor genutzt werden (scheinbar ältere Optionen oder parallel zu `src/renderer/` entwickelt).
+         - `renderers/gles2/`: OpenGL ES 2.0 Renderer.
+         - `renderers/vulkan/`: Vulkan Renderer.
+         - `renderers/drm_gbm.rs`, `egl_context.rs`, `texture.rs`: Hilfsmodule für diese Renderer.
+       - `compositor/scene_graph.rs`: Verwaltung der Szene (Anordnung von Oberflächen).
+       - `compositor/composition_engine.rs`: Logik für das Compositing der Oberflächen zum finalen Bild.
+       - `compositor/cursor_manager.rs`: Verwaltung des Mauszeigers.
+     - **`src/nova_compositor_logic/`**: Enthält zusätzliche oder alternative Compositor-Logik. Das genaue Verhältnis zu `src/compositor/` ist unklar, aber es gibt Hinweise auf einen geplanten Merge dieser Komponenten.
+       - `nova_compositor_logic/main.rs`: Möglicherweise ein weiterer Einstiegspunkt für einen Compositor-Prozess.
+       - `nova_compositor_logic/state.rs`: Eigene Zustandsverwaltung.
+       - `nova_compositor_logic/protocols/`: Eigene Implementierungen von Wayland-Protokollen.
+     - **`src/renderer/`**: Enthält einen moderneren Rendering-Pfad basierend auf WGPU.
+       - `renderer/mod.rs`: Modul-Deklaration.
+       - `renderer/wgpu_renderer.rs`: Implementierung eines Renderers mit WGPU (`NovaWgpuRenderer`), der das `FrameRenderer`-Interface aus `src/renderer_interface.rs` (oder `compositor/renderer_interface/abstraction.rs`) implementiert. Scheint der primär angestrebte Renderer zu sein.
+       - `renderer/wgpu_texture.rs`: WGPU-spezifische Texturimplementierung.
+       - `renderer/shaders/`: Enthält Shader-Code (z.B. WGSL).
+     - `src/renderer_interface.rs` (und `compositor/renderer_interface/abstraction.rs`): Definiert eine Abstraktionsschicht (`FrameRenderer`, `RenderableTexture`) für die Rendering-Backends, um Flexibilität zu ermöglichen.
+     - **`src/input/`**: Umfassendes Modul für die Eingabeverarbeitung.
+       - `input/mod.rs`: Modul-Deklaration.
+       - `input/input_management.rs` oder `input/input_dispatcher.rs`: Orchestrierung der Eingabelogik.
+       - `input/libinput_handler.rs`: Verarbeitung von Hardware-Events mittels `libinput` (aktiv vorhanden).
+       - `input/udev_handler.rs`: Verwendung von `udev` zur Geräteerkennung und Hotplugging (aktiv vorhanden).
+       - `input/device_manager.rs`: Verwaltung von Eingabegeräten.
+       - `input/keyboard/`, `input/pointer/`, `input/touch/`: Spezifische Logik für Tastatur (inkl. XKB-Layouts), Maus und Touch-Eingaben.
+       - `input/seat_manager/`: Verwaltung von "Seats" (Sammlung von Eingabegeräten für einen Benutzer).
+       - `input/focus.rs`: Fokusmanagement.
+       - `input/voice_capture_service.rs`: Platzhalter oder frühe Implementierung für Spracheingabe.
+     - **`src/dbus_integration/` und `src/dbus_interfaces/`**: Module für die D-Bus-Kommunikation.
+       - `dbus_integration/manager.rs`: Verwaltung von D-Bus-Verbindungen und -Schnittstellen.
+       - `dbus_interfaces/notifications_server.rs`: Beispiel für einen D-Bus-Server (hier für Benachrichtigungen, was auf Interaktion mit `novade-domain` hindeutet).
+     - `src/dbus_menu_provider.rs`: Stellt Anwendungsmenüs über D-Bus bereit.
+     - **`src/system_health_collectors/`**: Sammlung von Systemzustandsmetriken.
+       - `system_health_collectors/mod.rs`: Modul-Deklaration.
+       - `cpu_collector.rs`, `memory_collector.rs`, `disk_collector.rs`, `network_collector.rs`, `temperature_collector.rs`: Spezifische Kollektoren für verschiedene Metriken unter Linux (lesen aus `/proc`, `/sys`).
+       - `journald_harvester.rs`: Sammeln von Logs aus dem Systemd Journal.
+       - `basic_diagnostics_runner.rs`: Ausführung einfacher Diagnosetests.
+     - `src/application_manager.rs`: Verwaltung von laufenden Anwendungen.
+     - `src/audio_management.rs`: Platzhalter oder Basisimplementierung für Audio-Management (z.B. PipeWire-Integration).
+     - `src/display_management.rs`: Systemnahe Verwaltung von Displays (ergänzend zum Compositor-Output-Management).
+     - `src/filesystem_service.rs`: Dateisystemdienste auf Systemebene.
+     - `src/mcp_client_service/`: Client für das "Model Context Protocol".
+     - `src/network_manager/`, `src/power_management/`: Platzhalter oder Basisimplementierungen für Netzwerk- und Energieverwaltung.
+     - `src/settings_storage.rs`: Systemnahe Speicherung von Einstellungen.
+     - `src/system_services.rs`: Zentraler Zugriffspunkt für verschiedene Systemdienste.
+     - `src/system_settings_service.rs`: Dienst für systemspezifische Einstellungen.
+     - `src/theme_integration.rs`: Systemnahe Integration für Theming.
+     - `src/window_info_provider.rs`: Bereitstellung von Fensterinformationen auf Systemebene.
+     - `src/window_management.rs`: Systemnahe Fensterverwaltungsfunktionen.
 
 #### 3.4. `novade-ui`
-   - **Zweck:** Verantwortlich für die Implementierung der grafischen Benutzeroberflächen von NovaDE.
-   - **Wichtige Module und deren Inhalt:**
-     - **Dual-Toolkit-Ansatz:** Eine zentrale Beobachtung ist die Verwendung von zwei verschiedenen UI-Toolkits:
-       - **Iced (Haupt-Shell):** Die `src/lib.rs` definiert eine Iced-basierte Applikation (`NovaDE`), die als Haupt-Desktop-Shell fungiert. Module wie `desktop_ui` und `panel_ui` sind Teil dieser Iced-Anwendung.
-       - **GTK4/LibAdwaita (System Health Dashboard & Komponenten):** Die `src/main.rs` baut eine separate GTK4-Anwendung (`org.novade.SystemHealthDashboard`). Zahlreiche GTK-spezifische Dateien (`.ui`-Dateien, `gresources.xml`, `style.css`, `theming_gtk.rs`) sowie das `src/shell/`-Verzeichnis (welches GTK-basierte Panel-Widgets enthält) deuten darauf hin, dass GTK4 für wichtige UI-Teile, insbesondere das System Health Dashboard und eventuell weitere Systemkomponenten, verwendet wird.
-     - `src/system_health_dashboard/`: Enthält die UI-Implementierung für das GTK-basierte System Health Dashboard, das Systemmetriken anzeigt.
-     - `src/shell/`: Beinhaltet GTK-Komponenten, die vermutlich für die Desktop-Shell verwendet werden, wie z.B. Panel-Widgets. Dies steht im Kontrast zur Iced-basierten Haupt-Shell und deutet auf eine hybride UI-Strategie hin.
-     - `src/error.rs`: Definiert den `UiError`-Typ für Fehler im UI-Bereich.
-   - **Verzeichnisstruktur:** Die Struktur ist durch den Dual-Toolkit-Ansatz geprägt, mit separaten Bereichen für Iced- und GTK-Komponenten.
+   - **Zweck:** Verantwortlich für die Implementierung der grafischen Benutzeroberflächen von NovaDE. Eine Besonderheit dieser Crate ist die Verwendung von zwei verschiedenen UI-Toolkits: Iced und GTK4/LibAdwaita.
+   - **Verzeichnisstruktur und Dateibeschreibungen (Auswahl wichtiger Module):**
+     - `src/error.rs`: Definiert den `UiError`-Typ für Fehler im UI-Bereich (z.B. Asset-Ladefehler, Widget-Erstellungsfehler) und eine `UiResult`-Typalias.
+     - `src/assets.rs`: Lädt und verwaltet statische Assets wie Icons und möglicherweise Schriftarten, die in der UI verwendet werden.
+     - `src/common.rs`: Enthält vermutlich gemeinsame Hilfsfunktionen, Typen oder Konstanten, die von verschiedenen UI-Modulen genutzt werden.
+     - `src/dbus_utils.rs`: Stellt Hilfsfunktionen für die D-Bus-Kommunikation bereit, die von UI-Komponenten zur Interaktion mit System- oder Domain-Diensten verwendet werden könnten.
+     - `src/compositor_integration.rs`: Code für die Interaktion der UI-Schicht mit dem Wayland-Compositor aus `novade-system`.
+     - `src/input_integration.rs`: Code für die Integration spezifischer UI-seitiger Eingabelogik mit dem Input-System.
+     - `src/ui_state.rs`: Verwaltet den globalen oder modulübergreifenden Zustand der Benutzeroberfläche.
+
+     - **Iced-basierte Haupt-Desktop-Shell:** Die primäre Desktop-Shell scheint mit dem Iced-Framework entwickelt zu werden.
+       - `src/lib.rs`: Definiert die Iced-basierte Hauptanwendungsstruktur `NovaDE` und implementiert das `iced::Application`-Trait für `NovaDeApplication`. Dieser Teil ist als die primäre Desktop-Shell von NovaDE konzipiert. Enthält die Haupt-Event-Schleife (`update`) und die View-Logik (`view`) für die Iced-Anwendung. Re-exportiert auch viele UI-Module.
+       - `src/app.rs`: Enthält möglicherweise eine alternative oder ergänzende Iced-Anwendungsstruktur oder -logik (`NovaDeApp` wurde in früheren Analysen hier verortet). (Hinweis: Die genaue Rolle im Verhältnis zu `lib.rs` als Iced-Einstiegspunkt müsste ggf. weiter untersucht werden, falls beide aktiv sind).
+       - Die folgenden Module werden von der Iced-Anwendung in `lib.rs` referenziert und sind Iced-Komponenten:
+         - `src/desktop_ui.rs`: UI-Logik für den Hauptdesktop-Bereich (z.B. Wallpaper-Verwaltung, Desktop-Icons).
+         - `src/panel_ui.rs`: UI-Logik für das Hauptpanel (Taskleiste) der Desktop-Umgebung.
+         - `src/window_manager_ui.rs`: UI-Aspekte des Fenster-Managements.
+         - `src/application_launcher.rs`: UI für den Anwendungsstarter und die Programmsuche.
+         - `src/settings_ui.rs` (Iced-Version): UI für Systemeinstellungen, die in die Iced-Shell integriert ist.
+         - `src/notification_ui.rs` (Iced-Version): UI für die Anzeige von Systembenachrichtigungen innerhalb der Iced-Shell.
+         - `src/theme_ui.rs` (Iced-Version): UI für Theme-Verwaltung innerhalb der Iced-Shell.
+         - `src/workspace_ui.rs` (Iced-Version): UI für Workspace-Management (Umschalter, Übersicht) innerhalb der Iced-Shell.
+         - `src/system_tray.rs` (Iced-Version): Implementierung des System-Trays für die Iced-Shell.
+
+     - **GTK4/LibAdwaita-basierte Anwendungen/Komponenten:** Parallel dazu werden GTK4 und LibAdwaita für separate Anwendungen und möglicherweise komplexere UI-Module eingesetzt.
+       - `src/main.rs`: Baut und startet eine separate GTK4/LibAdwaita-Anwendung: das **System Health Dashboard** (`org.novade.SystemHealthDashboard`). Nutzt den `DefaultSystemHealthService` aus `novade-domain`.
+       - `src/style.css`: CSS-Datei für das Styling der GTK-basierten UI-Teile.
+       - `src/styles.rs`: Möglicherweise Rust-Code zum programmatischen Laden oder Verwalten von Styles, vermutlich für GTK.
+       - `src/theming_gtk.rs`: Spezifischer Code für die Integration des Theming-Systems aus `novade-domain` mit GTK4-Anwendungen.
+       - `src/gresources/`: Enthält GTK-spezifische Ressourcen.
+         - `gresources/resources.xml`: Definiert die GResource-Bundle-Datei, die Icons und `.ui`-Dateien für GTK-Anwendungen bündelt.
+         - `gresources/icons/`: Speicherort für Icons, die über GResources geladen werden.
+       - **`src/shell/`**: Enthält GTK4/LibAdwaita-Komponenten, die typischerweise für Desktop-Shell-Funktionalitäten verwendet werden. Es ist möglich, dass diese entweder für eine alternative, vollständig GTK-basierte Shell gedacht sind oder als komplexere, eigenständige UI-Module dienen, die z.B. über D-Bus mit der Iced-Shell interagieren könnten.
+         - `shell/mod.rs`: Modul-Deklaration.
+         - `shell/active_window_service.rs`, `shell/app_menu_service.rs`: UI-nahe Dienste.
+         - `shell/domain_workspace_connector.rs`: Verbindet GTK-UI-Teile mit der Workspace-Logik der Domain-Schicht.
+         - `shell/panel_widget/`: Enthält diverse GTK-Widgets für ein Panel. Viele davon sind als eigene GTK-Widget-Klassen implementiert (oft mit `imp.rs` für die private Implementierung) und nutzen `.ui`-Dateien für ihre Struktur (z.B. `app_menu_button/`, `clock_datetime_widget/`, `cpu_usage_widget/`, `network_management_widget/`, `notification_center_button/`, `notification_center_panel/`, `quick_settings_button/`, `quick_settings_panel/`, `workspace_indicator_widget/`).
+         - `shell/ui_notification_service.rs`, `shell/ui_settings_service.rs`: UI-spezifische Dienste, vermutlich für die GTK-Teile.
+       - **`src/system_health_dashboard/`**: Implementiert das GTK4/LibAdwaita-basierte System Health Dashboard.
+         - `system_health_dashboard/mod.rs`: Modul-Deklaration.
+         - `system_health_dashboard/main_view.rs`: Die Hauptansicht des Dashboards (`SystemHealthDashboardView`), die verschiedene Panels in einem `gtk::Notebook` organisiert.
+         - `system_health_dashboard/metrics_panel.rs`, `log_viewer_panel.rs`, `diagnostics_panel.rs`, `alerts_panel.rs`, `overview_panel.rs`: Einzelne Panels für spezifische Ansichten innerhalb des Dashboards.
+         - `system_health_dashboard/view_model.rs`: ViewModel zur Datenhaltung und -aufbereitung für das Dashboard.
+         - `system_health_dashboard/widgets/`: Spezifische GTK-Widgets für das Dashboard.
+       - **`src/assistant_ui/`**: UI für eine Assistenzfunktion. Die verwendete Technologie (Iced oder GTK) ist hier nicht sofort ersichtlich; die Existenz von `widgets.rs` könnte auf benutzerdefinierte Komponenten hindeuten, möglicherweise GTK.
+       - **`src/components/`**: Wiederverwendbare UI-Komponenten.
+         - `components/simple_taskbar.rs` und `simple_taskbar.ui`: Ein Beispiel für eine GTK-Komponente, die mit einer `.ui`-Datei definiert ist.
+       - **`src/widgets/`**: Allgemeine benutzerdefinierte Widgets.
+         - `widgets/basic_widget.rs` und `basic_widget.ui`: Ein weiteres Beispiel für eine GTK-Komponente.
+         - `widgets/notification_popup.rs`: UI für Benachrichtigungs-Popups; könnte GTK sein, insbesondere wenn es mit dem `notification_client` und D-Bus System arbeitet.
+       - `src/context_menu.rs`: Implementierung von Kontextmenüs (Toolkit unklar ohne weitere Analyse).
+       - `src/notification_client/`: Client-Logik für Benachrichtigungen, interagiert oft mit einem D-Bus Dienst (typisch für GTK-Anwendungen).
+       - `src/quick_settings.rs`, `src/settings_ui.rs` (GTK-Version): GTK-basierte UI für Schnelleinstellungen und detailliertere Systemeinstellungen.
+       - `src/workspace_switcher.rs`: GTK-basierte UI für den Workspace-Wechsler.
 
 ### 4. Root-Verzeichnis und Dokumentation
    - **`docs/`**: Dieses Verzeichnis ist eine Goldgrube an Informationen. Es enthält umfangreiche und detaillierte Design- und Spezifikationsdokumente, meist in deutscher Sprache. Diese Dokumente dienen als primäre Quelle für das Verständnis der geplanten Architektur und der funktionalen Anforderungen.
-   - **`Cargo.toml` (Root)**: Definiert den Cargo-Workspace, der die vier Haupt-Crates (`novade-core`, `novade-domain`, `novade-system`, `novade-ui`) zusammenfasst. Ein wichtiger Kommentar weist darauf hin, dass der Crate `nova_compositor` (vermutlich `src/nova_compositor_logic` in `novade-system`) in den Haupt-Compositor-Crate (`src/compositor/` in `novade-system`) integriert werden soll.
+   - **`Cargo.toml` (Root)**: Definiert den Cargo-Workspace, der die vier Haupt-Crates (`novade-core`, `novade-domain`, `novade-system`, `novade-ui`) zusammenfasst. Ein wichtiger Kommentar weist darauf hin, dass der Crate `nova_compositor` (vermutlich Code aus `src/nova_compositor_logic` in `novade-system`) in den Haupt-Compositor-Crate (`src/compositor/` in `novade-system`) integriert werden soll.
    - **`.github/workflows/rust.yml`**: Enthält ein Standard-CI-Setup für Rust-Projekte, das Build- und Testprozesse automatisiert.
    - **`assets/icons/`**: Beinhaltet Projektsymbole und andere grafische Assets.
    - **`docs_old/`**: Enthält veraltete Dokumente, die möglicherweise historischen Kontext bieten, aber nicht mehr den aktuellen Planungsstand widerspiegeln.
@@ -79,11 +260,14 @@
 ### 5. Wichtige Erkenntnisse und Beobachtungen
    - **Starke Schichtung:** Die Codebasis ist klar in die vier Hauptschichten Core, Domain, System und UI unterteilt, was eine gute Modularität und Wartbarkeit fördert.
    - **Dokumentation als Grundlage:** Die umfangreichen Spezifikationen und Designdokumente im `docs/`-Verzeichnis sind der zentrale Leitfaden für die Entwicklung.
-   - **Compositor-Technologie:** Der Compositor in `novade-system` basiert auf einer älteren Smithay-Version (0.3.0). Es gibt klare Anzeichen, dass WGPU als primärer Renderer angestrebt wird, was eine Modernisierung des Rendering-Pfads bedeutet.
-   - **Dual-Toolkit-Strategie in der UI:** `novade-ui` verfolgt einen interessanten Ansatz mit Iced für die Haupt-Desktop-Shell und GTK4/LibAdwaita für spezifische Anwendungen wie das System Health Dashboard und potenziell weitere UI-Komponenten. Die genaue Abgrenzung und Integration dieser beiden Toolkits ist ein wichtiger Aspekt.
-   - **Geplante Refactorings:** Es gibt Hinweise auf geplante Refactorings, wie z.B. die Integration von `nova_compositor_logic` in den Haupt-Compositor.
+   - **Compositor-Technologie:** Der Compositor in `novade-system` basiert auf einer älteren Smithay-Version (0.3.0). Es gibt klare Anzeichen, dass WGPU als primärer Renderer angestrebt wird, was eine Modernisierung des Rendering-Pfads bedeutet. Die Koexistenz verschiedener Renderer-Implementierungen (`src/compositor/renderers` vs. `src/renderer`) bedarf der Klärung.
+   - **Dual-Toolkit-Strategie in der UI:** `novade-ui` verfolgt einen expliziten Dual-Toolkit-Ansatz mit Iced für die Haupt-Desktop-Shell und GTK4/LibAdwaita für spezifische Anwendungen (System Health Dashboard) und potenziell weitere komplexe UI-Komponenten oder eigenständige Tools. Die genaue Abgrenzung, Integration oder Interaktion dieser beiden Toolkits ist ein wichtiger Aspekt für das Gesamtbild der UI.
+   - **Geplante Refactorings:** Es gibt Hinweise auf geplante Refactorings, wie z.B. die Integration von `nova_compositor_logic` in den Haupt-Compositor-Code in `novade-system`.
    - **Meta-Analyse-Dokumente:** `EXISTING_IMPLEMENTATIONS.md` und `MISSING_IMPLEMENTATIONS.md` sind extrem wertvoll, um einen schnellen Überblick über den Projektfortschritt und die noch offenen Aufgaben zu erhalten.
+   - **Aktiver Code trotz Kommentaren:** Bestimmte Funktionalitäten, wie die `libinput_handler.rs` und `udev_handler.rs` in `novade-system`, sind trotz möglicherweise anderslautender Kommentare in `Cargo.toml` aktiv im Code vorhanden.
 
 ### 6. Fazit
    - Das NovaDE-Projekt befindet sich in einem fortgeschrittenen Planungs- und frühen Implementierungsstadium. Die Architektur ist gut durchdacht und die Trennung der Verantwortlichkeiten durch die Schichten ist klar ersichtlich.
-   - Die Dokumentation in `docs/`, zusammen mit den Meta-Analyse-Dokumenten wie `EXISTING_IMPLEMENTATIONS.md` und `MISSING_IMPLEMENTATIONS.md`, ist von unschätzbarem Wert für das Verständnis des Projekts, seines aktuellen Stands und der zukünftigen Entwicklungsrichtung. Die Klärung der Compositor-Strategie (Smithay-Version, WGPU-Integration) und die Details der Dual-Toolkit-Nutzung in der UI-Schicht sind zentrale technische Aspekte, die weiter verfolgt werden müssen. Die vorhandenen Dokumente bieten jedoch eine solide Grundlage für alle Entwickler, die sich in das Projekt einarbeiten möchten.
+   - Die Dokumentation in `docs/`, zusammen mit den Meta-Analyse-Dokumenten, ist von unschätzbarem Wert für das Verständnis des Projekts, seines aktuellen Stands und der zukünftigen Entwicklungsrichtung.
+   - Zentrale technische Aspekte für die Weiterentwicklung sind die Klärung der Compositor-Strategie (Migration von Smithay 0.3.0, Konsolidierung der Renderer-Pfade hin zu WGPU) und die Detaillierung der Architektur und Interaktion im Rahmen des Dual-Toolkit-Ansatzes in der UI-Schicht.
+   - Trotz einiger Unklarheiten im Detail bietet die vorhandene Codebasis und Dokumentation eine solide Grundlage für alle Entwickler, die sich in das Projekt einarbeiten möchten. Die Erstellung eines Root-`README.md` wäre ein sinnvoller nächster Schritt zur Verbesserung der Zugänglichkeit.
