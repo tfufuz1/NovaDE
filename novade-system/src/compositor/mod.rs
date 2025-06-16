@@ -16,3 +16,8 @@ pub mod composition_engine;
 pub mod scene_graph;
 pub mod display_management; // Added display_management module
 pub mod animations; // Added animations module
+pub mod workspaces; // ANCHOR: AddWorkspacesModule
+pub mod tiling; // ANCHOR: AddTilingModule
+pub mod outputs; // ANCHOR: AddOutputConfigModule
+#[cfg(test)]
+mod tiling_tests; // ANCHOR: AddTilingTestsModule
