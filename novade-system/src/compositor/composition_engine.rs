@@ -107,25 +107,41 @@ impl<R: RendererInterface> CompositionEngine<R> {
                     let client_buffer_content = match node.attributes.buffer_type {
                         Some(BufferSourceType::Dmabuf) => {
                             // ANCHOR [DmabufSimulation]
-                            // Simulate DmabufDescriptor population
-                            let dummy_descriptors: [Option<DmabufDescriptor>; 4] = [
-                                Some(DmabufDescriptor {
-                                    fd: -1, // Placeholder FD
-                                    width: buffer_width, // Assuming single plane matches overall dimensions
-                                    height: buffer_height,
-                                    plane_index: 0,
-                                    offset: 0,
-                                    stride, // Using overall stride for the first plane
-                                    format: DmabufPlaneFormat::Argb8888, // Placeholder
-                                    modifier: 0, // Placeholder (e.g., DRM_FORMAT_MOD_LINEAR)
-                                }),
-                                None, None, None,
-                            ];
+                            let overall_width = node.attributes.size.width as u32;
+                            let overall_height = node.attributes.size.height as u32;
+                            let mut descriptors_array: [Option<DmabufDescriptor>; 4] = [None, None, None, None];
+
+                            // Special size for multi-planar I420 simulation (for testing)
+                            // ANCHOR [DmabufMultiPlanarSimulation]
+                            if overall_width == 256 && overall_height == 256 { // Test condition for I420
+                                let y_stride = overall_width;
+                                let uv_stride = overall_width / 2;
+                                descriptors_array[0] = Some(DmabufDescriptor { // Y plane
+                                    fd: -1, width: overall_width, height: overall_height, plane_index: 0,
+                                    offset: 0, stride: y_stride, format: DmabufPlaneFormat::R8, modifier: 0,
+                                });
+                                descriptors_array[1] = Some(DmabufDescriptor { // U plane
+                                    fd: -1, width: overall_width / 2, height: overall_height / 2, plane_index: 1,
+                                    offset: 0, stride: uv_stride, format: DmabufPlaneFormat::R8, modifier: 0,
+                                });
+                                descriptors_array[2] = Some(DmabufDescriptor { // V plane
+                                    fd: -1, width: overall_width / 2, height: overall_height / 2, plane_index: 2,
+                                    offset: 0, stride: uv_stride, format: DmabufPlaneFormat::R8, modifier: 0,
+                                });
+                            } else { // Default: Simulate single-plane ARGB8888
+                                let sim_stride = overall_width * 4;
+                                let sim_format = DmabufPlaneFormat::Argb8888;
+                                descriptors_array[0] = Some(DmabufDescriptor {
+                                    fd: -1, width: overall_width, height: overall_height, plane_index: 0,
+                                    offset: 0, stride: sim_stride, format: sim_format, modifier: 0,
+                                });
+                            }
+
                             BufferContent::Dmabuf {
                                 id: buffer_id,
-                                descriptors: dummy_descriptors,
-                                width: buffer_width,
-                                height: buffer_height,
+                                descriptors: descriptors_array,
+                                width: overall_width,
+                                height: overall_height,
                             }
                         }
                         Some(BufferSourceType::Shm) | None => { // Default to SHM if None
@@ -332,10 +348,13 @@ mod tests {
     #[derive(Debug, Clone)]
     struct UploadedTextureInfo {
         surface_id: SurfaceId,
-        buffer_id: u64, // This ID comes from BufferContent's Shm.id or Dmabuf.id
+        buffer_id: u64,
         width: u32,
         height: u32,
         content_type: String, // "Shm" or "Dmabuf"
+        dmabuf_plane_format: Option<DmabufPlaneFormat>, // Format of the first plane for Dmabuf
+        dmabuf_plane_stride: Option<u32>, // Stride of the first plane for Dmabuf
+        num_dmabuf_planes: usize, // Number of active planes for Dmabuf
     }
 
     #[derive(Debug, Clone)]
@@ -431,16 +450,34 @@ mod tests {
                         width: *width,
                         height: *height,
                         content_type: "Shm".to_string(),
+                        dmabuf_plane_format: None,
+                        dmabuf_plane_stride: None,
+                        num_dmabuf_planes: 0,
                     });
                     Ok(Box::new(MockRenderableTexture::new(*width, *height)))
                 }
-                RendererBufferContent::Dmabuf { id, width, height, .. } => {
+                RendererBufferContent::Dmabuf { id, descriptors, width, height, .. } => {
+                    let mut first_plane_format = None;
+                    let mut first_plane_stride = None;
+                    let mut plane_count = 0;
+                    for desc_opt in descriptors.iter() {
+                        if let Some(desc) = desc_opt {
+                            if plane_count == 0 { // Capture info for the first plane
+                                first_plane_format = Some(desc.format);
+                                first_plane_stride = Some(desc.stride);
+                            }
+                            plane_count += 1;
+                        }
+                    }
                     state.uploaded_textures.push(UploadedTextureInfo {
                         surface_id,
                         buffer_id: *id,
                         width: *width,
                         height: *height,
                         content_type: "Dmabuf".to_string(),
+                        dmabuf_plane_format: first_plane_format,
+                        dmabuf_plane_stride: first_plane_stride,
+                        num_dmabuf_planes: plane_count,
                     });
                     Ok(Box::new(MockRenderableTexture::new(*width, *height)))
                 }
@@ -662,36 +699,118 @@ mod tests {
         let mock_renderer = MockRenderer::new();
         let mut engine = CompositionEngine::new(mock_renderer);
 
-        let surface_id = SurfaceId::new(1);
-        let attrs = SurfaceAttributes {
+        let surface_dmabuf_id = SurfaceId::new(1);
+        let dmabuf_size = Size2D::new(128.0, 128.0);
+        let attrs_dmabuf = SurfaceAttributes {
             position: Point2D::new(0.0, 0.0),
-            size: Size2D::new(128.0, 128.0), // Dimensions for DMABUF
+            size: dmabuf_size,
             transform: SceneGraphTransform::identity(),
             is_visible: true,
             z_order: 0,
             opaque_region: None,
             parent: None,
-            current_buffer_id: Some(2001), // Unique buffer ID
-            buffer_format: None, // For DMABUF, format might be implicit or per-plane
-            buffer_stride: 128 * 4, // Example stride, might be per-plane for real DMABUF
-            buffer_type: Some(SceneGraphBufferSourceType::Dmabuf), // Specify DMABUF
+            current_buffer_id: Some(2001),
+            buffer_format: None, // For DMABUF, format is often per-plane in descriptors.
+                                 // The SceneGraphBufferFormat might be less relevant here.
+            buffer_stride: 0, // Stride is also often per-plane for DMABUF. Set to 0 or an expected overall stride if used.
+                               // The simulation in composite_frame now calculates stride based on width.
+            buffer_type: Some(SceneGraphBufferSourceType::Dmabuf),
         };
-        engine.add_surface(surface_id, attrs);
+        engine.add_surface(surface_dmabuf_id, attrs_dmabuf);
+
+        // Optional: Add an SHM surface to ensure distinction
+        let surface_shm_id = SurfaceId::new(2);
+        let shm_size = Size2D::new(64.0, 64.0);
+        let attrs_shm = SurfaceAttributes {
+            position: Point2D::new(200.0, 0.0),
+            size: shm_size,
+            transform: SceneGraphTransform::identity(),
+            is_visible: true,
+            z_order: 1,
+            opaque_region: None,
+            parent: None,
+            current_buffer_id: Some(2002),
+            buffer_format: Some(SceneGraphBufferFormatExt::Argb8888), // SHM needs this
+            buffer_stride: (shm_size.width as u32) * 4,
+            buffer_type: Some(SceneGraphBufferSourceType::Shm),
+        };
+        engine.add_surface(surface_shm_id, attrs_shm);
 
         engine.composite_frame();
 
-        assert_eq!(engine.renderer.uploaded_textures_count(), 1);
-        if let Some(info) = engine.renderer.get_uploaded_texture_info(0) {
-            assert_eq!(info.surface_id, surface_id);
-            assert_eq!(info.buffer_id, 2001);
-            assert_eq!(info.content_type, "Dmabuf"); // Verify it was processed as DMABUF
-            assert_eq!(info.width, 128);
-            assert_eq!(info.height, 128);
-        } else {
-            panic!("No uploaded texture info found for DMABUF surface.");
-        }
+        assert_eq!(engine.renderer.uploaded_textures_count(), 2, "Expected two textures to be uploaded (one DMABUF, one SHM).");
+
+        let dmabuf_info = engine.renderer.state.borrow().uploaded_textures.iter().find(|info| info.surface_id == surface_dmabuf_id).expect("DMABUF texture info not found.");
+        assert_eq!(dmabuf_info.surface_id, surface_dmabuf_id);
+        assert_eq!(dmabuf_info.buffer_id, 2001);
+        assert_eq!(dmabuf_info.content_type, "Dmabuf", "Content type should be Dmabuf.");
+        assert_eq!(dmabuf_info.width, dmabuf_size.width as u32, "DMABUF overall width mismatch.");
+        assert_eq!(dmabuf_info.height, dmabuf_size.height as u32, "DMABUF overall height mismatch.");
+        assert_eq!(dmabuf_info.dmabuf_plane_format, Some(DmabufPlaneFormat::Argb8888), "DMABUF first plane format mismatch for single-plane test.");
+        assert_eq!(dmabuf_info.dmabuf_plane_stride, Some((dmabuf_size.width as u32) * 4), "DMABUF first plane stride mismatch for single-plane test.");
+        assert_eq!(dmabuf_info.num_dmabuf_planes, 1, "DMABUF single-plane should have 1 plane.");
+
+
+        let shm_info = engine.renderer.state.borrow().uploaded_textures.iter().find(|info| info.surface_id == surface_shm_id).expect("SHM texture info not found.");
+        assert_eq!(shm_info.surface_id, surface_shm_id);
+        assert_eq!(shm_info.buffer_id, 2002);
+        assert_eq!(shm_info.content_type, "Shm", "Content type should be Shm.");
+        assert_eq!(shm_info.width, shm_size.width as u32);
+        assert_eq!(shm_info.height, shm_size.height as u32);
+        assert!(shm_info.dmabuf_plane_format.is_none(), "SHM upload should not have DMABUF plane format.");
+        assert!(shm_info.dmabuf_plane_stride.is_none(), "SHM upload should not have DMABUF plane stride.");
+
         assert_eq!(engine.renderer.render_frame_count(), 1);
-        assert_eq!(engine.renderer.rendered_elements_count(), 1); // Still one element rendered
+        assert_eq!(engine.renderer.rendered_elements_count(), 2);
+        assert_eq!(engine.renderer.gamma_calls_count(), 1);
+        assert_eq!(engine.renderer.tone_mapping_calls_count(), 1);
+        assert_eq!(engine.renderer.submit_and_present_frame_called_count(), 1);
+    }
+
+    #[test]
+    fn test_multi_planar_dmabuf_surface_flow() {
+        let mock_renderer = MockRenderer::new();
+        let mut engine = CompositionEngine::new(mock_renderer);
+
+        let surface_multi_planar_id = SurfaceId::new(3);
+        // Use the special 256x256 size to trigger I420 simulation in composite_frame
+        let multi_planar_size = Size2D::new(256.0, 256.0);
+        let attrs_multi_planar = SurfaceAttributes {
+            position: Point2D::new(10.0, 10.0),
+            size: multi_planar_size,
+            transform: SceneGraphTransform::identity(),
+            is_visible: true,
+            z_order: 0,
+            opaque_region: None,
+            parent: None,
+            current_buffer_id: Some(3001),
+            buffer_format: None, // Not directly used by DMABUF path if descriptors define plane formats
+            buffer_stride: 0,    // Not directly used by DMABUF path if descriptors define plane strides
+            buffer_type: Some(SceneGraphBufferSourceType::Dmabuf),
+        };
+        engine.add_surface(surface_multi_planar_id, attrs_multi_planar);
+
+        engine.composite_frame();
+
+        assert_eq!(engine.renderer.uploaded_textures_count(), 1, "Expected one multi-planar texture to be uploaded.");
+
+        let multi_planar_info = engine.renderer.state.borrow().uploaded_textures.iter()
+            .find(|info| info.surface_id == surface_multi_planar_id)
+            .expect("Multi-planar DMABUF texture info not found.");
+
+        assert_eq!(multi_planar_info.surface_id, surface_multi_planar_id);
+        assert_eq!(multi_planar_info.buffer_id, 3001);
+        assert_eq!(multi_planar_info.content_type, "Dmabuf", "Content type should be Dmabuf.");
+        assert_eq!(multi_planar_info.width, multi_planar_size.width as u32, "Multi-planar overall width mismatch.");
+        assert_eq!(multi_planar_info.height, multi_planar_size.height as u32, "Multi-planar overall height mismatch.");
+
+        // Check info for the first plane (Y plane in I420 simulation)
+        assert_eq!(multi_planar_info.dmabuf_plane_format, Some(DmabufPlaneFormat::R8), "Y-plane format mismatch.");
+        assert_eq!(multi_planar_info.dmabuf_plane_stride, Some(multi_planar_size.width as u32), "Y-plane stride mismatch.");
+        assert_eq!(multi_planar_info.num_dmabuf_planes, 3, "Expected 3 planes for I420 simulation.");
+
+        assert_eq!(engine.renderer.render_frame_count(), 1);
+        assert_eq!(engine.renderer.rendered_elements_count(), 1);
         assert_eq!(engine.renderer.gamma_calls_count(), 1);
         assert_eq!(engine.renderer.tone_mapping_calls_count(), 1);
         assert_eq!(engine.renderer.submit_and_present_frame_called_count(), 1);

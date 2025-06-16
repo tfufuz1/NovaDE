@@ -54,21 +54,24 @@ pub enum BufferFormat {
 // This will likely need to be more sophisticated in a real scenario.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum DmabufPlaneFormat { // Simplified, real one is more complex
-    R8,
-    Rg88,
-    Rgb888, // Placeholder, not a typical DRM format
-    Argb8888,
-    Xrgb8888,
+pub enum DmabufPlaneFormat {
+    R8,       // Single component, commonly for Y, U, or V planes
+    Rg88,     // Two components, commonly for interleaved UV planes (like NV12's UV plane)
+    Argb8888, // RGBA format, often used for primary display buffers or single-plane graphics
+    Xrgb8888, // RGBX format, similar to ARGB but alpha is ignored
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct DmabufDescriptor {
-    pub fd: i32, // File descriptor for the DMABUF
-    pub width: u32, // Width of this plane
-    pub height: u32, // Height of this plane
-    pub plane_index: u32, // For multi-planar formats
-    pub offset: u32,    // Offset into the FD for this plane
+    pub fd: i32, // File descriptor for the DMABUF plane
+    // Width of this specific plane's data buffer in pixels.
+    // For subsampled planes (like U/V in YUV420), this will be smaller than the image's overall width.
+    pub width: u32,
+    // Height of this specific plane's data buffer in pixels.
+    // For subsampled planes, this will be smaller than the image's overall height.
+    pub height: u32,
+    pub plane_index: u32, // Index of this plane (e.g., 0 for Y, 1 for U, 2 for V; or 0 for Y, 1 for UV)
+    pub offset: u32,    // Offset into the FD where this plane's data begins
     pub stride: u32,    // Stride for this plane
     pub format: DmabufPlaneFormat, // Format of this plane
     pub modifier: u64,  // DRM format modifier

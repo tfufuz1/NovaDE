@@ -87,6 +87,11 @@ pub struct NovaWgpuRenderer {
     tone_mapping_params_buffer: Option<wgpu::Buffer>,
 
     blit_to_swapchain_pipeline: Option<wgpu::RenderPipeline>,
+
+    // YUV-to-RGB conversion for multi-planar DMABUFs
+    yuv_to_rgb_pipeline: Option<wgpu::RenderPipeline>,
+    yuv_to_rgb_bind_group_layout_textures: Option<wgpu::BindGroupLayout>,
+    // TODO: Consider BGL for uniforms like color matrix if needed
 }
 
 #[repr(C)]
@@ -104,13 +109,103 @@ const GAMMA_CORRECTION_FRAG_WGSL: &str = include_str!("../../assets/shaders/gamm
 const TONEMAP_FRAG_WGSL: &str = include_str!("../../assets/shaders/tonemap.frag");
 const COPY_TEXTURE_FRAG_WGSL: &str = include_str!("../../assets/shaders/copy_texture.frag");
 
+// ANCHOR [YuvToRgbFragmentShaderPlaceholder]
+// TODO [DmabufYuvShader]: This is a placeholder for novade-system/assets/shaders/yuv_to_rgb.frag
+const YUV_TO_RGB_FRAG_WGSL: &str = r#"
+// @group(0) @binding(0) var t_y: texture_2d<f32>;
+// @group(0) @binding(1) var t_u: texture_2d<f32>; // Or t_uv for NV12 (texture_2d<vec2<f32>>)
+// @group(0) @binding(2) var t_v: texture_2d<f32>; // Not needed for NV12 if t_uv is used
+// @group(0) @binding(3) var s_source: sampler;
+// // Uniforms for color matrix (e.g., BT.601, BT.709) might be needed
+// // struct Colorimetry {
+// //     y_offset: f32,
+// //     uv_offset: f32,
+// //     matrix: mat3x3<f32>,
+// // };
+// // @group(1) @binding(0) var<uniform> colorimetry: Colorimetry;
+
+// @fragment
+// fn fs_main(@location(0) tex_coords: vec2<f32>) -> @location(0) vec4<f32> {
+//     let y_raw = textureSample(t_y, s_source, tex_coords).r;
+
+//     // Adjust UV sampling coordinates based on chroma subsampling (e.g., 4:2:0)
+//     // This depends on how planes are mapped and if using one or two chroma textures.
+//     // For I420/YU12 (Y, U, V planes separately):
+//     let uv_coords = tex_coords; // Assuming U/V planes are already scaled if subsampled, or adjust here.
+                                // If U/V planes are half-size: let uv_coords = tex_coords * 0.5; (incorrect, shader receives normalized coords for its texture)
+                                // Correct sampling depends on how texture views are configured for subsampled planes.
+                                // If U/V planes are full size but only contain chroma data for half image size, that's different.
+                                // Assuming U/V planes are sampled correctly for their data content.
+
+//     let u_raw = textureSample(t_u, s_source, uv_coords).r;
+//     let v_raw = textureSample(t_v, s_source, uv_coords).r;
+
+//     // Basic YCbCr to RGB conversion (BT.601 standard, adjust for others like BT.709)
+//     // Assumes Y is in [0,1] range, U/V in [0,1] range with 0.5 as center.
+//     // If Y is [16/255, 235/255] and U/V are [16/255, 240/255], adjustments are needed.
+//     let y = y_raw; // Or apply offset: y_raw - colorimetry.y_offset;
+//     let u = u_raw - 0.5; // Or apply offset: u_raw - colorimetry.uv_offset;
+//     let v = v_raw - 0.5; // Or apply offset: v_raw - colorimetry.uv_offset;
+
+//     // Using BT.601 coefficients (approximate)
+//     let r = y + 1.402 * v;
+//     let g = y - 0.344136 * u - 0.714136 * v;
+//     let b = y + 1.772 * u;
+
+//     // For NV12 (Y plane, UV interleaved plane):
+//     // let y = textureSample(t_y, s_source, tex_coords).r;
+//     // let uv = textureSample(t_u, s_source, tex_coords).rg; // t_u is actually t_uv (Rg88 format)
+//     // let u = uv.r - 0.5;
+//     // let v = uv.g - 0.5;
+//     // ... same RGB calculation ...
+
+//     return vec4<f32>(clamp(r,0.0,1.0), clamp(g,0.0,1.0), clamp(b,0.0,1.0), 1.0);
+// }
+"#;
+
+
 impl NovaWgpuRenderer {
     pub async fn new<WHT>(window_handle_target: &WHT, initial_size: Size<u32, Physical>) -> Result<Self>
     where WHT: HasRawWindowHandle + HasRawDisplayHandle {
         let id = Uuid::new_v4();
+        // ANCHOR [WgpuInstanceDmabufResearch]
+        // TODO [WgpuDmabufInstanceFlags]: For DMABUF import, especially when relying on underlying
+        // Vulkan extensions, specific instance extensions like VK_KHR_external_memory_capabilities
+        // might be required. WGPU abstracts this, but if issues arise, ensure the WGPU backend
+        // (e.g., Vulkan) is initialized with necessary capabilities.
+        // Current wgpu instance creation:
+        // let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        //     backends: wgpu::Backends::PRIMARY, // Or specific like VULKAN
+        //     dx12_shader_compiler: wgpu::Dx12Compiler::default(),
+        //     flags: wgpu::InstanceFlags::default(), // Consider VALIDATION or DEBUG for development
+        //     gles_minor_version: wgpu::Gles3MinorVersion::default(),
+        // });
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
         let surface = unsafe { instance.create_surface(window_handle_target) }?;
         let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions { /* ... */ compatible_surface: Some(&surface), ..Default::default()}).await.ok_or_else(|| anyhow::anyhow!("No suitable adapter"))?;
+
+        // ANCHOR [WgpuDeviceDmabufResearch]
+        // TODO [WgpuDmabufFeatures]: For DMABUF import, the underlying graphics API (e.g., Vulkan)
+        // needs specific extensions (e.g., VK_EXT_external_memory_dma_buf, VK_KHR_external_memory_fd).
+        // WGPU abstracts these. If WGPU provides explicit features for DMABUF import
+        // (e.g., a variant in `wgpu::Features` like `EXTERNAL_MEMORY_DMA_BUF`),
+        // they would need to be requested here in `DeviceDescriptor::features`.
+        // As of current understanding, direct import of generic DMABUF FDs as `wgpu::Texture`
+        // might not be a stable, high-level WGPU feature and could require either:
+        // 1. Using `wgpu-hal` directly (breaks WGPU abstraction).
+        // 2. Platform-specific surface integration if the DMABUF is for a displayable surface.
+        // 3. Future WGPU APIs (e.g., `import_external_texture_from_dmabuf_fd` or similar).
+        // The `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES` feature might be relevant for formats
+        // commonly used with DMABUFs if they are not standard WGPU formats.
+        // let device_descriptor = wgpu::DeviceDescriptor {
+        //     label: Some("NovaDE WGPU Device"),
+        //     features: wgpu::Features::empty() // Add required features here
+        //         // | wgpu::Features::TEXTURE_COMPRESSION_BC
+        //         // | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+        //         // | wgpu::Features::EXTERNAL_MEMORY_DMA_BUF (if such a feature exists)
+        //         ,
+        //     limits: wgpu::Limits::default(),
+        // };
         let (device, queue) = adapter.request_device(&wgpu::DeviceDescriptor::default(), None).await?;
         let device = Arc::new(device);
         let queue = Arc::new(queue);
@@ -225,20 +320,37 @@ impl NovaWgpuRenderer {
             mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: surface_format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[],
         };
-        let scene_rt = final_device.create_texture(&scene_render_target_desc);
+        let scene_rt = device.create_texture(&scene_render_target_desc);
         let scene_rt_view = scene_rt.create_view(&wgpu::TextureViewDescriptor::default());
         let pp_texture_desc_fn = |i:usize| wgpu::TextureDescriptor {
             label: Some(&format!("PP Texture {}", i)), size: wgpu::Extent3d { width: initial_size.w, height: initial_size.h, depth_or_array_layers: 1 },
             mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2, format: surface_format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING, view_formats: &[],
         };
-        let pp_tex_0 = final_device.create_texture(&pp_texture_desc_fn(0));
+        let pp_tex_0 = device.create_texture(&pp_texture_desc_fn(0));
         let pp_view_0 = pp_tex_0.create_view(&wgpu::TextureViewDescriptor::default());
-        let pp_tex_1 = final_device.create_texture(&pp_texture_desc_fn(1));
+        let pp_tex_1 = device.create_texture(&pp_texture_desc_fn(1));
         let pp_view_1 = pp_tex_1.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // TODO [DmabufYuvShader]: Load and compile the YUV_TO_RGB_FRAG_WGSL shader
+        // And create the yuv_to_rgb_pipeline and its bind group layouts.
+        // For now, initializing to None.
+        let yuv_to_rgb_bgl_textures = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("YUV to RGB Textures BGL"),
+            entries: &[
+                // Y plane
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                // U plane (or UV plane)
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                // V plane (if separate)
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }, count: None },
+                // Sampler
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+            ],
+        });
+
         Ok(Self {
-            id, instance, adapter, device: final_device, queue: final_queue,
+            id, instance, adapter, device, queue, // Use the Arc'd device and queue
             surface: Some(surface), surface_config: Some(surface_config),
             screen_size_physical: Size::from((initial_size.w as i32, initial_size.h as i32)),
             quad_index_buffer, quad_num_indices: QUAD_INDICES.len() as u32, // ensure this is correctly initialized
@@ -257,6 +369,8 @@ impl NovaWgpuRenderer {
             tone_mapping_uniform_bgl: Some(tonemap_uniform_bgl),
             tone_mapping_params_buffer: Some(tonemap_buffer),
             blit_to_swapchain_pipeline: Some(blit_pipeline),
+            yuv_to_rgb_pipeline: None, // Initialize as None, to be created with shader
+            yuv_to_rgb_bind_group_layout_textures: Some(yuv_to_rgb_bgl_textures),
             // TODO [ErrorHandlingAndRecovery]: WGPU operations can fail (e.g., device lost).
             // Robust applications should handle `Device::poll(Maintain::Poll)` and listen for `DeviceLost` events.
             // This might involve recreating the device, surface, and all GPU resources.
@@ -377,13 +491,41 @@ impl FrameRenderer for NovaWgpuRenderer {
                  match element {
                     RenderElement::TextureNode(params) => {
                         if let Some(wgpu_tex) = params.texture.as_any().downcast_ref::<WgpuRenderableTexture>() {
-                            let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                                label: Some("Element Texture BG"), layout: &self.texture_bind_group_layout,
-                                entries: &[
-                                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(wgpu_tex.view()) },
-                                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(wgpu_tex.sampler()) },
-                                ],
-                            });
+                            if wgpu_tex.is_multi_planar {
+                                // TODO [DmabufYuvRendering]: Implement YUV rendering path
+                                // 1. Ensure yuv_to_rgb_pipeline is compiled.
+                                // 2. Get Y, U, V (or Y, UV) plane views from wgpu_tex.plane_views or specific accessors.
+                                // 3. Create a bind group using yuv_to_rgb_bind_group_layout_textures with these plane views and a sampler.
+                                // 4. Set the yuv_to_rgb_pipeline.
+                                // 5. Set the YUV bind group.
+                                // 6. Set transform bind group (as below).
+                                // 7. Draw indexed.
+                                tracing::warn!("Multi-planar DMABUF rendering for texture ID {} not yet implemented, skipping.", wgpu_tex.id());
+                                // Fallthrough or skip rendering this element for now.
+                                // For now, let's try to render the primary plane with the standard pipeline as a fallback.
+                                // This will likely look wrong for YUV.
+                                rpass.set_pipeline(&self.render_pipeline);
+                                let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                    label: Some("Element Texture BG (Primary Plane of Multi-Planar)"),
+                                    layout: &self.texture_bind_group_layout,
+                                    entries: &[
+                                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(wgpu_tex.view()) }, // .view() gets primary_view
+                                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(wgpu_tex.sampler()) },
+                                    ],
+                                });
+                                rpass.set_bind_group(0, &texture_bind_group, &[]);
+                            } else {
+                                rpass.set_pipeline(&self.render_pipeline);
+                                let texture_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                    label: Some("Element Texture BG (Single-Planar)"), layout: &self.texture_bind_group_layout,
+                                    entries: &[
+                                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(wgpu_tex.view()) },
+                                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(wgpu_tex.sampler()) },
+                                    ],
+                                });
+                                rpass.set_bind_group(0, &texture_bind_group, &[]);
+                            }
+
                             let sg_matrix = params.transform.matrix;
                             let transform_uniform_data: [f32; 9] = [ sg_matrix[0][0], sg_matrix[1][0], 0.0, sg_matrix[0][1], sg_matrix[1][1], 0.0, sg_matrix[0][2], sg_matrix[1][2], 1.0 ];
                             // TODO [DynamicUniformBufferManagement]: This transform_buffer is created per-element, per-frame.
@@ -603,51 +745,278 @@ impl FrameRenderer for NovaWgpuRenderer {
                 });
                 self.queue.write_texture( wgpu::ImageCopyTexture { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                     data, wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(*stride), rows_per_image: Some(*height) }, texture_size);
-                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor::default());
-                Ok(Box::new(WgpuRenderableTexture::new( self.device.clone(), texture, view, sampler, *width, *height, wgpu_texture_format, None, )))
+
+                let view_arc = Arc::new(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+                let texture_arc = Arc::new(texture);
+                let sampler_arc = self.default_sampler.clone();
+
+                Ok(Box::new(WgpuRenderableTexture::new(
+                    self.device.clone(),
+                    Arc::try_unwrap(texture_arc).expect("Arc unwrap failed for SHM texture"), // WgpuRenderableTexture expects owned Texture
+                    Arc::try_unwrap(view_arc).expect("Arc unwrap failed for SHM view"),       // WgpuRenderableTexture expects owned TextureView
+                    Arc::try_unwrap(sampler_arc).expect("Arc unwrap failed for SHM sampler"), // WgpuRenderableTexture expects owned Sampler
+                    *width, *height,
+                    wgpu_texture_format,
+                    None, // fourcc_format
+                    false, // is_multi_planar
+                    None, // initial_plane_textures
+                    None, // initial_plane_views
+                )))
             }
-            BufferContent::Dmabuf { id, descriptors, width, height } => {
-                tracing::info!( "Attempting DMABUF texture upload for buffer_id: {}, size: {}x{}", id, width, height);
-                // ANCHOR [WgpuDmabufImportFullOutline] // Ensure this ANCHOR is present or added
-                // TODO [WgpuDmabufImportFull]: This is a placeholder. Full DMABUF import requires:
-                // 1. Querying device/adapter features for DMABUF import support. WGPU exposes features like
-                //    `Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES` which might be relevant, or underlying HAL features.
-                //    Specific features for DMABUF might be `Features::EXTERNAL_MEMORY_DMA_BUF` or similar if directly exposed by wgpu,
-                //    otherwise it's abstracted by wgpu-hal.
-                // 2. If using wgpu-hal directly or a similar abstraction:
-                //    - For Vulkan backend: Use `VK_KHR_external_memory_fd` and `VK_EXT_external_memory_dma_buf` extensions.
-                //      Create a `VkImage` with `VkExternalMemoryImageCreateInfo` and import memory using `vkAllocateMemory`
-                //      with `VkImportMemoryFdInfoKHR`, then bind it.
-                //    - For GLES backend: Use `EGL_EXT_image_dma_buf_import` and `GL_OES_EGL_image_external` extensions.
-                //      Create an `EGLImage` via `eglCreateImageKHR` from the DMABUF FD, then use `glEGLImageTargetTexture2DOES`
-                //      to bind it to a GL texture.
-                // 3. WGPU aims to abstract this. The API might involve `wgpu::Device::import_external_texture()`
-                //    or passing an external memory handle (like a DMABUF FD) in `wgpu::TextureDescriptor::external_memory_handle`
-                //    when creating the texture. This part of WGPU is less standardized across backends and might still be evolving
-                //    or require careful use of `wgpu::Instance::create_surface_from_handles` for specific platforms.
-                // 4. This is highly platform-dependent (Linux-specific) and requires unsafe code for FD handling.
-                // 5. Need to handle multi-planar formats (YUV, etc.) by potentially:
-                //    a. Importing each plane as a separate `wgpu::Texture`.
-                //    b. Using a fragment shader to perform YUV-to-RGB conversion by sampling these multiple textures.
-                //    c. Checking if WGPU supports specific multi-planar formats directly (e.g., via `TextureFormat::R8_G8_B8_A8_Unorm_Planar_420` like variants, though these are rare).
-                // 6. Synchronization with client rendering using fences (e.g., `sync_file` mechanism with DMABUF, passed alongside the buffer).
-                //    The renderer would need to wait on this fence before using the texture and signal its own fence when done.
-                // For now, we create a magenta placeholder texture.
-                let placeholder_format = wgpu::TextureFormat::Rgba8UnormSrgb;
-                let texture_size = wgpu::Extent3d { width: *width, height: *height, depth_or_array_layers: 1 };
-                let placeholder_texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(&format!("DMABUF Placeholder (buffer_id: {})", id)), size: texture_size,
-                    mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
-                    format: placeholder_format, usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, view_formats: &[],
-                });
-                let magenta_pixel = [255u8, 0, 255, 255];
-                let placeholder_data = vec![magenta_pixel[0], magenta_pixel[1], magenta_pixel[2], magenta_pixel[3]].repeat((*width * *height) as usize);
-                self.queue.write_texture( wgpu::ImageCopyTexture { texture: &placeholder_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-                    &placeholder_data, wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(*width * 4), rows_per_image: Some(*height) }, texture_size);
-                let view = placeholder_texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor::default());
-                Ok(Box::new(WgpuRenderableTexture::new(self.device.clone(), placeholder_texture, view, sampler, *width, *height, placeholder_format, None)))
+            BufferContent::Dmabuf { id, descriptors, width: buffer_overall_width, height: buffer_overall_height } => {
+                tracing::info!( "Attempting DMABUF texture upload for surface_id: {}, buffer_id: {}, overall_size: {}x{}", _surface_id.id(), id, buffer_overall_width, buffer_overall_height);
+
+                // ANCHOR [DmabufImportMultiPlane]
+                // This section attempts to import multiple DMABUF planes.
+                // WARNING: Direct DMABUF import into a wgpu::Texture is highly advanced.
+                // This implementation outlines conceptual steps and uses placeholders.
+
+                let mut plane_wgpu_textures: Vec<Arc<wgpu::Texture>> = Vec::new();
+                let mut plane_wgpu_views: Vec<Arc<wgpu::TextureView>> = Vec::new();
+                let mut primary_plane_format_wgpu: Option<wgpu::TextureFormat> = None;
+                let mut num_valid_planes = 0;
+
+                for (idx, desc_opt) in descriptors.iter().enumerate() {
+                    if let Some(desc) = desc_opt {
+                        num_valid_planes += 1;
+                        tracing::info!("Processing DMABUF plane {}: desc: {:?}", idx, desc);
+
+                        let plane_texture_format_wgpu = match desc.format {
+                            DmabufPlaneFormat::R8 => wgpu::TextureFormat::R8Unorm,
+                            DmabufPlaneFormat::Rg88 => wgpu::TextureFormat::Rg8Unorm,
+                            DmabufPlaneFormat::Argb8888 => wgpu::TextureFormat::Bgra8Unorm, // Assuming display/overlay usage
+                            DmabufPlaneFormat::Xrgb8888 => wgpu::TextureFormat::Bgra8Unorm,
+                        };
+                        if idx == 0 { primary_plane_format_wgpu = Some(plane_texture_format_wgpu); }
+
+                        let plane_texture_descriptor = wgpu::TextureDescriptor {
+                            label: Some(&format!("dmabuf_surface_{}_b{}_p{}", _surface_id.id(), id, desc.plane_index)),
+                            size: wgpu::Extent3d { width: desc.width, height: desc.height, depth_or_array_layers: 1 },
+                            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+                            format: plane_texture_format_wgpu,
+                            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                            view_formats: &[],
+                        };
+
+                        // Conceptual import - for now, create placeholder
+                        let plane_texture = self.device.create_texture(&plane_texture_descriptor);
+                        let magenta_pixel_r8: [u8; 1] = [128]; // Mid-gray for R8 planes
+                        let magenta_pixel_rg88: [u8; 2] = [128, 128]; // Mid-gray for RG88 planes
+                        let magenta_pixel_bgra8: [u8; 4] = [255, 0, 255, 255]; // BGRA Magenta
+
+                        let (pixel_data, bytes_per_pixel_plane) = match plane_texture_format_wgpu {
+                            wgpu::TextureFormat::R8Unorm => (vec![magenta_pixel_r8[0]; (desc.width * desc.height) as usize], 1),
+                            wgpu::TextureFormat::Rg8Unorm => (vec![magenta_pixel_rg88[0]; (desc.width * desc.height * 2) as usize].chunks_mut(2).flat_map(|chunk| { chunk.copy_from_slice(&magenta_pixel_rg88); chunk }).collect(), 2),
+                            wgpu::TextureFormat::Bgra8Unorm => (vec![magenta_pixel_bgra8[0]; (desc.width * desc.height * 4) as usize].chunks_mut(4).flat_map(|chunk| { chunk.copy_from_slice(&magenta_pixel_bgra8); chunk }).collect(), 4),
+                            _ => return Err(RendererError::Generic(format!("Unsupported wgpu format for DMABUF plane placeholder: {:?}", plane_texture_format_wgpu))),
+                        };
+
+                        if desc.stride < desc.width * bytes_per_pixel_plane {
+                             tracing::error!("DMABUF plane {} stride {} is less than expected minimum {} for placeholder upload.", idx, desc.stride, desc.width * bytes_per_pixel_plane);
+                             return Err(RendererError::Generic(format!("DMABUF plane {} stride too small for placeholder", idx)));
+                        }
+
+                        self.queue.write_texture(
+                            wgpu::ImageCopyTexture { texture: &plane_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                            &pixel_data,
+                            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(desc.width * bytes_per_pixel_plane), rows_per_image: Some(desc.height) },
+                            plane_texture_descriptor.size,
+                        );
+
+                        plane_wgpu_textures.push(Arc::new(plane_texture));
+                        plane_wgpu_views.push(Arc::new(plane_wgpu_textures.last().unwrap().create_view(&wgpu::TextureViewDescriptor::default())));
+                    }
+                }
+
+                if plane_wgpu_textures.is_empty() {
+                    tracing::error!("No valid DMABUF planes found for surface {}, buffer {}", _surface_id.id(), id);
+                    return Err(RendererError::Generic("No valid DMABUF planes processed".to_string()));
+                }
+
+                let is_multi_planar_bool = num_valid_planes > 1;
+                // Or determine based on known YUV formats (e.g. if first plane is R8 and second is RG88 for NV12)
+                // For now, simple count > 1 implies multi-planar for rendering purposes.
+
+                // The primary texture/view for WgpuRenderableTexture will be the first plane (e.g. Y plane)
+                let primary_plane_texture_owned = Arc::try_unwrap(plane_wgpu_textures[0].clone()).expect("Arc unwrap failed for DMABUF primary plane texture");
+                let primary_plane_view_owned = Arc::try_unwrap(plane_wgpu_views[0].clone()).expect("Arc unwrap failed for DMABUF primary plane view");
+
+                Ok(Box::new(WgpuRenderableTexture::new(
+                    self.device.clone(),
+                    primary_plane_texture_owned,
+                    primary_plane_view_owned,
+                    Arc::try_unwrap(self.default_sampler.clone()).expect("Arc unwrap failed for DMABUF sampler"),
+                    *buffer_overall_width, // Overall image width
+                    *buffer_overall_height, // Overall image height
+                    primary_plane_format_wgpu.unwrap_or(wgpu::TextureFormat::Rgba8UnormSrgb), // Fallback, should always be Some
+                    None, // TODO: Determine combined FourCC for multi-planar (e.g., Fourcc::NV12)
+                    is_multi_planar_bool,
+                    Some(plane_wgpu_textures),
+                    Some(plane_wgpu_views),
+                )))
+            }
+        }
+    }
+                // ANCHOR [DmabufImportSinglePlane]
+                // This section attempts to import a single-plane DMABUF.
+                // WARNING: Direct DMABUF import into a wgpu::Texture is a highly advanced
+                // and platform/backend-specific feature. The high-level wgpu API may not
+                // expose this directly in a stable, cross-platform way. This implementation
+                // outlines the conceptual steps and potential unsafe code required.
+                // Full implementation likely requires wgpu-hal or specific WGPU features.
+
+                let primary_descriptor = match descriptors[0] {
+                    Some(ref desc) => desc,
+                    None => {
+                        eprintln!("DMABUF import error for surface {}: No primary plane descriptor provided.", _surface_id.id());
+                        return Err(RendererError::Generic("Missing primary DMABUF descriptor".to_string()));
+                    }
+                };
+
+                // TODO: Map DmabufPlaneFormat to wgpu::TextureFormat more robustly.
+                // For now, assume Argb8888/Xrgb8888 maps to a Bgra8Unorm variant.
+                // The actual surface_config.format might be sRGB, so using Bgra8Unorm (non-sRGB) for data upload
+                // and letting the view handle sRGB conversion if necessary, or ensuring format consistency.
+                let texture_format = match primary_descriptor.format {
+                    DmabufPlaneFormat::Argb8888 => wgpu::TextureFormat::Bgra8Unorm,
+                    DmabufPlaneFormat::Xrgb8888 => wgpu::TextureFormat::Bgra8Unorm,
+                    // Add other single-plane formats if necessary, e.g. R8, Rg8 etc.
+                    _ => {
+                        eprintln!("DMABUF import error for surface {}: Unsupported single-plane format: {:?}", _surface_id.id(), primary_descriptor.format);
+                        return Err(RendererError::Generic(format!("Unsupported DMABUF single-plane format: {:?}", primary_descriptor.format)));
+                    }
+                };
+
+                let texture_descriptor = wgpu::TextureDescriptor {
+                    label: Some(&format!("dmabuf_surface_{}_b{}", _surface_id.id(), id)),
+                    size: wgpu::Extent3d {
+                        width: primary_descriptor.width,
+                        height: primary_descriptor.height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: texture_format,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST, // COPY_DST is essential for write_texture fallback.
+                                                                                                // For direct import, usage might be just TEXTURE_BINDING if sampleable.
+                    view_formats: &[], // TODO: Investigate if view_formats are needed for DMABUF, esp. if main format is sRGB.
+                };
+
+                let mut imported_texture: Option<wgpu::Texture> = None;
+
+                // --- Begin Hypothetical/Unsafe WGPU DMABUF Import ---
+                // This is where the platform-specific magic would happen.
+                // The exact API depends heavily on WGPU version and enabled features/backends.
+                // TODO [WgpuDmabufImportActualApi]: Implement actual DMABUF import using appropriate WGPU API
+                // when available/chosen (e.g. device.import_external_texture_from_fd or TextureDescriptor with external_memory_handle)
+                // This will involve unsafe code and careful handling of FDs, strides, and modifiers.
+                // Ensure all necessary WGPU features and instance/device extensions are enabled.
+                // Example conceptual path using a hypothetical future wgpu API or direct HAL access:
+                //
+                // #[cfg(target_os = "linux")] // Or specific backend feature
+                // {
+                //     // This is pseudo-code, actual API will differ.
+                //     // Option 1: If wgpu::TextureDescriptor supports external memory handles:
+                //     // let external_memory_info = wgpu::ExternalMemoryDescriptor::DmaBuf {
+                //     //     fd: primary_descriptor.fd,
+                //     //     stride: primary_descriptor.stride,
+                //     //     modifier: primary_descriptor.modifier, // If supported
+                //     //     // Plane info might be part of this or implied by format
+                //     // };
+                //     // let texture_descriptor_with_import = wgpu::TextureDescriptor {
+                //     //     // ... regular fields ...
+                //     //     external_memory_handle: Some(external_memory_info), // Hypothetical field
+                //     // };
+                //     // unsafe {
+                //     //     match self.device.create_texture_with_external_memory(&texture_descriptor_with_import) {
+                //     //         Ok(tex) => imported_texture = Some(tex),
+                //     //         Err(e) => eprintln!("DMABUF import via create_texture_with_external_memory failed: {:?}", e),
+                //     //     }
+                //     // }
+                //
+                //     // Option 2: Using a device method like `import_external_texture_from_fd`
+                //     // unsafe {
+                //     //     match self.device.import_external_texture_from_fd(
+                //     //         &texture_descriptor, // Base descriptor
+                //     //         primary_descriptor.fd,
+                //     //         primary_descriptor.stride, // And other plane/modifier info
+                //     //     ) {
+                //     //         Ok(tex) => imported_texture = Some(tex),
+                //     //         Err(e) => eprintln!("DMABUF import via import_external_texture_from_fd failed: {:?}", e),
+                //     //     }
+                //     // }
+                // }
+                //
+                // If direct import is not available or fails, one might need to:
+                // 1. Create a CPU-accessible staging buffer from the DMABUF FD (mmap).
+                // 2. Create a regular GPU texture.
+                // 3. Copy from the staging buffer to the GPU texture. This is NOT zero-copy.
+                //    This would be similar to the SHM path but with mmap first.
+                // --- End Hypothetical/Unsafe WGPU DMABUF Import ---
+
+                // Fallback to magenta placeholder if import_texture is None
+                let final_texture = if let Some(tex) = imported_texture {
+                    tracing::info!("DMABUF for surface {} buffer {} successfully imported (conceptually).", _surface_id.id(), id);
+                    tex
+                } else {
+                    // ANCHOR [DmabufUploadPlaceholderActive]
+                    tracing::warn!("DMABUF import for surface {} buffer {} failed or not implemented, using placeholder.", _surface_id.id(), id);
+
+                    let placeholder_texture = self.device.create_texture(&texture_descriptor); // Use the descriptor already defined
+
+                    // Create magenta placeholder data matching the descriptor's format and dimensions
+                    // Assuming 4 bytes per pixel for Bgra8Unorm
+                    let bytes_per_pixel = 4; // For Bgra8Unorm
+                    let magenta_pixel: [u8; 4] = [255, 0, 255, 255]; // BGRA: Blue, Green, Red, Alpha (Magenta for BGRA)
+                                                                    // If format was Rgba8Unorm, it would be [255,0,255,255] for RGBA magenta
+
+                    let mut pixel_data = vec![0u8; (primary_descriptor.width * primary_descriptor.height * bytes_per_pixel) as usize];
+                    for i in (0..pixel_data.len()).step_by(bytes_per_pixel) {
+                        pixel_data[i..i+bytes_per_pixel].copy_from_slice(&magenta_pixel);
+                    }
+
+                    // Check if primary_descriptor.stride matches theoretical stride for placeholder
+                    if primary_descriptor.stride < primary_descriptor.width * bytes_per_pixel {
+                        tracing::error!("DMABUF primary plane stride {} is less than expected minimum {} for placeholder upload.", primary_descriptor.stride, primary_descriptor.width * bytes_per_pixel);
+                        return Err(RendererError::Generic("DMABUF stride too small for placeholder".to_string()));
+                    }
+
+                    self.queue.write_texture(
+                        wgpu::ImageCopyTexture {
+                            texture: &placeholder_texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &pixel_data,
+                        wgpu::ImageDataLayout {
+                            offset: 0,
+                            // For the placeholder, we use its own packed stride.
+                            // If we were to try and use primary_descriptor.stride, it must be validated.
+                            bytes_per_row: Some(primary_descriptor.width * bytes_per_pixel),
+                            rows_per_image: Some(primary_descriptor.height),
+                        },
+                        texture_descriptor.size,
+                    );
+                    placeholder_texture
+                };
+
+                let view = final_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                // Sampler can be reused or created per texture as needed.
+                // Ensure default_sampler is available, otherwise this will panic.
+                let sampler = self.default_sampler.clone(); // Clone Arc<Sampler>
+
+                Ok(Box::new(WgpuRenderableTexture::new(
+                    self.device.clone(),
+                    final_texture,
+                    view,
+                    sampler,
+                    primary_descriptor.width,
+                    primary_descriptor.height,
+                    texture_descriptor.format,
+                    None, // TODO: Pass actual DmabufFdInfo if WgpuRenderableTexture needs it for release or other ops
+                )))
             }
         }
     }
