@@ -1,6 +1,7 @@
 // novade-system/src/compositor/render/mod.rs
 pub mod dmabuf_importer;
 pub mod renderer;
+pub mod gl;
 
 // Re-export key components if needed by other parts of the compositor
 pub use dmabuf_importer::DmabufImporter;

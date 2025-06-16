@@ -266,6 +266,8 @@ smithay::delegate_input!(DesktopState);
 
 // Existing code starts here
 use smithay::{
+    backend::egl::Egl,
+    backend::renderer::gles2::Gles2Renderer,
     desktop::{Space, Window},
     reexports::calloop::LoopHandle,
     reexports::wayland_server::{Display, protocol::wl_surface::WlSurface},
@@ -289,6 +291,8 @@ use smithay::{
 use std::{cell::RefCell, collections::HashMap, time::SystemTime, sync::{Arc, Mutex}}; // Added Arc, Mutex
 use smithay::wayland::compositor as smithay_compositor;
 use tracing::{debug_span, error, info_span, trace, warn};
+
+use crate::compositor::render::gl::{init_gl_renderer, GlInitError};
 
 // TODO: Define these traits properly in a new renderer module (e.g., src/renderer/mod.rs)
 // For now, these are conceptual placeholders.
@@ -450,6 +454,8 @@ pub struct NovadeCompositorState {
     pub session: smithay::backend::session::direct::DirectSession, // TODO: This might be backend specific (DRM)
     /// The primary DRM node used by the compositor.
     pub primary_drm_node: DrmNode, // TODO: This is DRM specific. How to handle for Winit?
+    /// The GLES2 Renderer for hardware-accelerated rendering.
+    pub gl_renderer: Gles2Renderer,
 
     // TODO: DRM Display and Surface Management - These are GLES and DRM specific.
     // Re-evaluate how DRM integration will work with a generic FrameRenderer.
@@ -481,7 +487,22 @@ impl NovadeCompositorState {
         // drm_display: DrmDisplay<GlesRenderer>, // Removed
         // output_render_states: HashMap<crtc::Handle, OutputRenderState>, // Removed
         dmabuf_state: DmabufState,
-    ) -> Self {
+    ) -> Result<Self, GlInitError> {
+        info!("Beginne EGL- und Gles2Renderer-Initialisierung für NovadeCompositorState...");
+
+        let egl = Egl::new().map_err(|egl_err| {
+            error!("EGL-Initialisierung fehlgeschlagen: {}", egl_err);
+            GlInitError::from(egl_err) // Relies on From<smithay::backend::egl::Error> for GlInitError
+        })?;
+        info!("EGL erfolgreich initialisiert.");
+
+        let gl_renderer = init_gl_renderer(egl).map_err(|render_err| {
+            error!("Gles2Renderer-Initialisierung fehlgeschlagen: {}", render_err);
+            // init_gl_renderer already returns GlInitError, so this assignment is direct.
+            render_err
+        })?;
+        info!("Gles2Renderer erfolgreich initialisiert und in NovadeCompositorState integriert.");
+
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         
@@ -517,6 +538,7 @@ impl NovadeCompositorState {
             frame_renderer: None, // Initialized later by the backend
             session, // TODO: Re-evaluate session field for non-DRM backends
             primary_drm_node, // TODO: Re-evaluate primary_drm_node for non-DRM backends
+            gl_renderer,
             // drm_device, // Removed
             // drm_display, // Removed
             // output_render_states, // Removed
@@ -525,7 +547,7 @@ impl NovadeCompositorState {
             // cursor_texture: None, // Removed
             cursor_hotspot: (0, 0),
             pointer_location: Point::from((0.0, 0.0)),
-        }
+        })
     }
 }
 
