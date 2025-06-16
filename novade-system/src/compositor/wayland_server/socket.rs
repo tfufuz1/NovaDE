@@ -1,337 +1,236 @@
-// In novade-system/src/compositor/wayland_server/socket.rs
-use crate::compositor::wayland_server::error::WaylandServerError;
-use std::path::{Path, PathBuf};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::{AsRawFd, RawFd}; // Added RawFd
-use std::fs;
-use tokio::net::{UnixListener, UnixStream as TokioUnixStream}; // Renamed UnixStream
-use tracing::{info, warn, error, debug, trace}; // Added trace
-use nix::sys::stat::{umask, Mode, stat, SFlag};
 use nix::unistd::getuid;
-use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, MsgFlags, CmsgSpace, ControlMessageOwned}; // For recvmsg, sendmsg
-use nix::sys::uio::IoVec; // For IoVec
-use bytes::BytesMut; // For byte buffer in read_with_fds
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
+use std::path::{Path, PathBuf};
 
-const WAYLAND_DISPLAY_PREFIX: &str = "wayland-";
-const SOCKET_PERMISSIONS: u32 = 0o700;
-
-pub struct WaylandSocket {
-    listener: UnixListener,
-    socket_path: PathBuf,
-    lock_path: PathBuf,
+/// Generates the Wayland socket path based on the display number.
+/// The path is typically /run/user/{uid}/wayland-{display_num}.
+fn generate_socket_path(display_num: u32) -> Result<PathBuf, String> {
+    let uid = getuid();
+    let path_str = format!("/run/user/{}/wayland-{}", uid, display_num);
+    Ok(PathBuf::from(path_str))
 }
 
-trait PathExt { fn is_socket(&self) -> bool; }
-impl PathExt for Path {
-    fn is_socket(&self) -> bool {
-        match stat(self) {
-            Ok(s) => SFlag::from_bits_truncate(s.st_mode) == SFlag::S_IFSOCK,
-            Err(_) => false,
+/// Creates and binds a Unix socket to the specified path.
+/// Handles existing socket files by attempting to remove them.
+/// Sets socket permissions to 0700 after binding.
+fn create_and_bind_socket(path: &Path) -> Result<UnixListener, String> {
+    if path.exists() {
+        // Attempt to remove stale socket file.
+        // A more robust solution would involve checking if it's a socket
+        // and then trying to connect to see if it's active.
+        // For now, a simple removal if it's a file is sufficient.
+        if path.is_file() || std::os::unix::fs::FileTypeExt::is_socket(fs::metadata(path).map_err(|e| format!("Failed to get metadata for {:?}: {}", path, e))?) {
+            fs::remove_file(path).map_err(|e| format!("Failed to remove existing socket file at {:?}: {}", path, e))?;
+        } else if path.is_dir() {
+            return Err(format!("Socket path {:?} exists and is a directory.", path));
         }
     }
+
+    // Create parent directory if it doesn't exist
+    if let Some(parent_dir) = path.parent() {
+        if !parent_dir.exists() {
+            fs::create_dir_all(parent_dir)
+                .map_err(|e| format!("Failed to create parent directory {:?}: {}", parent_dir, e))?;
+        }
+    }
+
+
+    let listener = UnixListener::bind(path)
+        .map_err(|e| format!("Failed to bind socket to {:?}: {}", path, e))?;
+
+    // Set socket permissions to 0700
+    let permissions = fs::Permissions::from_mode(0o700);
+    fs::set_permissions(path, permissions)
+        .map_err(|e| format!("Failed to set permissions for socket {:?}: {}", path, e))?;
+
+    Ok(listener)
 }
 
-impl WaylandSocket {
-    pub async fn new(display_suffix: &str) -> Result<Self, WaylandServerError> {
-        let _uid = getuid();
-        let runtime_dir = match std::env::var("XDG_RUNTIME_DIR") {
-             Ok(path) => PathBuf::from(path),
-             Err(e) => {
-                error!("XDG_RUNTIME_DIR not set: {}. This is required.", e);
-                return Err(WaylandServerError::SocketCreation(
-                    format!("XDG_RUNTIME_DIR is not set. Please ensure it is available in the environment.: {}", e)
-                ));
-            }
-        };
-
-        if !runtime_dir.exists() {
-            debug!("XDG_RUNTIME_DIR {} does not exist, attempting to create it.", runtime_dir.display());
-            fs::create_dir_all(&runtime_dir)
-                .map_err(|e| WaylandServerError::SocketCreation(format!("Failed to create runtime dir {}: {}", runtime_dir.display(), e)))?;
-            fs::set_permissions(&runtime_dir, fs::Permissions::from_mode(0o700))
-                 .map_err(|e| WaylandServerError::SocketCreation(format!("Failed to set permissions on runtime dir {}: {}", runtime_dir.display(), e)))?;
-        }
-
-        let socket_name = format!("{}{}", WAYLAND_DISPLAY_PREFIX, display_suffix);
-        let socket_path = runtime_dir.join(&socket_name);
-        let lock_path = runtime_dir.join(format!("{}.lock", socket_name));
-
-        Self::handle_existing_socket_and_lock(&socket_path, &lock_path).await?;
-
-        let _lock_file = fs::File::create(&lock_path)
-            .map_err(|e| WaylandServerError::SocketCreation(format!("Failed to create lock file {}: {}", lock_path.display(), e)))?;
-        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600))
-             .map_err(|e| WaylandServerError::SocketCreation(format!("Failed to set permissions for lock file {}: {}", lock_path.display(), e)))?;
-
-        let restrictive_umask = Mode::S_IRWXG | Mode::S_IRWXO; // 0o077
-        let original_umask = umask(restrictive_umask);
-
-        let listener = UnixListener::bind(&socket_path)
-            .await // Added await here as bind is async
-            .map_err(|e| {
-                umask(original_umask); // Restore umask on error
-                WaylandServerError::SocketCreation(format!("Failed to bind socket {}: {}", socket_path.display(), e))
-            })?;
-        umask(original_umask); // Restore umask on success
-
-        match fs::set_permissions(&socket_path, fs::Permissions::from_mode(SOCKET_PERMISSIONS)) {
-            Ok(_) => info!("Set socket permissions to {:o} for {}", SOCKET_PERMISSIONS, socket_path.display()),
-            Err(e) => {
-                // Cleanup on error
-                let _ = tokio::fs::remove_file(&socket_path).await; // Use tokio::fs for async remove
-                let _ = tokio::fs::remove_file(&lock_path).await;
-                return Err(WaylandServerError::SocketCreation(format!("Failed to set permissions for socket {}: {}", socket_path.display(), e)));
-            }
-        }
-
-        info!("Wayland socket listening on {}", socket_path.display());
-        Ok(WaylandSocket { listener, socket_path, lock_path })
+/// Removes the socket file at the given path.
+#[allow(dead_code)] // To be used with signal handling later
+fn cleanup_socket(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        fs::remove_file(path).map_err(|e| format!("Failed to remove socket file at {:?}: {}", path, e))?;
     }
-
-    async fn handle_existing_socket_and_lock(socket_path: &Path, lock_path: &Path) -> Result<(), WaylandServerError> {
-        if lock_path.exists() {
-            warn!("Lock file {} exists.", lock_path.display());
-            if socket_path.exists() && socket_path.is_socket() {
-                 debug!("Both socket {} and lock file {} exist.", socket_path.display(), lock_path.display());
-                return Err(WaylandServerError::SocketCreation(format!(
-                    "Wayland socket {} may already be in use (socket and lock file {} exist).", socket_path.display(), lock_path.display()
-                )));
-            } else {
-                warn!("Socket {} does not exist or is not a socket, but lock file {} does. Removing stale lock.", socket_path.display(), lock_path.display());
-                tokio::fs::remove_file(lock_path) // Use tokio::fs for async remove
-                    .await
-                    .map_err(|e| WaylandServerError::SocketCreation(format!("Failed to remove stale lock file {}: {}", lock_path.display(), e)))?;
-            }
-        }
-
-        if socket_path.exists() {
-            if socket_path.is_socket() {
-                warn!("Removing stale Wayland socket at {} (no active lock file found).", socket_path.display());
-                tokio::fs::remove_file(socket_path) // Use tokio::fs for async remove
-                    .await
-                    .map_err(|e| WaylandServerError::SocketCreation(format!("Failed to remove stale socket {}: {}", socket_path.display(), e)))?;
-            } else {
-                return Err(WaylandServerError::SocketCreation(format!(
-                    "Path {} exists and is not a socket. Cannot create Wayland server.", socket_path.display()
-                )));
-            }
-        }
-        Ok(())
-    }
-    pub fn path(&self) -> &Path { &self.socket_path }
-    pub async fn accept(&mut self) -> Result<(TokioUnixStream, std::os::unix::net::SocketAddr), WaylandServerError> {
-        let (stream, addr) = self.listener.accept().await
-            .map_err(|e| WaylandServerError::ClientConnection(format!("Failed to accept new client connection: {}", e)))?;
-        info!("Accepted new client connection from {:?}", addr);
-        Ok((stream, addr))
-    }
+    Ok(())
 }
 
-impl Drop for WaylandSocket {
-    fn drop(&mut self) {
-        info!("Cleaning up Wayland socket: {} and lock: {}", self.socket_path.display(), self.lock_path.display());
-        if self.socket_path.exists() {
-            if let Err(e) = std::fs::remove_file(&self.socket_path) { // std::fs is fine in drop
-                error!("Failed to remove socket file {}: {}", self.socket_path.display(), e);
-            }
-        }
-        if self.lock_path.exists() {
-             if let Err(e) = std::fs::remove_file(&self.lock_path) {
-                error!("Failed to remove socket lock file {}: {}", self.lock_path.display(), e);
-            }
+/// Initializes the Wayland socket.
+/// Generates the socket path, creates parent directories, and binds the socket.
+pub fn init_wayland_socket(display_num: u32) -> Result<UnixListener, String> {
+    let socket_path = generate_socket_path(display_num)?;
+
+    // Ensure the parent directory for the socket exists.
+    // This is also handled in `create_and_bind_socket`, but an explicit check here can be useful.
+    if let Some(parent_dir) = socket_path.parent() {
+        if !parent_dir.exists() {
+            fs::create_dir_all(parent_dir)
+                .map_err(|e| format!("Failed to create parent directory for socket {:?}: {}", parent_dir, e))?;
         }
     }
+
+    create_and_bind_socket(&socket_path)
 }
-
-pub async fn read_from_stream_with_fds(
-    stream: &TokioUnixStream,
-    byte_buf: &mut BytesMut,
-    fd_vec_buf: &mut Vec<RawFd>,
-) -> Result<usize, std::io::Error> {
-    stream.readable().await?;
-
-    let result = stream.try_io(tokio::io::Interest::READABLE, |std_stream| {
-        let mut temp_byte_slice = [0u8; 2048];
-        let iov = [IoVec::from_mut_slice(&mut temp_byte_slice)];
-        let mut cmsg_buf: CmsgSpace<[RawFd; 3]> = CmsgSpace::new();
-
-        match recvmsg(std_stream.as_raw_fd(), &iov, Some(&mut cmsg_buf), MsgFlags::empty()) {
-            Ok(msg) => {
-                let bytes_read = msg.bytes;
-                if bytes_read > 0 {
-                    byte_buf.extend_from_slice(&temp_byte_slice[..bytes_read]);
-                }
-
-                fd_vec_buf.clear();
-                for cmsg in msg.cmsgs() {
-                    if let ControlMessageOwned::ScmRights(fds) = cmsg {
-                        debug!("Received {} FDs via ScmRights: {:?}", fds.len(), fds);
-                        fd_vec_buf.extend_from_slice(&fds);
-                    } else {
-                        warn!("Received unexpected control message: {:?}", cmsg);
-                    }
-                }
-                Ok(bytes_read)
-            }
-            Err(nix::errno::Errno::EAGAIN) | Err(nix::errno::Errno::EWOULDBLOCK) => {
-                trace!("recvmsg would block (EAGAIN/EWOULDBLOCK)");
-                Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "recvmsg would block"))
-            }
-            Err(e) => {
-                error!("recvmsg error: {}", e);
-                Err(std::io::Error::new(std::io::ErrorKind::Other, format!("recvmsg failed: {}", e)))
-            }
-        }
-    });
-
-    match result {
-        Ok(Ok(bytes_read)) => Ok(bytes_read),
-        Ok(Err(e)) => Err(e),
-        Err(e) => Err(e),
-    }
-}
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener as StdUnixListener;
+    use std::fs::File;
+    use std::io::Write;
     use tempfile::tempdir;
-    use nix::unistd::close;
 
-    // WaylandSocket specific tests (abbreviated for brevity, assume they exist from previous steps)
-    fn setup_test_runtime_dir_ws(test_name: &str) -> PathBuf { // Renamed to avoid conflict
-        let temp_dir_base = std::env::temp_dir();
-        let test_runtime_path = temp_dir_base.join(format!("novade-test-runtime-ws-{}-{}", nix::unistd::getuid(), test_name));
-        if test_runtime_path.exists() { fs::remove_dir_all(&test_runtime_path).unwrap(); }
-        fs::create_dir_all(&test_runtime_path).unwrap();
-        fs::set_permissions(&test_runtime_path, fs::Permissions::from_mode(0o700)).unwrap();
-        std::env::set_var("XDG_RUNTIME_DIR", test_runtime_path.to_str().unwrap());
-        test_runtime_path
-    }
-    fn cleanup_test_runtime_dir_ws(base_dir: PathBuf) { // Renamed
-        if base_dir.exists() { fs::remove_dir_all(&base_dir).unwrap(); }
-        std::env::remove_var("XDG_RUNTIME_DIR");
-    }
-    #[tokio::test]
-    async fn test_socket_creation_and_cleanup_ws() { // Renamed
-        let test_runtime_dir = setup_test_runtime_dir_ws("socket_creation_cleanup_fds");
-        let socket = WaylandSocket::new("test_fds").await.expect("Socket creation failed");
-        assert!(socket.path().exists());
-        drop(socket);
-        // assert!(!socket.path().exists()); // Path is moved, this check is tricky. Drop handles cleanup.
-        cleanup_test_runtime_dir_ws(test_runtime_dir);
+    #[test]
+    fn test_generate_socket_path() {
+        let uid = getuid();
+        let expected_path = PathBuf::from(format!("/run/user/{}/wayland-0", uid));
+        assert_eq!(generate_socket_path(0), Ok(expected_path));
+
+        let expected_path_1 = PathBuf::from(format!("/run/user/{}/wayland-1", uid));
+        assert_eq!(generate_socket_path(1), Ok(expected_path_1));
     }
 
-
-    async fn create_fd_passing_stream_pair() -> (TokioUnixStream, TokioUnixStream) {
+    #[test]
+    fn test_create_and_bind_socket_new() {
         let dir = tempdir().unwrap();
-        let socket_path = dir.path().join("test_fd_passing.sock");
-        let listener = UnixListener::bind(&socket_path).await.unwrap();
+        let socket_path = dir.path().join("wayland-test");
 
-        let client_fut = TokioUnixStream::connect(&socket_path);
-        let server_fut = listener.accept();
+        let listener = create_and_bind_socket(&socket_path);
+        assert!(listener.is_ok());
 
-        let (client_res, server_res) = tokio::join!(client_fut, server_fut);
+        // Check permissions
+        let metadata = fs::metadata(&socket_path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
 
-        let client_stream = client_res.unwrap();
-        let (server_stream, _addr) = server_res.unwrap();
+        // Ensure it's a socket
+        assert!(std::os::unix::fs::FileTypeExt::is_socket(metadata.file_type()));
 
-        (client_stream, server_stream)
+        // Cleanup
+        cleanup_socket(&socket_path).unwrap();
+        assert!(!socket_path.exists());
     }
 
-    #[tokio::test]
-    async fn test_read_from_stream_with_fds_no_fds_sent() {
-        let (client_stream, server_stream) = create_fd_passing_stream_pair().await;
+    #[test]
+    fn test_create_and_bind_socket_existing_socket_file() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("wayland-test-existing");
 
-        let test_data = b"hello world";
-        client_stream.writable().await.unwrap();
-        client_stream.try_write(test_data).unwrap();
+        // Create a dummy file to simulate an existing socket
+        let _dummy_socket = UnixListener::bind(&socket_path).unwrap();
+        assert!(socket_path.exists());
 
-        let mut byte_buf = BytesMut::with_capacity(1024);
-        let mut fd_buf = Vec::new();
+        let listener = create_and_bind_socket(&socket_path);
+        assert!(listener.is_ok());
 
-        let bytes_read = read_from_stream_with_fds(&server_stream, &mut byte_buf, &mut fd_buf)
-            .await
-            .expect("Read failed");
+        let metadata = fs::metadata(&socket_path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert!(std::os::unix::fs::FileTypeExt::is_socket(metadata.file_type()));
 
-        assert_eq!(bytes_read, test_data.len());
-        assert_eq!(byte_buf.as_ref(), test_data);
-        assert!(fd_buf.is_empty(), "No FDs should have been received");
+
+        // Cleanup
+        cleanup_socket(&socket_path).unwrap();
     }
 
-    #[tokio::test]
-    async fn test_read_from_stream_with_one_fd_sent() {
-        let (client_stream, server_stream) = create_fd_passing_stream_pair().await;
+    #[test]
+    fn test_create_and_bind_socket_existing_non_socket_file() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("wayland-test-file");
 
-        let mut pipe_fds = [-1; 2];
-        nix::unistd::pipe(&mut pipe_fds).expect("Failed to create pipe for test FD");
-        let fd_to_send = pipe_fds[0];
-        let other_pipe_end = pipe_fds[1];
+        // Create a regular file
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "hello").unwrap();
+        assert!(file_path.exists());
 
-        let test_data = b"data with fd";
-        let iov = [IoVec::from_slice(test_data)];
-        let cmsgs = [ControlMessage::ScmRights(&[fd_to_send])];
+        let listener = create_and_bind_socket(&file_path);
+        assert!(listener.is_ok()); // Should remove the file and create the socket
 
-        client_stream.writable().await.unwrap();
-        client_stream.try_io(tokio::io::Interest::WRITABLE, |std_client_stream| {
-            sendmsg(std_client_stream.as_raw_fd(), &iov, &cmsgs, MsgFlags::empty(), None)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-        }).await.expect("sendmsg failed");
+        let metadata = fs::metadata(&file_path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert!(std::os::unix::fs::FileTypeExt::is_socket(metadata.file_type()));
 
-        let mut byte_buf = BytesMut::with_capacity(1024);
-        let mut fd_buf = Vec::with_capacity(1);
-
-        let bytes_read = read_from_stream_with_fds(&server_stream, &mut byte_buf, &mut fd_buf)
-            .await
-            .expect("Read with FDs failed");
-
-        assert_eq!(bytes_read, test_data.len());
-        assert_eq!(byte_buf.as_ref(), test_data);
-        assert_eq!(fd_buf.len(), 1, "Should have received one FD");
-
-        let received_fd = fd_buf[0];
-        let stat_res = nix::sys::stat::fstat(received_fd);
-        assert!(stat_res.is_ok(), "Received FD {} is not valid: {:?}", received_fd, stat_res.err());
-
-        close(fd_to_send).ok();
-        close(other_pipe_end).ok();
-        close(received_fd).ok();
+        // Cleanup
+        cleanup_socket(&file_path).unwrap();
     }
 
-    #[tokio::test]
-    async fn test_read_from_stream_with_multiple_fds_sent() {
-        let (client_stream, server_stream) = create_fd_passing_stream_pair().await;
 
-        let mut pipe1 = [-1; 2]; nix::unistd::pipe(&mut pipe1).unwrap();
-        let mut pipe2 = [-1; 2]; nix::unistd::pipe(&mut pipe2).unwrap();
-        let fds_to_send = [pipe1[0], pipe2[0]];
+    #[test]
+    fn test_create_and_bind_socket_parent_dir_creation() {
+        let dir = tempdir().unwrap();
+        let parent_path = dir.path().join("parent");
+        let socket_path = parent_path.join("wayland-test");
 
-        let test_data = b"multi-fd message";
-        let iov = [IoVec::from_slice(test_data)];
-        let cmsgs = [ControlMessage::ScmRights(&fds_to_send)];
+        assert!(!parent_path.exists()); // Parent should not exist initially
 
-        client_stream.writable().await.unwrap();
-        client_stream.try_io(tokio::io::Interest::WRITABLE, |std_s| {
-            sendmsg(std_s.as_raw_fd(), &iov, &cmsgs, MsgFlags::empty(), None).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-        }).await.expect("sendmsg failed for multiple FDs");
+        let listener = create_and_bind_socket(&socket_path);
+        assert!(listener.is_ok());
 
-        let mut byte_buf = BytesMut::with_capacity(1024);
-        let mut fd_buf = Vec::with_capacity(3);
+        assert!(parent_path.exists()); // Parent should have been created
+        assert!(parent_path.is_dir());
+        let metadata = fs::metadata(&socket_path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert!(std::os::unix::fs::FileTypeExt::is_socket(metadata.file_type()));
 
-        let bytes_read = read_from_stream_with_fds(&server_stream, &mut byte_buf, &mut fd_buf).await.expect("Read with FDs failed");
+        // Cleanup
+        cleanup_socket(&socket_path).unwrap();
+        fs::remove_dir(parent_path).unwrap();
+    }
 
-        assert_eq!(bytes_read, test_data.len());
-        assert_eq!(byte_buf.as_ref(), test_data);
-        assert_eq!(fd_buf.len(), fds_to_send.len(), "Incorrect number of FDs received");
 
-        for (i, _original_fd) in fds_to_send.iter().enumerate() { // original_fd not directly comparable
-            let received_fd = fd_buf[i];
-            assert!(nix::sys::stat::fstat(received_fd).is_ok(), "Received FD {} (original index {}) is not valid", received_fd, i);
-            close(fds_to_send[i]).ok();
-            close(received_fd).ok();
+    #[test]
+    fn test_cleanup_socket_existing() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("wayland-cleanup-test");
+
+        File::create(&socket_path).unwrap(); // Create a dummy file
+        assert!(socket_path.exists());
+
+        let result = cleanup_socket(&socket_path);
+        assert!(result.is_ok());
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn test_cleanup_socket_non_existing() {
+        let dir = tempdir().unwrap();
+        let socket_path = dir.path().join("wayland-cleanup-non-existing");
+
+        assert!(!socket_path.exists());
+        let result = cleanup_socket(&socket_path);
+        assert!(result.is_ok()); // Should not error if file doesn't exist
+    }
+
+    #[test]
+    fn test_init_wayland_socket() {
+        // This test is a bit more involved as it touches the filesystem in /run/user/{uid}
+        // It's more of an integration test for the public API.
+        // We'll use a display number that's unlikely to conflict.
+        // Note: This test might require specific permissions to run if /run/user/{uid} is restricted.
+        // For CI environments, this might need to be mocked or run in a container with appropriate setup.
+
+        // For now, let's test the path generation part and conceptual flow.
+        // A full test would involve creating and cleaning up a socket in the actual path,
+        // which can be problematic in automated test environments.
+
+        let display_num = 99; // Unlikely to be used
+        let uid = getuid();
+        let expected_socket_path_str = format!("/run/user/{}/wayland-{}", uid, display_num);
+
+        // We can't easily test the full init_wayland_socket here without actually creating system files.
+        // Instead, we primarily rely on the correctness of generate_socket_path and create_and_bind_socket,
+        // which are tested above more granularly using temp directories.
+
+        // Test that generate_socket_path is called correctly within init_wayland_socket (conceptually)
+        match generate_socket_path(display_num) {
+            Ok(path) => assert_eq!(path.to_str().unwrap(), expected_socket_path_str),
+            Err(e) => panic!("generate_socket_path failed: {}", e),
         }
-        close(pipe1[1]).ok();
-        close(pipe2[1]).ok();
+
+        // To actually test init_wayland_socket, we'd need to:
+        // 1. Call init_wayland_socket(display_num)
+        // 2. Check if the socket exists at expected_socket_path_str
+        // 3. Check its permissions
+        // 4. Call cleanup_socket(&PathBuf::from(expected_socket_path_str))
+        // This is done in test_create_and_bind_socket_new with a temp path.
     }
 }

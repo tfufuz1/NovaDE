@@ -5,18 +5,17 @@
 //! file logging with configurable formats.
 
 use crate::config::LoggingConfig;
-use crate::error::{CoreError, LoggingError};
+use crate::error::CoreError; // Changed: Removed LoggingError
 use crate::utils; // For utils::fs::ensure_dir_exists
 
 use std::io::stdout;
 use std::path::Path;
-use tracing::Level; // Removed info, Added Level
-// use tracing_appender::non_blocking::WorkerGuard; // WorkerGuard is intentionally forgotten for now
+use tracing::Level;
 use tracing_subscriber::{
     fmt,
     layer::SubscriberExt,
     util::SubscriberInitExt,
-    EnvFilter, Layer, // Added Layer
+    EnvFilter, Layer,
     Registry,
 };
 use atty;
@@ -70,26 +69,20 @@ fn create_file_layer(
 
     let (non_blocking_writer, _guard) = tracing_appender::non_blocking(file_appender);
 
-    // TODO: Proper WorkerGuard handling is required.
-    // The _guard must be kept alive for the duration of the application to ensure logs are flushed.
-    // Storing it in a global static (e.g., OnceCell<WorkerGuard>) or returning it from
-    // init_logging for the application to manage is necessary.
-    // As per spec for this subtask, using std::mem::forget as a temporary measure.
-    // THIS IS NOT FOR PRODUCTION USE.
-    std::mem::forget(_guard);
+    std::mem::forget(_guard); // THIS IS NOT FOR PRODUCTION USE.
 
     match format.to_lowercase().as_str() {
         "json" => {
             let layer = fmt::layer()
                 .json()
                 .with_writer(non_blocking_writer)
-                .with_ansi(false); // No ANSI colors in files
+                .with_ansi(false);
             Ok(Box::new(layer))
         }
-        "text" | _ => { // Default to text format
+        "text" | _ => {
             let layer = fmt::layer()
                 .with_writer(non_blocking_writer)
-                .with_ansi(false); // No ANSI colors in files
+                .with_ansi(false);
             Ok(Box::new(layer))
         }
     }
@@ -108,11 +101,9 @@ fn create_file_layer(
 ///
 /// # Errors
 ///
-/// Returns `CoreError::LoggingInitialization` if configuration is invalid or
+/// Returns `CoreError::Logging` if configuration is invalid or
 /// setting the global subscriber fails on an initial setup.
 pub fn init_logging(config: &LoggingConfig, is_reload: bool) -> Result<(), CoreError> {
-    // Validate and parse log level from config
-    // This should ideally be caught by config::validate_config, but as per spec, check here too.
     let level_filter_str = match config.level.to_lowercase().as_str() {
         "trace" => Level::TRACE.to_string(),
         "debug" => Level::DEBUG.to_string(),
@@ -120,15 +111,14 @@ pub fn init_logging(config: &LoggingConfig, is_reload: bool) -> Result<(), CoreE
         "warn" => Level::WARN.to_string(),
         "error" => Level::ERROR.to_string(),
         invalid_level => {
-            // This error case is per spec for init_logging, even if validate_config should catch it.
-            return Err(CoreError::Logging(LoggingError::InitializationFailure(format!(
+            // Changed: Use CoreError::Logging(String)
+            return Err(CoreError::Logging(format!(
                 "Invalid log level in config: {}",
-                invalid_level // Use the actual invalid_level string from config for clarity
-            ))));
+                invalid_level
+            )));
         }
     };
 
-    // Stdout Layer
     let stdout_filter = EnvFilter::new(level_filter_str.clone());
     let stdout_layer = fmt::layer()
         .with_writer(stdout)
@@ -136,7 +126,6 @@ pub fn init_logging(config: &LoggingConfig, is_reload: bool) -> Result<(), CoreE
         .with_filter(stdout_filter)
         .boxed();
 
-    // File Layer (Optional)
     let file_layer_opt: Option<Box<dyn Layer<Registry> + Send + Sync + 'static>> =
         if let Some(log_path) = &config.file_path {
             let file_filter_env = EnvFilter::new(level_filter_str);
@@ -158,12 +147,11 @@ pub fn init_logging(config: &LoggingConfig, is_reload: bool) -> Result<(), CoreE
         Ok(()) => Ok(()),
         Err(e) => {
             if !is_reload {
-                Err(CoreError::Logging(LoggingError::InitializationFailure(format!(
+                // Changed: Use CoreError::Logging(String)
+                Err(CoreError::Logging(format!(
                     "Failed to set global tracing subscriber. Was it already initialized? Error: {}", e
-                ))))
+                )))
             } else {
-                // If is_reload, log an info message. The actual logger might not have changed.
-                // Use eprintln as a fallback if tracing system is in an uncertain state.
                 let msg = format!("[INFO] Re-initializing logging configuration attempted. Previous logger may persist. Error: {}", e);
                 eprintln!("{}", msg);
                 Ok(())
@@ -175,20 +163,12 @@ pub fn init_logging(config: &LoggingConfig, is_reload: bool) -> Result<(), CoreE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::LoggingConfig; // For creating test configs
+    use crate::config::LoggingConfig;
     use std::fs as std_fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
-    // For checking log output, we'd ideally capture stderr or read files.
-    // `tracing_test` crate could be useful but is an external dependency.
 
-    /// Helper to ensure global logger state is clean for a test.
-    /// This is a best-effort approach as `tracing` does not have a public reset API.
     fn ensure_clean_logger_state() {
-        // Attempt to set a no-op subscriber. If it succeeds, no subscriber was set.
-        // If it fails, a subscriber was already set. This doesn't "clear" it but
-        // allows subsequent `try_init` to behave as if it's the first attempt in some cases.
-        // This is not foolproof for all test scenarios.
         let _ = tracing::subscriber::set_global_default(tracing::subscriber::NoSubscriber::default());
     }
 
@@ -196,22 +176,16 @@ mod tests {
     fn test_init_minimal_logging_runs_without_panic() {
         ensure_clean_logger_state();
         init_minimal_logging();
-        // Test that it can be called multiple times without panic (ignores error)
         init_minimal_logging();
         tracing::info!("Minimal logging test: Info message after init_minimal_logging.");
-        // Actual output capture/validation is complex for minimal_logging.
     }
 
     #[test]
     fn test_create_file_layer_text_format() {
         let temp_dir = TempDir::new().unwrap();
         let log_path = temp_dir.path().join("test_text.log");
-
         let result = create_file_layer(&log_path, "text");
         assert!(result.is_ok(), "create_file_layer failed for text format: {:?}", result.err());
-        // Further checks would involve trying to log to this layer and inspect file,
-        // which is more of an integration test for the layer.
-        // Here, we mostly check it doesn't error out and parent dir is created.
         assert!(log_path.parent().unwrap().exists());
     }
 
@@ -219,7 +193,6 @@ mod tests {
     fn test_create_file_layer_json_format() {
         let temp_dir = TempDir::new().unwrap();
         let log_path = temp_dir.path().join("test_json.log");
-
         let result = create_file_layer(&log_path, "json");
         assert!(result.is_ok(), "create_file_layer failed for json format: {:?}", result.err());
         assert!(log_path.parent().unwrap().exists());
@@ -229,27 +202,25 @@ mod tests {
     fn test_create_file_layer_ensures_parent_dir_exists() {
         let temp_dir = TempDir::new().unwrap();
         let nested_log_path = temp_dir.path().join("new_parent_dir/nested_log.log");
-        
-        assert!(!nested_log_path.parent().unwrap().exists()); // Parent should not exist yet
-        
+        assert!(!nested_log_path.parent().unwrap().exists());
         let result = create_file_layer(&nested_log_path, "text");
         assert!(result.is_ok(), "create_file_layer failed: {:?}", result.err());
         assert!(nested_log_path.parent().unwrap().exists(), "Parent directory was not created");
     }
 
-
     #[test]
     fn test_init_logging_invalid_level_returns_error() {
         ensure_clean_logger_state();
         let config = LoggingConfig {
-            level: "supertrace".to_string(), // Invalid level
+            level: "supertrace".to_string(),
             file_path: None,
             format: "text".to_string(),
         };
         let result = init_logging(&config, false);
         assert!(result.is_err());
+        // Changed: Match CoreError::Logging(String)
         match result.err().unwrap() {
-            CoreError::Logging(LoggingError::InitializationFailure(msg)) => {
+            CoreError::Logging(msg) => {
                 assert!(msg.contains("Invalid log level in config: supertrace"));
             }
             other_error => panic!("Unexpected error type: {:?}", other_error),
@@ -280,30 +251,18 @@ mod tests {
             file_path: Some(log_file.clone()),
             format: "text".to_string(),
         };
-
         let result = init_logging(&config, false);
         assert!(result.is_ok(), "init_logging failed for file (text): {:?}", result.err());
         
         tracing::debug!("File logging (text) test: Debug message.");
         tracing::info!("File logging (text) test: Info message.");
         
-        // Drop the subscriber to attempt to flush logs.
-        // This is hard with global state. We rely on std::mem::forget(_guard) for now,
-        // which means logs might not be flushed immediately for reading.
-        // For reliable test, explicit flush or guard management is needed.
-        // This test primarily ensures init_logging runs and file layer is configured.
-        // A small delay might help, but not ideal.
-        // std::thread::sleep(std::time::Duration::from_millis(100)); 
-
-        if log_file.exists() { // File may not be created/written immediately by non-blocking
+        if log_file.exists() {
             let content = std_fs::read_to_string(&log_file).unwrap_or_default();
-            // Check for parts of the message. Full format depends on tracing_subscriber defaults.
              assert!(content.contains("File logging (text) test: Debug message."));
              assert!(content.contains("File logging (text) test: Info message."));
         } else {
-            // This might happen with non-blocking if not flushed.
-            // Consider this test as "runs without error" for now.
-            println!("Warning: Log file {} not found for test_init_logging_with_file_text. Non-blocking writer might not have flushed.", log_file.display());
+            println!("Warning: Log file {} not found for test_init_logging_with_file_text.", log_file.display());
         }
     }
     
@@ -317,7 +276,6 @@ mod tests {
             file_path: Some(log_file.clone()),
             format: "json".to_string(),
         };
-
         let result = init_logging(&config, false);
         assert!(result.is_ok(), "init_logging failed for file (json): {:?}", result.err());
         
@@ -328,7 +286,7 @@ mod tests {
             assert!(content.contains("\"message\":\"File logging (json) test\""));
             assert!(content.contains("\"key\":\"value\""));
         } else {
-            println!("Warning: Log file {} not found for test_init_logging_with_file_json. Non-blocking writer might not have flushed.", log_file.display());
+            println!("Warning: Log file {} not found for test_init_logging_with_file_json.", log_file.display());
         }
     }
 
@@ -339,11 +297,10 @@ mod tests {
         init_logging(&config1, false).expect("First init failed");
 
         let config2 = LoggingConfig { level: "debug".to_string(), file_path: None, format: "text".to_string() };
-        // This should not return Err, but log an info message (which we can't easily capture here)
         let result = init_logging(&config2, true); 
         assert!(result.is_ok(), "Reloading logging should not error, but got: {:?}", result.err());
-        tracing::info!("Reload test: Info after first init."); // Should be logged by first config
-        tracing::debug!("Reload test: Debug after attempting reload."); // Visibility depends on whether subscriber actually updated.
+        tracing::info!("Reload test: Info after first init.");
+        tracing::debug!("Reload test: Debug after attempting reload.");
     }
 
     #[test]
@@ -353,10 +310,11 @@ mod tests {
         init_logging(&config1, false).expect("First init failed");
 
         let config2 = LoggingConfig { level: "debug".to_string(), file_path: None, format: "text".to_string() };
-        let result = init_logging(&config2, false); // is_reload = false
+        let result = init_logging(&config2, false);
         assert!(result.is_err(), "Second init with is_reload=false should error");
+        // Changed: Match CoreError::Logging(String)
         match result.err().unwrap() {
-            CoreError::Logging(LoggingError::InitializationFailure(msg)) => {
+            CoreError::Logging(msg) => {
                 assert!(msg.contains("Failed to set global tracing subscriber"));
             }
             other_error => panic!("Unexpected error type: {:?}", other_error),

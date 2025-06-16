@@ -163,7 +163,7 @@ impl Color {
     /// Returns `crate::error::ColorParseError` if the string is invalid.
     pub fn from_hex(hex_string: &str) -> Result<Self, ColorParseError> {
         if !hex_string.starts_with('#') {
-            return Err(ColorParseError::MissingPrefix);
+            return Err(ColorParseError::InvalidHexFormat(format!("Hex string '{}' does not start with '#'", hex_string)));
         }
 
         let code = &hex_string[1..];
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn color_from_hex_invalid() {
-        assert_eq!(Color::from_hex("FF0000"), Err(TestColorParseError::MissingPrefix));
+        assert_eq!(Color::from_hex("FF0000"), Err(TestColorParseError::InvalidHexFormat("Hex string 'FF0000' does not start with '#'".to_string())));
         assert_eq!(Color::from_hex("#F0000"), Err(TestColorParseError::InvalidLength(5)));
         // For HexDecodingError, we check the variant type, not the exact string as it can be verbose
         assert!(matches!(Color::from_hex("#GG0000"), Err(TestColorParseError::HexDecodingError(_))));
