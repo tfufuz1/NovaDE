@@ -113,7 +113,10 @@ impl DesktopState {
         let workspace_manager = Arc::new(StdMutex::new(WorkspaceManager::new(nova_window_manager as Arc<dyn DomainWindowManagerTrait>)));
 
         // ANCHOR: Defer initial layout application to after DesktopState is fully created.
-        // The main setup function that calls DesktopState::new should call state.apply_active_workspace_layout()
+        // The main setup function that calls DesktopState::new should call something like:
+        // if let Some(initial_ws_id) = state_arc.lock().unwrap().workspace_manager.lock().unwrap().get_active_workspace_id() {
+        //    state_arc.lock().unwrap().apply_layout_for_workspace(initial_ws_id);
+        // }
         // after this `new` function returns and the state is fully wrapped in its Arc<StdMutex<DesktopState>>.
 
         let opengl_renderer = OpenGLRenderer::new(display_handle.clone()).expect("Failed to create OpenGLRenderer");
@@ -198,7 +201,10 @@ impl DesktopState {
             }
         }
 
-        self.apply_active_workspace_layout();
+        // Apply layout for the new active workspace
+        if let Some(new_active_id) = self.workspace_manager.lock().unwrap().get_active_workspace_id() {
+            self.apply_layout_for_workspace(new_active_id);
+        }
         Ok(())
     }
 
@@ -327,8 +333,71 @@ impl DesktopState {
         drop(workspace_manager);
         if was_active {
             info!("Applying new layout to active workspace {:?}.", workspace_id);
-            self.apply_active_workspace_layout();
+            self.apply_layout_for_workspace(workspace_id);
         }
+        Ok(())
+    }
+
+    pub async fn move_window_to_monitor_by_id(&self, window_id: novade_domain::workspaces::core::WindowId, target_monitor_id: String) -> Result<(), String> {
+        info!("Request to move window {:?} to monitor {}", window_id, target_monitor_id);
+
+        let source_workspace_id_opt: Option<novade_domain::workspaces::manager::WorkspaceId>;
+        let target_workspace_id: novade_domain::workspaces::manager::WorkspaceId;
+
+        // Scope for workspace_manager lock to update domain state
+        {
+            let mut wm_guard = self.workspace_manager.lock().map_err(|e| format!("Failed to lock WorkspaceManager: {:?}", e))?;
+            source_workspace_id_opt = wm_guard.find_workspace_for_window(window_id);
+            target_workspace_id = wm_guard.move_window_to_monitor(window_id, target_monitor_id.clone())
+                .map_err(|e| format!("WorkspaceManager failed to move window: {:?}", e))?;
+        } // WorkspaceManager lock released
+
+        let smithay_window = self.find_smithay_window_by_domain_id(window_id)
+            .ok_or_else(|| format!("Failed to find SmithayWindow for domain ID {:?}", window_id))?;
+
+        // Update Smithay Space representation and inform client
+        // ANCHOR: This part needs careful handling of window's current output vs target output
+        // and ensuring correct wl_surface.enter/leave events are emitted by Smithay.
+        // This might involve `smithay_window.unmap_output()` and `smithay_window.map_output(new_smithay_output)`.
+        // For now, we'll map it to the new space at a default position on the new monitor.
+
+        let target_output_work_area = {
+            let display_manager_guard = self.display_manager.lock().map_err(|e| format!("Failed to lock DisplayManager: {:?}", e))?;
+            display_manager_guard.get_output_by_id(&target_monitor_id)
+                .map(|mo| mo.work_area) // This is physical
+                .ok_or_else(|| format!("Target monitor {} not found in DisplayManager", target_monitor_id))?
+        };
+
+        // Calculate a new position on the target monitor (e.g., center or a default spot)
+        // This position is in the global compositor space.
+        let new_pos_logical = (target_output_work_area.position.x, target_output_work_area.position.y); // Top-left for now
+
+        // map_element will handle making it appear on the correct output based on global coordinates.
+        // Smithay should then send wl_surface.enter for the new output and wl_surface.leave for the old.
+        self.space.map_element(smithay_window.clone(), new_pos_logical, false); // Don't activate automatically
+        info!("Mapped SmithayWindow {:?} to new position {:?} on target monitor {}", window_id, new_pos_logical, target_monitor_id);
+
+        // Re-apply layout for the source workspace (if it was different and active)
+        if let Some(sws_id) = source_workspace_id_opt {
+            if sws_id != target_workspace_id {
+                // Check if source workspace is still active (it shouldn't be if target is on different monitor and becomes active)
+                // Or, more simply, apply layout if it's tiling.
+                // This needs a way to apply layout for a *specific*, potentially non-active, workspace.
+                // ANCHOR: Add apply_layout_for_workspace(ws_id) if needed. (This is now available)
+                // Re-apply layout for the source workspace.
+                self.apply_layout_for_workspace(sws_id);
+            }
+        }
+
+        // Apply layout for the target workspace.
+        self.apply_layout_for_workspace(target_workspace_id);
+
+        // Focus the moved window
+        let window_manager_interface = self.workspace_manager.lock().unwrap().window_manager.clone();
+        if let Err(e) = window_manager_interface.focus_window(window_id).await {
+            warn!("Failed to focus moved window {:?}: {}", window_id, e);
+        }
+
         Ok(())
     }
 }
@@ -445,7 +514,7 @@ impl smithay_xdg_shell::XdgShellHandler for DesktopState {
             drop(workspace_manager_guard);
 
             if apply_layout_now {
-                self.apply_active_workspace_layout();
+                self.apply_layout_for_workspace(target_workspace_id);
             }
         } else {
             warn!("Could not find XdgSurfaceData to store new toplevel Window or Domain ID for wl_surface {:?}", surface.id());

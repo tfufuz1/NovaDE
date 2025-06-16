@@ -151,6 +151,79 @@ where
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compositor::shell::xdg::{XdgSurfaceData, XdgToplevelData, XdgPopupData, XdgRoleSpecificData, XdgSurfaceRole, ToplevelState};
+    use smithay::desktop::{Window, WindowSurfaceType};
+    use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    // ANCHOR: Testing Wayland handlers is complex due to dependencies on live Wayland objects
+    // (DisplayHandle, Client, specific resources like WlSurface, XdgSurface, etc.) and Smithay's dispatch mechanism.
+    // True unit tests would require extensive mocking or test harnesses for these components.
+    // The tests below are examples of how one might test internal data manipulation logic if it were
+    // more decoupled, or serve as skeletons for future integration tests.
+
+    #[test]
+    fn test_xdg_surface_data_initialization() {
+        // This test is more conceptual as Window::new requires a WindowSurfaceType which itself
+        // might need live XDG objects.
+        // If Window could be a simple mockable struct for tests, this would be easier.
+        // For now, we acknowledge this limitation.
+        // let dummy_window = Window::new(WindowSurfaceType::Xdg(None)); // This line would panic without proper setup
+        // let surface_data = XdgSurfaceData {
+        //     role: XdgSurfaceRole::Toplevel, // Initial placeholder
+        //     role_data: XdgRoleSpecificData::None,
+        //     parent: None,
+        //     window: dummy_window, // Problematic line
+        //     domain_id: None,
+        // };
+        // assert!(matches!(surface_data.role_data, XdgRoleSpecificData::None));
+        // ANCHOR: This test needs a way to mock/stub `smithay::desktop::Window` or test `XdgSurfaceData` field logic independently.
+        println!("ANCHOR: test_xdg_surface_data_initialization - Needs mock/stub for smithay::desktop::Window or test data logic independently.");
+    }
+
+    #[test]
+    fn test_toplevel_data_state_transition() {
+        let mut toplevel_data = XdgToplevelData::default();
+        assert!(!toplevel_data.current_state.maximized);
+
+        // Simulate a set_maximized request's effect (if it were a direct method)
+        // In reality, this is done via XdgToplevel::set_maximized() -> configure -> ack_configure -> XdgShellHandler
+        toplevel_data.current_state.maximized = true;
+        assert!(toplevel_data.current_state.maximized);
+
+        toplevel_data.current_state.maximized = false;
+        assert!(!toplevel_data.current_state.maximized);
+
+        // This test demonstrates testing the data structure itself, not the handler logic.
+    }
+
+    // Skeleton for get_xdg_surface handler test
+    #[test]
+    fn test_handle_get_xdg_surface() {
+        // To test this, we would need:
+        // - Mock DisplayHandle, Client, DataInit, WlSurface, XdgWmBase resource
+        // - A way to inspect results (e.g., data set on WlSurface, objects created via DataInit)
+        // - A minimal DesktopState mock that implements XdgShellHandler.
+        // This is effectively an integration test snippet.
+        println!("ANCHOR: test_handle_get_xdg_surface - Full test requires integration testing setup or extensive mocking.");
+    }
+
+    // Skeleton for xdg_surface::get_toplevel handler test
+    #[test]
+    fn test_handle_surface_get_toplevel() {
+        println!("ANCHOR: test_handle_surface_get_toplevel - Full test requires integration testing setup or extensive mocking.");
+    }
+
+    // Skeleton for xdg_toplevel_decoration::set_mode handler test
+    #[test]
+    fn test_handle_toplevel_decoration_set_mode() {
+         println!("ANCHOR: test_handle_toplevel_decoration_set_mode - Full test requires integration testing setup or extensive mocking.");
+    }
+}
+
 // ANCHOR: Implement XdgPositioner and XdgSurface dispatchers if not already handled by Smithay's XdgShellHandler.
 // These will handle requests for xdg_positioner and xdg_surface objects.
 // For example:
