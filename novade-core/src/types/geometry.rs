@@ -2,7 +2,153 @@
 
 use num_traits::{Float, Num, Signed, Zero};
 use serde::{Deserialize, Serialize};
-use std::ops::{Add, Div, Mul, Sub};
+use std::ops::{Add, Div, Mul, Sub, Neg}; // Added Neg
+
+// --- Vector ---
+
+/// Represents a 2D vector, typically used for displacement, direction, or velocity.
+///
+/// It consists of two `f64` components, `dx` (delta-x) and `dy` (delta-y).
+/// This struct provides common vector operations like magnitude calculation,
+/// normalization, dot product, scaling, and operator overloads for arithmetic.
+///
+/// # Examples
+/// ```
+/// use novade_core::types::Vector;
+///
+/// let v1 = Vector::new(3.0, 4.0);
+/// let v2 = Vector::new(1.0, 1.0);
+///
+/// assert_eq!(v1.magnitude(), 5.0);
+/// let sum_v = v1 + v2; // Uses Add trait
+/// assert_eq!(sum_v.dx, 4.0);
+/// assert_eq!(sum_v.dy, 5.0);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct Vector {
+    /// The change in the x-coordinate.
+    pub dx: f64,
+    /// The change in the y-coordinate.
+    pub dy: f64,
+}
+
+impl Vector {
+    /// Creates a new vector with the given `dx` and `dy` components.
+    ///
+    /// # Arguments
+    /// * `dx`: The delta (change) in the x-coordinate.
+    /// * `dy`: The delta (change) in the y-coordinate.
+    pub fn new(dx: f64, dy: f64) -> Self {
+        Vector { dx, dy }
+    }
+
+    /// Calculates the squared magnitude (length) of the vector.
+    ///
+    /// This is computationally cheaper than `magnitude()` if only comparing lengths,
+    /// as it avoids a square root operation.
+    ///
+    /// Returns `dx*dx + dy*dy`.
+    pub fn magnitude_squared(&self) -> f64 {
+        self.dx * self.dx + self.dy * self.dy
+    }
+
+    /// Calculates the magnitude (length) of the vector.
+    ///
+    /// Returns `sqrt(dx*dx + dy*dy)`.
+    pub fn magnitude(&self) -> f64 {
+        self.magnitude_squared().sqrt()
+    }
+
+    /// Returns a normalized version of the vector (a unit vector).
+    ///
+    /// A unit vector has a magnitude of 1.0 and points in the same direction
+    /// as the original vector.
+    ///
+    /// Returns `None` if the original vector has zero magnitude (to avoid division by zero).
+    /// Otherwise, returns `Some(Vector)` with the normalized components.
+    pub fn normalize(&self) -> Option<Self> {
+        let mag = self.magnitude();
+        if mag == 0.0 { // Using strict equality for f64, consider epsilon for robustness if needed.
+            None
+        } else {
+            Some(Vector {
+                dx: self.dx / mag,
+                dy: self.dy / mag,
+            })
+        }
+    }
+
+    /// Calculates the dot product of this vector with another `Vector`.
+    ///
+    /// The dot product is a scalar value calculated as `self.dx * other.dx + self.dy * other.dy`.
+    /// It can be used to determine the angle between two vectors or project one vector onto another.
+    pub fn dot(&self, other: Self) -> f64 {
+        self.dx * other.dx + self.dy * other.dy
+    }
+
+    /// Scales the vector by a given factor, returning a new `Vector`.
+    ///
+    /// Both `dx` and `dy` components are multiplied by the `factor`.
+    ///
+    /// # Arguments
+    /// * `factor`: The scalar value to multiply the vector's components by.
+    pub fn scale(&self, factor: f64) -> Self {
+        Vector {
+            dx: self.dx * factor,
+            dy: self.dy * factor,
+        }
+    }
+}
+
+impl Add for Vector {
+    type Output = Self;
+    /// Adds two vectors component-wise.
+    /// `(v1.dx + v2.dx, v1.dy + v2.dy)`
+    fn add(self, other: Self) -> Self {
+        Vector {
+            dx: self.dx + other.dx,
+            dy: self.dy + other.dy,
+        }
+    }
+}
+
+impl Sub for Vector {
+    type Output = Self;
+    /// Subtracts another vector from this vector component-wise.
+    /// `(v1.dx - v2.dx, v1.dy - v2.dy)`
+    fn sub(self, other: Self) -> Self {
+        Vector {
+            dx: self.dx - other.dx,
+            dy: self.dy - other.dy,
+        }
+    }
+}
+
+impl Mul<f64> for Vector {
+    type Output = Self;
+    /// Performs scalar multiplication: `vector * scalar`.
+    ///
+    /// This is equivalent to calling `vector.scale(scalar)`.
+    fn mul(self, scalar: f64) -> Self {
+        self.scale(scalar)
+    }
+}
+
+// Optional: `scalar * vector` if needed, e.g. `impl Mul<Vector> for f64 { ... }`
+// For now, only `Vector * f64` is implemented as per the initial subtask.
+
+impl Neg for Vector {
+    type Output = Self;
+    /// Negates both components of the vector.
+    /// `(-v.dx, -v.dy)`
+    fn neg(self) -> Self {
+        Vector {
+            dx: -self.dx,
+            dy: -self.dy,
+        }
+    }
+}
+
 
 // --- Generic Point<T> ---
 
@@ -85,6 +231,57 @@ impl<T: Num + Copy + Zero> Point<T> {
     /// A point at the origin (0.0, 0.0) for f64.
     pub const ZERO_F64: Point<f64> = Point::new(0.0, 0.0);
 }
+
+// --- Point<f64> specific implementations ---
+
+impl Point<f64> {
+    /// Subtracts another `Point<f64>` from this point, resulting in a `Vector`.
+    ///
+    /// This calculates the displacement vector from `rhs` to `self`.
+    ///
+    /// # Arguments
+    /// * `rhs`: The `Point<f64>` to subtract from this point.
+    ///
+    /// # Returns
+    /// A `Vector` representing the difference `(self.x - rhs.x, self.y - rhs.y)`.
+    pub fn sub_point(self, rhs: Point<f64>) -> Vector {
+        Vector::new(self.x - rhs.x, self.y - rhs.y)
+    }
+}
+
+impl Add<Vector> for Point<f64> {
+    type Output = Self;
+    /// Translates a `Point<f64>` by a `Vector`.
+    ///
+    /// Adds the vector's `dx` and `dy` components to the point's `x` and `y` coordinates.
+    ///
+    /// # Arguments
+    /// * `rhs`: The `Vector` to add to this point.
+    ///
+    /// # Returns
+    /// A new `Point<f64>` representing the translated point.
+    fn add(self, rhs: Vector) -> Self {
+        Point::new(self.x + rhs.dx, self.y + rhs.dy)
+    }
+}
+
+impl Sub<Vector> for Point<f64> {
+    type Output = Self;
+    /// Translates a `Point<f64>` by the negative of a `Vector`.
+    ///
+    /// Subtracts the vector's `dx` and `dy` components from the point's `x` and `y` coordinates.
+    ///
+    /// # Arguments
+    /// * `rhs`: The `Vector` to subtract from this point.
+    ///
+    /// # Returns
+    /// A new `Point<f64>` representing the translated point.
+    fn sub(self, rhs: Vector) -> Self {
+        Point::new(self.x - rhs.dx, self.y - rhs.dy)
+    }
+}
+
+// --- Generic Point<T> operator implementations ---
 
 impl<T: Num + Copy + Add<Output = T>> Add for Point<T> {
     type Output = Self;
@@ -181,6 +378,18 @@ impl<T: Num + Copy + Zero> Size<T> {
     pub const ZERO_F32: Size<f32> = Size::new(0.0, 0.0);
     /// A size of (0.0,0.0) for f64.
     pub const ZERO_F64: Size<f64> = Size::new(0.0, 0.0);
+}
+
+// --- Size<f64> specific implementations ---
+impl Size<f64> {
+    /// Scales both width and height by a uniform factor, returning a new `Size<f64>`.
+    ///
+    /// # Arguments
+    /// * `factor`: The scalar value to multiply the width and height by.
+    ///             Negative factors will result in negative dimensions if not further handled.
+    pub fn scale(&self, factor: f64) -> Self {
+        Size::new(self.width * factor, self.height * factor)
+    }
 }
 
 // --- Generic Rect<T> ---
@@ -1041,5 +1250,243 @@ mod tests {
         let serialized = serde_json::to_string(&r).unwrap();
         let deserialized: Rect<f32> = serde_json::from_str(&serialized).unwrap();
         assert_eq!(r, deserialized);
+    }
+}
+
+#[cfg(test)]
+mod tests_f64 {
+    use super::*;
+    use static_assertions::assert_impl_all;
+    use serde::Deserialize;
+
+    const EPSILON: f64 = 1e-9; // For float comparisons
+
+    // Type Assertions for f64 variants
+    // Note: Deserialize<'de> removed as it complicates static_assertions; serde tests cover deserialization.
+    assert_impl_all!(Vector: std::fmt::Debug, Clone, Copy, PartialEq, Default, Serialize, Send, Sync);
+    assert_impl_all!(Point<f64>: std::fmt::Debug, Clone, Copy, PartialEq, Default, Serialize, Send, Sync);
+    assert_impl_all!(Size<f64>: std::fmt::Debug, Clone, Copy, PartialEq, Default, Serialize, Send, Sync);
+    assert_impl_all!(Rect<f64>: std::fmt::Debug, Clone, Copy, PartialEq, Default, Serialize, Send, Sync);
+
+    // Helper for float comparison
+    fn approx_eq_vector(v1: Vector, v2: Vector) -> bool {
+        (v1.dx - v2.dx).abs() < EPSILON && (v1.dy - v2.dy).abs() < EPSILON
+    }
+
+    fn approx_eq_option_vector(ov1: Option<Vector>, ov2: Option<Vector>) -> bool {
+        match (ov1, ov2) {
+            (Some(v1), Some(v2)) => approx_eq_vector(v1, v2),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    // --- Vector Tests ---
+    #[test]
+    fn vector_new_and_default() {
+        let v = Vector::new(1.0, 2.0);
+        assert_eq!(v.dx, 1.0);
+        assert_eq!(v.dy, 2.0);
+
+        let default_v: Vector = Default::default();
+        assert_eq!(default_v.dx, 0.0);
+        assert_eq!(default_v.dy, 0.0);
+        assert_eq!(default_v, Vector::new(0.0, 0.0));
+    }
+
+    #[test]
+    fn vector_magnitude() {
+        let v = Vector::new(3.0, 4.0);
+        assert_eq!(v.magnitude_squared(), 25.0);
+        assert_eq!(v.magnitude(), 5.0);
+
+        let zero_v = Vector::new(0.0, 0.0);
+        assert_eq!(zero_v.magnitude_squared(), 0.0);
+        assert_eq!(zero_v.magnitude(), 0.0);
+    }
+
+    #[test]
+    fn vector_normalize() {
+        let v = Vector::new(3.0, 4.0);
+        let normalized_v = v.normalize().unwrap();
+        assert!(approx_eq_vector(normalized_v, Vector::new(0.6, 0.8)));
+        assert!((normalized_v.magnitude() - 1.0).abs() < EPSILON);
+
+
+        let zero_v = Vector::new(0.0, 0.0);
+        assert!(zero_v.normalize().is_none());
+    }
+
+    #[test]
+    fn vector_dot_product() {
+        let v1 = Vector::new(1.0, 2.0);
+        let v2 = Vector::new(3.0, 4.0);
+        assert_eq!(v1.dot(v2), 1.0 * 3.0 + 2.0 * 4.0); // 3 + 8 = 11
+    }
+
+    #[test]
+    fn vector_scale() {
+        let v = Vector::new(1.0, 2.0);
+        assert!(approx_eq_vector(v.scale(2.0), Vector::new(2.0, 4.0)));
+        assert!(approx_eq_vector(v.scale(-1.0), Vector::new(-1.0, -2.0)));
+    }
+
+    #[test]
+    fn vector_ops() {
+        let v1 = Vector::new(1.0, 2.0);
+        let v2 = Vector::new(3.0, 4.0);
+
+        assert!(approx_eq_vector(v1 + v2, Vector::new(4.0, 6.0)));
+        assert!(approx_eq_vector(v2 - v1, Vector::new(2.0, 2.0)));
+        assert!(approx_eq_vector(v1 * 2.0, Vector::new(2.0, 4.0)));
+        // assert!(approx_eq_vector(2.0 * v1, Vector::new(2.0, 4.0))); // If implemented
+        assert!(approx_eq_vector(-v1, Vector::new(-1.0, -2.0)));
+    }
+
+    #[test]
+    fn vector_serde() {
+        let v = Vector::new(1.23, 4.56);
+        let serialized = serde_json::to_string(&v).unwrap();
+        let deserialized: Vector = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(v, deserialized); // f64 can be compared directly if not NaN
+    }
+
+    // --- Point<f64> Tests ---
+    #[test]
+    fn point_f64_new_default_constants() {
+        let p = Point::<f64>::new(1.5, 2.5);
+        assert_eq!(p.x, 1.5);
+        assert_eq!(p.y, 2.5);
+
+        let p_default: Point<f64> = Default::default();
+        assert_eq!(p_default, Point::new(0.0, 0.0));
+        assert_eq!(Point::<f64>::ZERO_F64, Point::new(0.0,0.0));
+    }
+
+    #[test]
+    fn point_f64_ops_with_vector() {
+        let p1 = Point::<f64>::new(1.0, 2.0);
+        let v = Vector::new(0.5, 1.5);
+
+        let p2 = p1 + v; // Add<Vector>
+        assert_eq!(p2.x, 1.5);
+        assert_eq!(p2.y, 3.5);
+
+        let p3 = p2 - v; // Sub<Vector>
+        assert_eq!(p3.x, 1.0);
+        assert_eq!(p3.y, 2.0);
+        assert_eq!(p3, p1);
+    }
+
+    #[test]
+    fn point_f64_sub_point() {
+        let p1 = Point::<f64>::new(5.0, 8.0);
+        let p2 = Point::<f64>::new(2.0, 3.0);
+        let v = p1.sub_point(p2); // Changed from p1 - p2
+        assert!(approx_eq_vector(v, Vector::new(3.0, 5.0)));
+    }
+
+    #[test]
+    fn point_f64_serde() {
+        let p = Point::<f64>::new(1.23, 4.56);
+        let serialized = serde_json::to_string(&p).unwrap();
+        let deserialized: Point<f64> = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(p, deserialized);
+    }
+
+    // --- Size<f64> Tests ---
+    #[test]
+    fn size_f64_new_default_constants() {
+        let s = Size::<f64>::new(10.5, 20.5);
+        assert_eq!(s.width, 10.5);
+        assert_eq!(s.height, 20.5);
+
+        let s_default: Size<f64> = Default::default();
+        assert_eq!(s_default, Size::new(0.0, 0.0));
+        assert_eq!(Size::<f64>::ZERO_F64, Size::new(0.0,0.0));
+    }
+
+    #[test]
+    fn size_f64_scale() {
+        let s = Size::<f64>::new(10.0, 20.0);
+        let scaled_s = s.scale(1.5);
+        assert_eq!(scaled_s.width, 15.0);
+        assert_eq!(scaled_s.height, 30.0);
+    }
+
+    #[test]
+    fn size_f64_serde() {
+        let s = Size::<f64>::new(1.23, 4.56);
+        let serialized = serde_json::to_string(&s).unwrap();
+        let deserialized: Size<f64> = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(s, deserialized);
+    }
+
+    // --- Rect<f64> Tests ---
+    #[test]
+    fn rect_f64_new_default_constants() {
+        let r = Rect::<f64>::from_coords(1.0, 2.0, 3.0, 4.0);
+        assert_eq!(r.x(), 1.0);
+        assert_eq!(r.y(), 2.0);
+        assert_eq!(r.width(), 3.0);
+        assert_eq!(r.height(), 4.0);
+
+        let r_default: Rect<f64> = Default::default();
+        assert_eq!(r_default, Rect::from_coords(0.0, 0.0, 0.0, 0.0));
+        assert_eq!(Rect::<f64>::ZERO_F64, Rect::from_coords(0.0,0.0,0.0,0.0));
+    }
+
+    #[test]
+    fn rect_f64_contains_point() {
+        let r = Rect::<f64>::from_coords(10.0, 20.0, 30.0, 40.0); // x: [10, 40), y: [20, 60)
+        assert!(r.contains_point(&Point::new(10.0, 20.0)));
+        assert!(r.contains_point(&Point::new(39.999, 59.999)));
+        assert!(!r.contains_point(&Point::new(9.999, 20.0)));
+        assert!(!r.contains_point(&Point::new(10.0, 19.999)));
+        assert!(!r.contains_point(&Point::new(40.0, 20.0))); // right edge is exclusive
+        assert!(!r.contains_point(&Point::new(10.0, 60.0))); // bottom edge is exclusive
+    }
+
+    #[test]
+    fn rect_f64_scaled() {
+        let r = Rect::<f64>::from_coords(10.0, 20.0, 30.0, 40.0);
+        let scaled_r = r.scaled(1.5, 0.5);
+        assert_eq!(scaled_r.x(), 10.0); // Origin doesn't change
+        assert_eq!(scaled_r.y(), 20.0);
+        assert_eq!(scaled_r.width(), 30.0 * 1.5);
+        assert_eq!(scaled_r.height(), 40.0 * 0.5);
+    }
+
+    #[test]
+    fn rect_f64_serde() {
+        let r = Rect::<f64>::from_coords(1.1, 2.2, 3.3, 4.4);
+        let serialized = serde_json::to_string(&r).unwrap();
+        let deserialized: Rect<f64> = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(r, deserialized);
+    }
+
+    #[test]
+    fn vector_normalize_edge_cases() {
+        let v_eps = Vector::new(EPSILON / 2.0, 0.0);
+        assert!(v_eps.normalize().is_some()); // Should still normalize if very small but non-zero
+
+        let v_large = Vector::new(1e100, 1e100);
+        let norm_large = v_large.normalize();
+        assert!(norm_large.is_some());
+        assert!((norm_large.unwrap().magnitude() - 1.0).abs() < EPSILON);
+
+        // Test with components that might cause issues with sqrt if not handled well (though f64 is robust)
+        let v_small_comp = Vector::new(1e-200, 1e-200);
+        let norm_small_comp = v_small_comp.normalize();
+        assert!(norm_small_comp.is_some());
+        assert!((norm_small_comp.unwrap().magnitude() - 1.0).abs() < EPSILON);
+    }
+
+    #[test]
+    fn point_f64_distance() {
+        let p1 = Point::<f64>::new(1.0, 1.0);
+        let p2 = Point::<f64>::new(4.0, 5.0); // dx=3, dy=4
+        assert_eq!(p1.distance_squared(&p2), 25.0);
+        assert_eq!(p1.distance(&p2), 5.0);
     }
 }
