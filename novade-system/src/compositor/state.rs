@@ -32,6 +32,8 @@ use smithay::{
 };
 use tracing::{debug, error, info, warn}; // Added debug
 use wayland_server::backend::ClientData;
+use crate::compositor::render::gl::OpenGLRenderer; // Added for OpenGLRenderer
+// use crate::compositor::render::renderer::RenderError; // Might be needed for error mapping if not just using .expect()
 
 // Imports from existing code that might be needed by new structs or were missing contextually
 use smithay::reexports::wayland_server::protocol::wl_shm::Format;
@@ -53,7 +55,8 @@ pub struct NovaDEDomainServices;
 /// Holds backend-specific data, primarily the renderer.
 pub struct BackendData {
     /// The graphics renderer instance (e.g., GLES2).
-    pub renderer: Gles2Renderer,
+    // pub renderer: Gles2Renderer, // Old
+    pub renderer: OpenGLRenderer, // New
 }
 
 /// Central state for the NovaDE Wayland compositor.
@@ -137,8 +140,15 @@ impl DesktopState {
         // Initialize BackendData with Gles2Renderer
         // This might panic if GLES2 context is not available.
         // The issue implies to proceed with expect for now.
-        let renderer = Gles2Renderer::new().expect("Failed to create GLES2 renderer");
-        let backend_data = Arc::new(Mutex::new(BackendData { renderer }));
+        // let renderer = Gles2Renderer::new().expect("Failed to create GLES2 renderer"); // Old
+
+        // Initialize OpenGLRenderer
+        let opengl_renderer = OpenGLRenderer::new(display_handle)
+            .expect("Failed to create OpenGLRenderer");
+        info!("OpenGLRenderer initialized successfully for DesktopState.");
+
+        let backend_data = Arc::new(Mutex::new(BackendData { renderer: opengl_renderer }));
+
 
         info!("NovaDE DesktopState initialized successfully");
 
@@ -292,11 +302,16 @@ use std::{cell::RefCell, collections::HashMap, time::SystemTime, sync::{Arc, Mut
 use smithay::wayland::compositor as smithay_compositor;
 use tracing::{debug_span, error, info_span, trace, warn};
 
-use crate::compositor::render::gl::{init_gl_renderer, GlInitError};
+use crate::compositor::render::gl::{init_gl_renderer, GlInitError}; // TODO: NovaDE-Refactor - init_gl_renderer is superseded by OpenGLRenderer::new
 
 // TODO: Define these traits properly in a new renderer module (e.g., src/renderer/mod.rs)
 // For now, these are conceptual placeholders.
 
+// TODO: NovaDE-Refactor - The following traits (RenderableTexture, FrameRenderer) and the RenderElement enum
+// TODO: NovaDE-Refactor - are part of an older design. They need to be reconciled with the new
+// TODO: NovaDE-Refactor - CompositorRenderer, RenderableTexture (new version), and RenderElement (new version)
+// TODO: NovaDE-Refactor - defined in src/compositor/render/renderer.rs.
+// TODO: NovaDE-Refactor - NovadeCompositorState also uses these and needs a major review/refactor.
 // TODO NovaDE-Refactor: The following code, including NovadeCompositorState, RenderableTexture,
 // FrameRenderer, and related components, was part of an earlier iteration.
 // With the introduction of DesktopState as the primary compositor state manager,
@@ -305,7 +320,7 @@ use crate::compositor::render::gl::{init_gl_renderer, GlInitError};
 // For now, it is preserved to avoid breaking other parts of the system that might still depend on it.
 /// Represents a texture that can be rendered.
 /// This trait would be implemented by backend-specific texture types (e.g., WgpuTexture, GlesTextureWrapper).
-pub trait RenderableTexture: std::fmt::Debug + Send + Sync {
+pub trait RenderableTexture: std::fmt::Debug + Send + Sync { // TODO: NovaDE-Refactor - This is the OLD RenderableTexture trait
     // fn id(&self) -> TextureId; // Example method
     // fn size(&self) -> Size<i32, Physical>; // Example method
 }
@@ -490,13 +505,17 @@ impl NovadeCompositorState {
     ) -> Result<Self, GlInitError> {
         info!("Beginne EGL- und Gles2Renderer-Initialisierung für NovadeCompositorState...");
 
+        // TODO: NovaDE-Refactor - The following EGL and Gles2Renderer initialization for NovadeCompositorState
+        // TODO: NovaDE-Refactor - needs to be replaced by using OpenGLRenderer::new or a similar mechanism
+        // TODO: NovaDE-Refactor - if NovadeCompositorState is to be kept and modernized.
+        // TODO: NovaDE-Refactor - init_gl_renderer itself is also part of the older GL setup.
         let egl = Egl::new().map_err(|egl_err| {
             error!("EGL-Initialisierung fehlgeschlagen: {}", egl_err);
             GlInitError::from(egl_err) // Relies on From<smithay::backend::egl::Error> for GlInitError
         })?;
         info!("EGL erfolgreich initialisiert.");
 
-        let gl_renderer = init_gl_renderer(egl).map_err(|render_err| {
+        let gl_renderer = init_gl_renderer(egl).map_err(|render_err| { // TODO: NovaDE-Refactor use OpenGLRenderer
             error!("Gles2Renderer-Initialisierung fehlgeschlagen: {}", render_err);
             // init_gl_renderer already returns GlInitError, so this assignment is direct.
             render_err
