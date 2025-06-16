@@ -1,3 +1,270 @@
+use std::{
+    ffi::OsString,
+    sync::{Arc, Mutex},
+};
+
+use smithay::{
+    backend::renderer::{
+        gles2::{Gles2Renderer, Gles2Error},
+    },
+    desktop::{Space, Window, PopupManager},
+    input::{Seat, SeatState, pointer::{CursorImageStatus, GrabStartData}, keyboard::{ModifiersState, XkbConfig}, InputHandler, InputState as InputStateSmithay}, // Added GrabStartData, InputHandler
+    output::{Output, OutputHandler, OutputState as OutputStateSmithay}, // Added OutputHandler
+    reexports::{
+        calloop::{EventLoop, LoopHandle},
+        wayland_server::{
+            backend::{ClientId, DisconnectReason}, // Added ClientId, DisconnectReason
+            protocol::{wl_output, wl_surface::WlSurface},
+            Display, DisplayHandle,
+        },
+    },
+    utils::{Clock, Logical, Point, Rectangle, SERIAL_COUNTER},
+    wayland::{
+        compositor::{CompositorHandler, CompositorState, CompositorClientState}, // Added CompositorHandler
+        data_device::{DataDeviceHandler, DataDeviceState}, // Added DataDeviceHandler
+        output::OutputManagerState, // This is here, but DesktopState uses OutputStateSmithay
+        shell::xdg::{self as smithay_xdg_shell, XdgShellHandler, XdgShellState, XdgSurface}, // Added smithay_xdg_shell alias, XdgShellHandler, XdgSurface
+        shm::{ShmHandler, ShmState}, // Added ShmHandler
+        socket::ListeningSocketSource,
+    },
+    delegate_xdg_shell::{self, PopupManagerHandler}, // Added delegate_xdg_shell, PopupManagerHandler
+    xdg::popup::Popup, // Added Popup
+};
+use tracing::{debug, error, info, warn}; // Added debug
+use wayland_server::backend::ClientData;
+
+// Imports from existing code that might be needed by new structs or were missing contextually
+use smithay::reexports::wayland_server::protocol::wl_shm::Format;
+use smithay::backend::renderer::{Bind, DebugFlags, Frame, Offscreen, Renderer, Texture, Unbind};
+use smithay::backend::renderer::element::{texture::TextureRenderBuffer, Element, Id, RenderElementState};
+use smithay::backend::renderer::glow::GlowFrameRenderError;
+
+
+// Dummy structs for NovaDEConfiguration and NovaDEDomainServices
+
+/// Placeholder for NovaDE specific system configurations.
+/// TODO: Define actual configuration fields and loading mechanisms.
+pub struct NovaDEConfiguration;
+
+/// Placeholder for NovaDE domain-specific services.
+/// TODO: Define actual services like application management, etc.
+pub struct NovaDEDomainServices;
+
+/// Holds backend-specific data, primarily the renderer.
+pub struct BackendData {
+    /// The graphics renderer instance (e.g., GLES2).
+    pub renderer: Gles2Renderer,
+}
+
+/// Central state for the NovaDE Wayland compositor.
+///
+/// This struct encapsulates all necessary Smithay states for Wayland protocol handling,
+/// input/output management, window management (via `Space`), and rendering backend data.
+/// It also includes placeholders for NovaDE-specific configurations and domain services.
+pub struct DesktopState {
+    /// Handle to the Wayland display, used to interact with the display server.
+    pub display: Display<Self>,
+    /// Handle to the Calloop event loop, used for managing event sources.
+    pub event_loop_handle: calloop::Handle<'static, Self>,
+    /// Manages Wayland compositor globals and surface creation.
+    pub compositor_state: CompositorState,
+    /// Manages XDG shell specific logic, including popups and window management events.
+    pub xdg_shell_state: XdgShellState,
+    /// Manages shared memory (SHM) buffers for client surfaces.
+    pub shm_state: ShmState,
+    /// Manages data transfer mechanisms like copy-paste and drag-and-drop.
+    pub data_device_state: DataDeviceState,
+    /// Manages Wayland outputs (monitors/displays).
+    pub output_state: OutputStateSmithay, // Corrected type
+    /// Manages input devices and their state.
+    pub input_state: InputStateSmithay, // Corrected type
+    /// Represents a user's seat, grouping input devices (keyboard, pointer).
+    pub seat: Seat<Self>,
+    /// Manages XDG popups and their positioning relative to parent surfaces.
+    pub popups: PopupManager,
+    /// Backend-specific data, like the renderer, wrapped in Arc<Mutex> for shared access.
+    pub backend_data: Arc<Mutex<BackendData>>,
+    /// Manages the layout and stacking of windows (surfaces) in the compositor.
+    pub space: Space<Window>,
+    // TODO: Integrate NovaDE specific configuration.
+    // /// NovaDE specific configurations.
+    // pub config: NovaDEConfiguration,
+    // TODO: Integrate NovaDE domain services.
+    // /// NovaDE specific domain services.
+    // pub domain_services: NovaDEDomainServices,
+}
+
+impl DesktopState {
+    /// Creates and initializes a new `DesktopState`.
+    ///
+    /// This method sets up all the necessary Smithay protocol states,
+    /// initializes input devices (seat with pointer and keyboard),
+    /// prepares the rendering backend data (GLES2 renderer), and
+    /// configures other desktop components like `Space` and `PopupManager`.
+    ///
+    /// # Parameters
+    /// - `event_loop`: A mutable reference to the Calloop event loop.
+    ///                 The event loop handle will be stored in `DesktopState`.
+    /// - `display`: The Wayland `Display` object, which will be stored and managed by `DesktopState`.
+    ///
+    /// # Panics
+    /// This method might panic if `Gles2Renderer::new()` fails, for example,
+    /// if no suitable GLES2 context can be created. This is indicated by `.expect()`.
+    /// It also panics if `seat.add_keyboard()` fails.
+    pub fn new(event_loop: &mut EventLoop<'static, DesktopState>, mut display: Display<Self>) -> Self {
+        info!("Initializing NovaDE DesktopState");
+
+        let display_handle = display.handle();
+
+        let compositor_state = CompositorState::new::<Self>(&display_handle);
+        let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
+        // Initialize SHM with default formats by passing an empty vec
+        let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
+        let data_device_state = DataDeviceState::new::<Self>(&display_handle);
+        let output_state = OutputStateSmithay::new();
+        let input_state = InputStateSmithay::new();
+
+        let seat_name = "seat0";
+        let mut seat = Seat::new(&display_handle, seat_name.to_string());
+
+        seat.add_pointer();
+        seat.add_keyboard(XkbConfig::default(), 200, 25)
+            .expect("Failed to create keyboard");
+
+        let popups = PopupManager::new();
+        let space = Space::new(info_span!("space"));
+
+        // Initialize BackendData with Gles2Renderer
+        // This might panic if GLES2 context is not available.
+        // The issue implies to proceed with expect for now.
+        let renderer = Gles2Renderer::new().expect("Failed to create GLES2 renderer");
+        let backend_data = Arc::new(Mutex::new(BackendData { renderer }));
+
+        info!("NovaDE DesktopState initialized successfully");
+
+        Self {
+            display,
+            event_loop_handle: event_loop.handle(),
+            compositor_state,
+            xdg_shell_state,
+            shm_state,
+            data_device_state,
+            output_state,
+            input_state,
+            seat,
+            popups,
+            backend_data,
+            space,
+            // config: NovaDEConfiguration, // Placeholder
+            // domain_services: NovaDEDomainServices, // Placeholder
+        }
+    }
+}
+
+/// Handles Wayland compositor protocol events and manages `CompositorState`.
+impl CompositorHandler for DesktopState {
+    fn compositor_state(&mut self) -> &mut CompositorState {
+        &mut self.compositor_state
+    }
+
+    /// Called when a Wayland client disconnects.
+    fn client_disconnected(&mut self, client: ClientId, reason: DisconnectReason) {
+        warn!(?client, ?reason, "Wayland client disconnected.");
+        // TODO: Add cleanup logic for client resources.
+    }
+}
+
+/// Handles Wayland data device (clipboard, drag-and-drop) events and manages `DataDeviceState`.
+impl DataDeviceHandler for DesktopState {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.data_device_state
+    }
+}
+
+/// Handles Wayland shared memory (SHM) events and manages `ShmState`.
+impl ShmHandler for DesktopState {
+    fn shm_state(&self) -> &ShmState {
+        &self.shm_state
+    }
+}
+
+/// Handles XDG Shell (window management) protocol events and manages `XdgShellState`.
+impl smithay_xdg_shell::XdgShellHandler for DesktopState {
+    fn xdg_shell_state(&self) -> &smithay_xdg_shell::XdgShellState {
+        &self.xdg_shell_state
+    }
+
+    /// Called when a new XDG surface (e.g., a window) is created by a client.
+    fn new_xdg_surface(&mut self, surface: smithay_xdg_shell::XdgSurface) {
+        info!("Neues XDG-Surface erstellt: {:?}", surface.wl_surface());
+        // TODO: Add logic to manage the new XDG surface (e.g., add to Space, focus management).
+    }
+
+    /// Called when a client requests an icon for an XDG surface.
+    fn xdg_shell_icon(&self) -> Option<WlSurface> {
+        None // Placeholder: Implement if icon support is desired.
+    }
+}
+
+/// Handles output (display/monitor) related events and manages `OutputStateSmithay`.
+impl OutputHandler for DesktopState {
+    fn output_state(&mut self) -> &mut OutputStateSmithay {
+        &mut self.output_state
+    }
+
+    /// Called when a new output is added to the compositor.
+    fn new_output(&mut self, output: Output) {
+        info!("Neuer Output hinzugefügt: {:?}", output.name());
+        // TODO: Configure and manage the new output (e.g., add to Space, set mode).
+    }
+
+    /// Called when an output is removed from the compositor.
+    fn output_destroyed(&mut self, output: Output) {
+        info!("Output entfernt: {:?}", output.name());
+        // TODO: Cleanup resources associated with the removed output.
+    }
+}
+
+/// Handles input device related events and manages `InputStateSmithay` and `Seat`s.
+impl InputHandler for DesktopState {
+    fn input_state(&mut self) -> &mut InputStateSmithay {
+        &mut self.input_state
+    }
+
+    /// Returns the name of the primary seat.
+    fn seat_name(&self) -> String {
+        self.seat.name().to_string()
+    }
+
+    /// Called when a new seat is added (though typically there's one primary seat).
+    fn new_seat(&mut self, seat: Seat<Self>) {
+        info!("Neuer Seat hinzugefügt: {}", seat.name());
+    }
+
+    /// Called when a seat is removed.
+    fn seat_removed(&mut self, seat: Seat<Self>) {
+        info!("Seat entfernt: {}", seat.name());
+    }
+}
+
+/// Handles events related to XDG popups, part of the XDG Shell delegation.
+impl PopupManagerHandler for DesktopState {
+    /// Called when a grab is requested for an XDG popup.
+    fn grab_xdg_popup(&mut self, popup: &Popup) -> Option<GrabStartData> {
+        debug!("XDG Popup Grab angefordert: {:?}", popup.wl_surface());
+        None // Default behavior: No special grab handling for now.
+    }
+}
+
+// Smithay delegate macros
+smithay::delegate_compositor!(DesktopState);
+smithay::delegate_data_device!(DesktopState);
+smithay::delegate_shm!(DesktopState);
+smithay::delegate_xdg_shell!(DesktopState); // Handles XdgShellHandler and PopupManagerHandler
+smithay::delegate_output!(DesktopState);
+smithay::delegate_input!(DesktopState);
+
+// Existing code starts here
 use smithay::{
     desktop::{Space, Window},
     reexports::calloop::LoopHandle,
@@ -26,6 +293,12 @@ use tracing::{debug_span, error, info_span, trace, warn};
 // TODO: Define these traits properly in a new renderer module (e.g., src/renderer/mod.rs)
 // For now, these are conceptual placeholders.
 
+// TODO NovaDE-Refactor: The following code, including NovadeCompositorState, RenderableTexture,
+// FrameRenderer, and related components, was part of an earlier iteration.
+// With the introduction of DesktopState as the primary compositor state manager,
+// this older code will need to be reviewed, refactored to integrate with DesktopState,
+// or deprecated if its functionality is fully superseded.
+// For now, it is preserved to avoid breaking other parts of the system that might still depend on it.
 /// Represents a texture that can be rendered.
 /// This trait would be implemented by backend-specific texture types (e.g., WgpuTexture, GlesTextureWrapper).
 pub trait RenderableTexture: std::fmt::Debug + Send + Sync {
