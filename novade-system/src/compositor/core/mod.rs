@@ -6,5 +6,5 @@ pub mod handlers; // Ensure handlers module is declared
 
 // Potentially re-export specific structs or traits if they form the public API of the core module
 pub use self::state::{DesktopState, ClientCompositorData};
-pub use self::errors::CompositorCoreError;
+pub use self::errors::CompositorError;
 // Globals and Handlers are mostly for internal wiring, so direct re-export might not be needed.

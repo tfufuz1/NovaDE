@@ -3,6 +3,7 @@ pub mod core;
 pub mod cursor_manager; // Add this line
 pub mod display_loop;
 pub mod renderer_interface;
+pub mod render;
 pub mod renderers; // Ensure this line is present and public
 pub mod shm;
 pub mod surface_management;

@@ -2,10 +2,15 @@ use glow::{Context, HasContext, Texture};
 use khronos_egl as egl; // For EGLImageKHR and related types
 use libloading; // For egl::Dynamic
 use smithay::backend::renderer::utils::Fourcc;
-use std::rc::Rc;
+use std::sync::Arc; // Changed from Rc to Arc
 use uuid::Uuid;
 use std::any::Any;
 
+// Import for the new RenderableTexture trait
+use crate::compositor::render::renderer::RenderableTexture;
+use smithay::utils::{Physical, Size}; // For new RenderableTexture trait
+
+// Old abstraction, to be removed eventually
 use crate::compositor::renderer_interface::abstraction::{
     RenderableTexture as AbstractionRenderableTexture, RendererError as AbstractionRendererError,
 };
@@ -16,40 +21,41 @@ use crate::compositor::renderer_interface::abstraction::{
 /// For textures imported from DMABUFs via EGLImages, it also stores the necessary
 /// EGL handles (`EGLImageKHR`, EGL instance, EGL display) to ensure the `EGLImage`
 /// is properly destroyed when the `Gles2Texture` is dropped.
-#[derive(Debug)]
+// Clone is needed for CompositorRenderer::Texture associated type
+#[derive(Debug, Clone)]
 pub struct Gles2Texture {
-    gl: Rc<Context>,
-    texture_id: Texture,
-    internal_id: Uuid,
+    gl: Arc<Context>, // Changed from Rc to Arc
+    texture_id: Texture, // Texture itself is Copy
+    internal_id: Uuid,   // Uuid is Clone
     width: u32,
     height: u32,
     format: Option<Fourcc>,
     /// True if this texture is bound to `GL_TEXTURE_EXTERNAL_OES`, typically for EGLImage imports.
     /// False if it's a standard `GL_TEXTURE_2D`.
-    is_external_oes: bool,
+    is_external_oes: bool, // bool is Clone
 
     /// The EGLImage handle if this texture was created from a DMABUF via `eglCreateImageKHR`.
     /// `Some` for DMABUF-backed textures, `None` for others (e.g., SHM).
-    egl_image: Option<egl::types::EGLImageKHR>,
+    egl_image: Option<egl::types::EGLImageKHR>, // EGLImageKHR is Copy
     /// A reference to the EGL instance, required to destroy the `egl_image`.
     /// Only `Some` if `egl_image` is `Some`.
-    egl_instance: Option<Rc<egl::Instance<egl::Dynamic<libloading::Library>>>>,
+    egl_instance: Option<Arc<egl::Instance<egl::Dynamic<libloading::Library>>>>, // Changed from Rc to Arc
     /// The EGL display handle, required to destroy the `egl_image`.
     /// Only `Some` if `egl_image` is `Some`.
-    egl_display: Option<egl::Display>,
+    egl_display: Option<egl::Display>, // egl::Display is Copy
 }
 
 impl Gles2Texture {
     // Constructor for standard GL_TEXTURE_2D textures (e.g., from SHM)
     pub fn new(
-        gl: Rc<Context>,
+        gl: Arc<Context>, // Changed from Rc to Arc
         texture_id: Texture,
         width: u32,
         height: u32,
         format: Option<Fourcc>,
     ) -> Self {
         Self {
-            gl,
+            gl, // Arc assignment
             texture_id,
             internal_id: Uuid::new_v4(),
             width,
@@ -78,18 +84,18 @@ impl Gles2Texture {
     /// - `is_external_oes`: Must be `true` for textures associated with EGLImages,
     ///   as they are typically bound to `GL_TEXTURE_EXTERNAL_OES`.
     pub(super) fn new_from_egl_image(
-        gl: Rc<Context>,
+        gl: Arc<Context>, // Changed from Rc to Arc
         texture_id: Texture,
         width: u32,
         height: u32,
         format: Option<Fourcc>,
         egl_image: egl::types::EGLImageKHR,
-        egl_instance: Rc<egl::Instance<egl::Dynamic<libloading::Library>>>,
+        egl_instance: Arc<egl::Instance<egl::Dynamic<libloading::Library>>>, // Changed from Rc to Arc
         egl_display: egl::Display,
         is_external_oes: bool,
     ) -> Self {
         Self {
-            gl,
+            gl, // Arc assignment
             texture_id,
             internal_id: Uuid::new_v4(),
             width,
@@ -155,6 +161,23 @@ impl AbstractionRenderableTexture for Gles2Texture {
         self
     }
 }
+
+// Implementation for the new RenderableTexture trait
+impl RenderableTexture for Gles2Texture {
+    fn dimensions(&self) -> Size<i32, Physical> {
+        Size::from((self.width as i32, self.height as i32))
+    }
+
+    // Optional: Implement format if Gles2Texture stores it and it's needed by RenderableTexture
+    // fn format(&self) -> Option<Fourcc> {
+    //     self.format // Direct field access
+    // }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 
 /// Handles the cleanup of the GLES texture.
 ///
