@@ -52,13 +52,83 @@ pub enum BufferFormat {
 
 // Represents raw buffer data from a client
 // This will likely need to be more sophisticated in a real scenario.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DmabufPlaneFormat { // Simplified, real one is more complex
+    R8,
+    Rg88,
+    Rgb888, // Placeholder, not a typical DRM format
+    Argb8888,
+    Xrgb8888,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DmabufDescriptor {
+    pub fd: i32, // File descriptor for the DMABUF
+    pub width: u32, // Width of this plane
+    pub height: u32, // Height of this plane
+    pub plane_index: u32, // For multi-planar formats
+    pub offset: u32,    // Offset into the FD for this plane
+    pub stride: u32,    // Stride for this plane
+    pub format: DmabufPlaneFormat, // Format of this plane
+    pub modifier: u64,  // DRM format modifier
+}
+
+pub enum BufferContent<'a> {
+    Shm {
+        id: u64,
+        data: &'a [u8],
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: BufferFormat, // Existing enum (Argb8888, Xrgb8888)
+    },
+    Dmabuf {
+        id: u64, // To identify the buffer object
+        descriptors: [Option<DmabufDescriptor>; 4], // Max 4 planes
+        width: u32, // Overall image width
+        height: u32, // Overall image height
+    },
+}
+
+// Debug implementation for BufferContent manually, as #[derive(Debug)] doesn't work well with &'a [u8]
+impl<'a> std::fmt::Debug for BufferContent<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BufferContent::Shm { id, data: _, width, height, stride, format } => f
+                .debug_struct("Shm")
+                .field("id", id)
+                .field("width", width)
+                .field("height", height)
+                .field("stride", stride)
+                .field("format", format)
+                .field("data_len", &self.data_len_for_debug()) // Avoid printing entire data slice
+                .finish(),
+            BufferContent::Dmabuf { id, descriptors, width, height } => f
+                .debug_struct("Dmabuf")
+                .field("id", id)
+                .field("descriptors", descriptors)
+                .field("width", width)
+                .field("height", height)
+                .finish(),
+        }
+    }
+}
+
+impl<'a> BufferContent<'a> {
+    // Helper for Debug impl
+    fn data_len_for_debug(&self) -> usize {
+        if let BufferContent::Shm { data, .. } = self {
+            data.len()
+        } else {
+            0
+        }
+    }
+}
+
+
 pub struct ClientBuffer<'a> {
-    pub id: u64, // A unique ID for this buffer content
-    pub data: &'a [u8],
-    pub width: u32,
-    pub height: u32,
-    pub stride: u32,
-    pub format: BufferFormat,
+    pub content: BufferContent<'a>,
 }
 
 pub trait RenderableTexture: Send + Sync + std::fmt::Debug + std::any::Any {

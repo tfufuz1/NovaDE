@@ -3,19 +3,30 @@
 
 use crate::renderer_interface::{
     RendererInterface, ClientBuffer, BufferFormat as RendererBufferFormat, RenderableTexture,
-    RenderElement, TextureRenderParams, // Added RenderElement, TextureRenderParams
+    RenderElement, TextureRenderParams, BufferContent, DmabufDescriptor, DmabufPlaneFormat, // Added DMABUF related types
 };
 use novade_compositor_core::surface::SurfaceId;
 use std::collections::HashMap;
-use super::scene_graph::{SceneGraph, SurfaceAttributes, BufferFormat as SceneGraphBufferFormat, Transform as SceneGraphTransform}; // Added BufferFormat as SceneGraphBufferFormat, Transform as SceneGraphTransform
-use novade_core::types::geometry::{Point2D, Size2D, Rect as NovaRect, Rectangle}; // Ensure these are available, added NovaRect
-use std::sync::Arc; // For Arc<SceneGraphNode>
+use super::scene_graph::{
+    SceneGraph, SurfaceAttributes, BufferFormat as SceneGraphBufferFormat,
+    Transform as SceneGraphTransform, BufferSourceType, // Added BufferSourceType
+};
+use novade_core::types::geometry::{Point2D, Size2D, Rect as NovaRect, Rectangle};
+use std::sync::Arc;
 
 pub struct CompositionEngine<R: RendererInterface> {
     renderer: R,
     scene_graph: SceneGraph,
     active_surfaces: HashMap<SurfaceId, SurfaceAttributes>,
-    surface_textures: HashMap<SurfaceId, Box<dyn RenderableTexture>>, // New field for storing textures
+    // TODO [TextureLRUCacheImpl]: Consider replacing HashMap with an LRU cache
+    // if memory pressure from many active surface textures becomes an issue.
+    // This would involve:
+    // 1. Defining an LRU cache structure (e.g., using a HashMap and a DoublyLinkedList).
+    // 2. Modifying texture access in `composite_frame` to use the LRU cache's get/put methods.
+    // 3. Evicted textures would need to be released by the renderer (e.g., `renderer.release_surface_texture(surface_id)` if such a method is added to FrameRenderer).
+    // 4. Re-uploading would occur if a surface becomes visible again after its texture was evicted.
+    // ANCHOR [TextureManagementOutlines]
+    surface_textures: HashMap<SurfaceId, Box<dyn RenderableTexture>>,
 }
 
 impl<R: RendererInterface> CompositionEngine<R> {
@@ -91,17 +102,69 @@ impl<R: RendererInterface> CompositionEngine<R> {
                     }
 
                     let dummy_data_size = (stride * buffer_height) as usize;
-                    let dummy_buffer_data: Vec<u8> = vec![0; dummy_data_size]; // Create a zeroed buffer
+                    let mut dummy_buffer_data: Vec<u8> = vec![0; dummy_data_size]; // Create a zeroed buffer
 
-                    let client_buffer = ClientBuffer {
-                        id: buffer_id,
-                        data: &dummy_buffer_data,
-                        width: buffer_width,
-                        height: buffer_height,
-                        stride,
-                        format: renderer_buffer_format,
+                    let client_buffer_content = match node.attributes.buffer_type {
+                        Some(BufferSourceType::Dmabuf) => {
+                            // ANCHOR [DmabufSimulation]
+                            // Simulate DmabufDescriptor population
+                            let dummy_descriptors: [Option<DmabufDescriptor>; 4] = [
+                                Some(DmabufDescriptor {
+                                    fd: -1, // Placeholder FD
+                                    width: buffer_width, // Assuming single plane matches overall dimensions
+                                    height: buffer_height,
+                                    plane_index: 0,
+                                    offset: 0,
+                                    stride, // Using overall stride for the first plane
+                                    format: DmabufPlaneFormat::Argb8888, // Placeholder
+                                    modifier: 0, // Placeholder (e.g., DRM_FORMAT_MOD_LINEAR)
+                                }),
+                                None, None, None,
+                            ];
+                            BufferContent::Dmabuf {
+                                id: buffer_id,
+                                descriptors: dummy_descriptors,
+                                width: buffer_width,
+                                height: buffer_height,
+                            }
+                        }
+                        Some(BufferSourceType::Shm) | None => { // Default to SHM if None
+                            BufferContent::Shm {
+                                id: buffer_id,
+                                data: &dummy_buffer_data,
+                                width: buffer_width,
+                                height: buffer_height,
+                                stride,
+                                format: renderer_buffer_format,
+                            }
+                        }
                     };
 
+                    let client_buffer = ClientBuffer { content: client_buffer_content };
+
+                    // TODO [TextureStreamingImpl]: For very large surfaces, implement texture streaming.
+                    // This would involve:
+                    // 1. `SurfaceAttributes` indicating if a surface buffer is partial or if the full content is too large for direct upload.
+                    // 2. `ClientBuffer` supporting partial updates (e.g., with offset and size for the dirty rect or tile index).
+                    // 3. `FrameRenderer::upload_surface_texture` (or a new method `update_texture_region` or `upload_texture_tile`)
+                    //    would need to handle partial uploads to an existing wgpu::Texture using `queue.write_texture`.
+                    // 4. The compositor would need to manage tile states (e.g., which tiles are loaded/dirty) and request updates
+                    //    for visible tiles only. This is complex and involves significant changes to buffer management,
+                    //    surface commit logic, and rendering logic (potentially UV adjustments for tiles).
+                    // ANCHOR [TextureStreamingOutline]
+
+                    // TODO [TextureCompressionSupport]: Explore support for compressed texture formats.
+                    // This would involve:
+                    // 1. `BufferFormat` enum in `abstraction.rs` to include compressed formats (e.g., BC1, BC3, BC7, ASTC, ETC2).
+                    // 2. `ClientBuffer` carrying data in these compressed formats.
+                    // 3. `NovaWgpuRenderer::upload_surface_texture` detecting these formats and creating
+                    //    `wgpu::Texture`s with the corresponding `wgpu::TextureFormat`.
+                    //    WGPU supports many compressed formats, but this depends on hardware/driver capabilities.
+                    //    The `wgpu::Features::TEXTURE_COMPRESSION_BC`, `TEXTURE_COMPRESSION_ETC2`, `TEXTURE_COMPRESSION_ASTC`
+                    //    flags would need to be checked on the adapter.
+                    // 4. Shaders would sample these compressed textures directly. No decompression on CPU needed.
+                    // 5. Requires clients to provide buffers in compressed formats (e.g., via a Wayland protocol extension).
+                    // ANCHOR [TextureCompressionOutline]
                     match self.renderer.upload_surface_texture(node.surface_id, &client_buffer) {
                         Ok(texture_handle) => {
                             // println!("Successfully uploaded texture for surface {:?}, buffer_id: {}", node.surface_id, buffer_id);
@@ -220,15 +283,17 @@ impl<R: RendererInterface> CompositionEngine<R> {
 mod tests {
     use super::*;
     use crate::renderer_interface::{
-        RendererInterface, RenderableTexture, RendererError, ClientBuffer,
-        BufferFormat as RendererBufferFormatExt, // Renamed to avoid conflict with local enum if any
-        RenderElement as RendererRenderElement, // Renamed to avoid conflict
-        TextureRenderParams as RendererTextureRenderParams, // Renamed
+        RendererInterface, RenderableTexture, RendererError, ClientBuffer, BufferContent as RendererBufferContent,
+        BufferFormat as RendererBufferFormatExt, DmabufDescriptor as RendererDmabufDescriptor,
+        DmabufPlaneFormat as RendererDmabufPlaneFormat,
+        RenderElement as RendererRenderElement,
+        TextureRenderParams as RendererTextureRenderParams,
     };
     use novade_compositor_core::surface::SurfaceId;
     use crate::compositor::scene_graph::{
         Transform as SceneGraphTransform,
-        BufferFormat as SceneGraphBufferFormatExt, // Renamed
+        BufferFormat as SceneGraphBufferFormatExt,
+        BufferSourceType as SceneGraphBufferSourceType, // Import BufferSourceType
     };
     use novade_core::types::geometry::{Point, Size, Rect, Rect as NovaRectExt, Size as NovaSize, Point as NovaPoint};
     use std::cell::RefCell;
@@ -267,9 +332,10 @@ mod tests {
     #[derive(Debug, Clone)]
     struct UploadedTextureInfo {
         surface_id: SurfaceId,
-        buffer_id: u64,
+        buffer_id: u64, // This ID comes from BufferContent's Shm.id or Dmabuf.id
         width: u32,
         height: u32,
+        content_type: String, // "Shm" or "Dmabuf"
     }
 
     #[derive(Debug, Clone)]
@@ -330,7 +396,7 @@ mod tests {
         fn render_frame<'a>(
             &mut self,
             elements: impl IntoIterator<Item = RendererRenderElement<'a>>,
-            _output_geometry: Rectangle, // novade_core::types::geometry::Rect<i32, Physical>
+            _output_geometry: Rectangle,
             _output_scale: f64,
         ) -> Result<(), RendererError> {
             let mut state = self.state.borrow_mut();
@@ -339,7 +405,7 @@ mod tests {
                 if let RendererRenderElement::TextureNode(params) = element {
                      state.rendered_elements.push(RenderElementInfo::TextureNode {
                         texture_id: params.texture.id(),
-                        transform_matrix: params.transform.matrix, // Assuming params.transform is SceneGraphTransform
+                        transform_matrix: params.transform.matrix,
                     });
                 }
             }
@@ -354,15 +420,31 @@ mod tests {
         fn upload_surface_texture(
             &mut self,
             surface_id: SurfaceId,
-            buffer: &ClientBuffer<'_>,
+            buffer: &ClientBuffer<'_>, // Updated to new ClientBuffer structure
         ) -> Result<Box<dyn RenderableTexture>, RendererError> {
-            self.state.borrow_mut().uploaded_textures.push(UploadedTextureInfo {
-                surface_id,
-                buffer_id: buffer.id,
-                width: buffer.width,
-                height: buffer.height,
-            });
-            Ok(Box::new(MockRenderableTexture::new(buffer.width, buffer.height)))
+            let mut state = self.state.borrow_mut();
+            match &buffer.content {
+                RendererBufferContent::Shm { id, width, height, .. } => {
+                    state.uploaded_textures.push(UploadedTextureInfo {
+                        surface_id,
+                        buffer_id: *id,
+                        width: *width,
+                        height: *height,
+                        content_type: "Shm".to_string(),
+                    });
+                    Ok(Box::new(MockRenderableTexture::new(*width, *height)))
+                }
+                RendererBufferContent::Dmabuf { id, width, height, .. } => {
+                    state.uploaded_textures.push(UploadedTextureInfo {
+                        surface_id,
+                        buffer_id: *id,
+                        width: *width,
+                        height: *height,
+                        content_type: "Dmabuf".to_string(),
+                    });
+                    Ok(Box::new(MockRenderableTexture::new(*width, *height)))
+                }
+            }
         }
 
         fn apply_gamma_correction(&mut self, gamma_value: f32) -> Result<(), RendererError> {
@@ -410,6 +492,7 @@ mod tests {
             current_buffer_id: Some(1),
             buffer_format: Some(SceneGraphBufferFormatExt::Argb8888),
             buffer_stride: 100 * 4,
+            buffer_type: Some(SceneGraphBufferSourceType::Shm), // Specify buffer type
         };
         engine.add_surface(surface1_id, attrs1.clone());
 
@@ -425,6 +508,7 @@ mod tests {
             current_buffer_id: Some(2),
             buffer_format: Some(SceneGraphBufferFormatExt::Argb8888),
             buffer_stride: 50 * 4,
+            buffer_type: Some(SceneGraphBufferSourceType::Shm), // Specify buffer type
         };
         engine.add_surface(surface2_id, attrs2.clone());
 
@@ -477,6 +561,7 @@ mod tests {
             current_buffer_id: Some(101),
             buffer_format: Some(SceneGraphBufferFormatExt::Argb8888),
             buffer_stride: 100*4,
+            buffer_type: Some(SceneGraphBufferSourceType::Shm),
         };
         engine.add_surface(surface1_id, attrs1);
 
@@ -492,6 +577,7 @@ mod tests {
             current_buffer_id: Some(102),
             buffer_format: Some(SceneGraphBufferFormatExt::Argb8888),
             buffer_stride: 100*4,
+            buffer_type: Some(SceneGraphBufferSourceType::Shm),
         };
         engine.add_surface(surface2_id, attrs2);
 
@@ -537,6 +623,7 @@ mod tests {
             current_buffer_id: Some(1001),
             buffer_format: Some(SceneGraphBufferFormatExt::Argb8888),
             buffer_stride: 100 * 4,
+            buffer_type: Some(SceneGraphBufferSourceType::Shm),
         };
         engine.add_surface(surface_id, attrs);
 
@@ -568,5 +655,45 @@ mod tests {
         assert_eq!(engine.renderer.gamma_calls_count(), 0);
         assert_eq!(engine.renderer.tone_mapping_calls_count(), 0);
         assert_eq!(engine.renderer.submit_and_present_frame_called_count(), 0);
+    }
+
+    #[test]
+    fn test_dmabuf_surface_flow() {
+        let mock_renderer = MockRenderer::new();
+        let mut engine = CompositionEngine::new(mock_renderer);
+
+        let surface_id = SurfaceId::new(1);
+        let attrs = SurfaceAttributes {
+            position: Point2D::new(0.0, 0.0),
+            size: Size2D::new(128.0, 128.0), // Dimensions for DMABUF
+            transform: SceneGraphTransform::identity(),
+            is_visible: true,
+            z_order: 0,
+            opaque_region: None,
+            parent: None,
+            current_buffer_id: Some(2001), // Unique buffer ID
+            buffer_format: None, // For DMABUF, format might be implicit or per-plane
+            buffer_stride: 128 * 4, // Example stride, might be per-plane for real DMABUF
+            buffer_type: Some(SceneGraphBufferSourceType::Dmabuf), // Specify DMABUF
+        };
+        engine.add_surface(surface_id, attrs);
+
+        engine.composite_frame();
+
+        assert_eq!(engine.renderer.uploaded_textures_count(), 1);
+        if let Some(info) = engine.renderer.get_uploaded_texture_info(0) {
+            assert_eq!(info.surface_id, surface_id);
+            assert_eq!(info.buffer_id, 2001);
+            assert_eq!(info.content_type, "Dmabuf"); // Verify it was processed as DMABUF
+            assert_eq!(info.width, 128);
+            assert_eq!(info.height, 128);
+        } else {
+            panic!("No uploaded texture info found for DMABUF surface.");
+        }
+        assert_eq!(engine.renderer.render_frame_count(), 1);
+        assert_eq!(engine.renderer.rendered_elements_count(), 1); // Still one element rendered
+        assert_eq!(engine.renderer.gamma_calls_count(), 1);
+        assert_eq!(engine.renderer.tone_mapping_calls_count(), 1);
+        assert_eq!(engine.renderer.submit_and_present_frame_called_count(), 1);
     }
 }

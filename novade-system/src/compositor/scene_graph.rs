@@ -218,6 +218,12 @@ pub enum BufferFormat {
     // ... other common formats
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BufferSourceType {
+    Shm,
+    Dmabuf,
+}
+
 // Attributes of a surface relevant for scene graph construction
 #[derive(Debug, Clone)]
 pub struct SurfaceAttributes {
@@ -230,8 +236,9 @@ pub struct SurfaceAttributes {
     pub parent: Option<SurfaceId>, // New field
     // New fields for buffer information:
     pub current_buffer_id: Option<u64>, // ID to track buffer changes
-    pub buffer_format: Option<BufferFormat>, // Format of the current buffer
-    pub buffer_stride: u32, // Stride of the current buffer (default to 0 if no buffer)
+    pub buffer_format: Option<BufferFormat>, // Format of the current buffer (primarily for SHM)
+    pub buffer_stride: u32, // Stride of the current buffer (primarily for SHM, default to 0 if no buffer)
+    pub buffer_type: Option<BufferSourceType>, // Indicates if the buffer is SHM or DMABUF
 }
 
 pub struct SceneGraph {
@@ -454,9 +461,10 @@ mod tests {
                 z_order: z,
                 opaque_region: Some(Rectangle::from_coords(0.0,0.0,w,h)),
                 parent: None,
-                current_buffer_id: None, // Default for test node
-                buffer_format: None,     // Default for test node
-                buffer_stride: 0,        // Default for test node
+                current_buffer_id: None,
+                buffer_format: None,
+                buffer_stride: 0,
+                buffer_type: Some(BufferSourceType::Shm), // Default for test node
             },
             // For spatial index tests, clipped_rect is the most important part.
             // We simulate that it has been correctly calculated by prior steps.
@@ -643,13 +651,13 @@ mod tests {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1, // Lower Z
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-            current_buffer_id: Some(101), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
+            current_buffer_id: Some(101), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4, buffer_type: Some(BufferSourceType::Shm),
         });
         surface_data_map.insert(surf2_id, SurfaceAttributes {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0), // Same spot
             transform: Transform::identity(), is_visible: true, z_order: 2, // Higher Z
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-            current_buffer_id: Some(102), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
+            current_buffer_id: Some(102), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4, buffer_type: Some(BufferSourceType::Shm),
         });
 
         sg.update(&surface_data_map, &output_geom); // This calls perform_occlusion_culling
@@ -672,14 +680,14 @@ mod tests {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-            current_buffer_id: Some(201), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
+            current_buffer_id: Some(201), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4, buffer_type: Some(BufferSourceType::Shm),
         });
         let surf2_id = SurfaceId::new(2);
         surface_data_map.insert(surf2_id, SurfaceAttributes {
             position: Point2D::new(70.0, 70.0), size: Size2D::new(50.0, 50.0), // Different spot
             transform: Transform::identity(), is_visible: true, z_order: 2,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-            current_buffer_id: Some(202), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
+            current_buffer_id: Some(202), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4, buffer_type: Some(BufferSourceType::Shm),
         });
         sg.update(&surface_data_map, &output_geom);
         let node1 = sg.nodes.iter().find(|n| n.surface_id == surf1_id).unwrap();
@@ -699,14 +707,14 @@ mod tests {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-            current_buffer_id: Some(301), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
+            current_buffer_id: Some(301), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4, buffer_type: Some(BufferSourceType::Shm),
         });
         let surf2_id = SurfaceId::new(2); // Occluder node
         surface_data_map.insert(surf2_id, SurfaceAttributes {
             position: Point2D::new(30.0, 30.0), size: Size2D::new(50.0, 50.0), // Overlaps (10,10)-(60,60) with (30,30)-(80,80)
             transform: Transform::identity(), is_visible: true, z_order: 2,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-            current_buffer_id: Some(302), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
+            current_buffer_id: Some(302), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4, buffer_type: Some(BufferSourceType::Shm),
         });
         sg.update(&surface_data_map, &output_geom);
         let node1 = sg.nodes.iter().find(|n| n.surface_id == surf1_id).unwrap();
@@ -724,7 +732,7 @@ mod tests {
             position: Point2D::new(200.0, 200.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-            current_buffer_id: Some(401), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
+            current_buffer_id: Some(401), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4, buffer_type: Some(BufferSourceType::Shm),
         });
         sg.update(&surface_data_map, &output_geom);
         // The node might not even be in sg.nodes if it's fully clipped before occlusion check.
@@ -751,14 +759,14 @@ mod tests {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-            current_buffer_id: Some(402), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
+            current_buffer_id: Some(402), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4, buffer_type: Some(BufferSourceType::Shm),
         });
         surface_data_map.insert(surf3_id, SurfaceAttributes {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 2,
              // Opaque region is only the top-left quarter of the surface
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,25.0,25.0)), parent: None,
-            current_buffer_id: Some(403), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 25*4, // Example stride
+            current_buffer_id: Some(403), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 25*4, buffer_type: Some(BufferSourceType::Shm), // Example stride
         });
         sg.update(&surface_data_map, &output_geom);
         let node2 = sg.nodes.iter().find(|n| n.surface_id == surf2_id).unwrap();
@@ -781,14 +789,14 @@ mod tests {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 1,
             opaque_region: Some(Rectangle::from_coords(0.0,0.0,50.0,50.0)), parent: None,
-            current_buffer_id: Some(501), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
+            current_buffer_id: Some(501), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4, buffer_type: Some(BufferSourceType::Shm),
         });
         surface_data_map.insert(surf2_id, SurfaceAttributes {
             position: Point2D::new(10.0, 10.0), size: Size2D::new(50.0, 50.0),
             transform: Transform::identity(), is_visible: true, z_order: 2,
             opaque_region: None, // Occluder considered fully opaque via its clipped_rect
             parent: None,
-            current_buffer_id: Some(502), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4,
+            current_buffer_id: Some(502), buffer_format: Some(BufferFormat::Argb8888), buffer_stride: 50*4, buffer_type: Some(BufferSourceType::Shm),
         });
 
         sg.update(&surface_data_map, &output_geom);
