@@ -69,17 +69,81 @@
 //! This crate aims to be the bedrock of NovaDE, providing reliable and consistent
 //! core services.
 
+/// Error handling types for the NovaDE core.
 pub mod error;
+/// Core data types used throughout NovaDE.
 pub mod types;
+/// Configuration management for NovaDE applications.
 pub mod config;
+/// Logging infrastructure for NovaDE.
 pub mod logging;
+/// Utility functions for common tasks.
 pub mod utils;
+
+use tracing_subscriber::EnvFilter;
+
+/// Initializes core components of the NovaDE system, with a primary focus on the logging system.
+///
+/// This function should be called once at the beginning of an application's lifecycle
+/// to set up the global tracing subscriber. The logging behavior is primarily configured
+/// through the `RUST_LOG` environment variable (e.g., `RUST_LOG=info,novade_core=debug`).
+///
+/// It uses `tracing_subscriber::fmt` for formatted output and `EnvFilter` for
+/// filtering log directives from the environment.
+///
+/// # Errors
+///
+/// Returns a [`CoreError::Logging`] if the initialization of the global tracing
+/// subscriber fails. This commonly occurs if a global default subscriber has already
+/// been set elsewhere in the application or by another library.
+pub fn init() -> Result<(), crate::error::CoreError> {
+    match tracing_subscriber::fmt::Subscriber::builder()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init() // Use try_init() to handle errors
+    {
+        Ok(()) => {
+            tracing::info!("NovaDE Core components initialized successfully via novade_core::init().");
+            Ok(())
+        }
+        Err(e) => {
+            // Convert the tracing error to CoreError::Logging(String)
+            Err(crate::error::CoreError::Logging(format!(
+                "Failed to initialize global tracing subscriber: {}",
+                e
+            )))
+        }
+    }
+}
 
 // Re-export key types for convenience
 pub use error::{CoreError, ConfigError, ColorParseError}; // LoggingError removed, ColorParseError added
 pub use types::{
-    Point, Size, Rect, RectInt, Color, Orientation, // ColorFormat, Direction removed
-    AppIdentifier, Status // ColorParseError removed from here
+    // --- app_identifier.rs ---
+    AppIdentifier,
+    // --- assistant.rs ---
+    AssistantCommand, ContextInfo, UserIntent, SkillDefinition, AssistantPreferences,
+    // --- color.rs ---
+    Color,
+    // --- display.rs ---
+    DisplayConnector, DisplayMode, PhysicalProperties, DisplayStatus, DisplayLayout, Display, DisplayConfiguration,
+    // --- events.rs ---
+    CoreEvent, NotificationUrgency,
+    // --- general.rs ---
+    Timestamp, Uuid,
+    // --- geometry.rs ---
+    // f64 based
+    Point, Size, Rectangle, Vector,
+    // integer based
+    PointInt, SizeInt, RectInt,
+    // --- orientation.rs ---
+    Orientation, Direction,
+    // --- status.rs ---
+    Status,
+    // --- system_health.rs ---
+    CpuMetrics, MemoryMetrics, DiskActivityMetrics, DiskSpaceMetrics, NetworkActivityMetrics, TemperatureMetric,
+    LogPriority, LogEntry, LogSourceIdentifier, LogFilter, TimeRange,
+    DiagnosticTestId, DiagnosticTestInfo, DiagnosticStatus, DiagnosticTestResult,
+    AlertSeverity, AlertId, Alert, SystemHealthDashboardConfig,
 };
 pub use config::{
     CoreConfig, LoggingConfig, FeatureFlags, // Added FeatureFlags
@@ -101,3 +165,73 @@ pub use utils::{
     get_app_cache_dir,
     get_app_state_dir,
 };
+
+#[cfg(test)]
+mod init_tests {
+    use super::*;
+    use std::sync::Once;
+    use crate::error::CoreError; // For matching error type
+
+    // Helper to ensure global logger state is managed across tests in this module.
+    static TRACING_INIT: Once = Once::new();
+
+    #[test]
+    fn test_init_success() {
+        // This test relies on the fact that `try_init` handles cases where a logger
+        // might already be set by another test (especially when tests run concurrently
+        // or out of specific order). If no logger is set, it initializes.
+        // If one is set, try_init() itself will error, but our `init()` wraps this.
+        // The critical part for *this function's own logic* is that it correctly
+        // translates the Ok or Err from try_init.
+
+        let result = crate::init(); // Call the function from the crate root
+
+        // We accept Ok(()) or an error indicating it was already initialized.
+        match result {
+            Ok(()) => {
+                tracing::info!("test_init_success: init() succeeded or was already initialized and handled gracefully by prior init.");
+                // If it succeeded, subsequent calls in other tests will hit the "already initialized" path.
+            }
+            Err(CoreError::Logging(msg)) => {
+                // This is also an acceptable outcome if another test ran `init()` first.
+                assert!(msg.contains("Failed to initialize global tracing subscriber"), "Error message should indicate tracer init failure. Got: {}", msg);
+                tracing::warn!("test_init_success: init() failed as expected (already initialized): {}", msg);
+            }
+            Err(e) => {
+                panic!("init() failed with an unexpected error type: {:?}", e);
+            }
+        }
+        // The main assertion is that it doesn't panic and returns a Result.
+    }
+
+    #[test]
+    fn test_init_error_on_reinitialization() {
+        // Ensure init() is called at least once successfully.
+        TRACING_INIT.call_once(|| {
+            match crate::init() { // Call the function from the crate root
+                Ok(()) => tracing::info!("First init successful for reinitialization test."),
+                Err(e) => {
+                    // This could happen if another test ran `init` before this `Once` block.
+                    // It's acceptable for this test's logic as long as a logger is set.
+                    tracing::warn!("Initial init in TRACING_INIT failed (likely already set by another test): {}. Test will proceed.", e);
+                }
+            }
+        });
+
+        // At this point, a global subscriber should have been set (either by the Once block or a preceding test).
+        // Try to initialize again. This specific call within this test should now robustly fail.
+        let result = crate::init(); // Call the function from the crate root
+        assert!(result.is_err(), "Second call to init() should return an error.");
+
+        match result {
+            Err(CoreError::Logging(msg)) => {
+                assert!(msg.contains("Failed to initialize global tracing subscriber"), "Error message prefix mismatch. Got: {}", msg);
+                // The exact error message from `tracing::subscriber::set_global_default` can vary slightly
+                // or might be wrapped. The key is that it's a logging-related error from `try_init`.
+                // Common phrases are "already been set" or "failed to set global default subscriber".
+                assert!(msg.contains("global default subscriber has already been set") || msg.contains("another global logger was already installed"), "Error message should indicate already set. Got: {}", msg);
+            }
+            _ => panic!("Expected CoreError::Logging, but got {:?}", result),
+        }
+    }
+}

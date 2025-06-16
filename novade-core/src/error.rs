@@ -62,10 +62,12 @@ pub enum CoreError {
     #[error("Color Parsing Error: {0}")]
     ColorParse(#[from] ColorParseError),
 
-    /// Errors related to the logging system.
-    /// Wraps a [`LoggingError`].
-    #[error("Logging Error: {0}")]
-    Logging(#[from] LoggingError),
+    /// Errors that occur during the initialization or operation of the logging system.
+    ///
+    /// This typically wraps errors from the underlying logging framework (e.g., `tracing`)
+    /// or custom errors related to logging configuration or output.
+    #[error("Failed to initialize logging system: {0}")]
+    Logging(String),
 
     /// Errors related to filesystem operations, such as creating directories or reading files,
     /// that are not covered by more specific configuration or logging I/O errors.
@@ -107,6 +109,28 @@ pub enum CoreError {
         description: String,
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    },
+
+    /// Error for invalid configuration values.
+    ///
+    /// This error indicates that a configuration key was found, but its value
+    /// was not valid according to expected criteria (e.g., wrong type, out of range).
+    #[error("Invalid configuration value for key '{key}': {message}")]
+    InvalidConfigValue {
+        /// The configuration key associated with the invalid value.
+        key: String,
+        /// A message explaining why the value is invalid.
+        message: String,
+    },
+
+    /// Error for missing settings or configuration keys.
+    ///
+    /// This error signifies that a required setting or configuration key
+    /// could not be found.
+    #[error("Setting '{name}' not found.")]
+    SettingNotFound {
+        /// The name of the setting or key that was not found.
+        name: String,
     },
 }
 
@@ -154,28 +178,7 @@ pub enum ConfigError {
     NotInitializedError,
 }
 
-/// Specific errors related to logging.
-#[derive(Debug, Error, Clone, PartialEq)]
-pub enum LoggingError {
-    /// Error indicating a failure during the initialization of the logging system.
-    #[error("Logging system initialization failed: {0}")]
-    InitializationFailure(String),
-
-    /// Error indicating a problem with logging configuration.
-    #[error("Logging configuration error: {0}")]
-    ConfigurationError(String),
-
-    /// Error indicating a failure during log output.
-    #[error("Logging output error: {0}")]
-    OutputError(String),
-    // If std::io::Error needs to be included, the variant might look like:
-    // #[error("Logging output error ({context})")]
-    // OutputIoError {
-    //     context: String,
-    //     #[source]
-    //     source: std::io::Error,
-    // },
-}
+// LoggingError enum has been removed.
 
 #[cfg(test)]
 mod tests {
@@ -273,94 +276,44 @@ mod tests {
     }
 
     #[test]
-    fn test_core_error_logging_initialization_variant_updated() {
-        let err_msg = "Failed to init logger".to_string();
-        // Update this test to use the new structure
-        let logging_err = LoggingError::InitializationFailure(err_msg.clone());
-        let core_err: CoreError = logging_err.clone().into(); // Test #[from] for CoreError::Logging
+    fn test_core_error_logging_variant() {
+        let err_msg = "Failed to initialize logger".to_string();
+        let core_err = CoreError::Logging(err_msg.clone());
 
         assert_eq!(
             format!("{}", core_err),
-            format!("Logging Error: Logging system initialization failed: {}", err_msg)
+            format!("Failed to initialize logging system: {}", err_msg)
         );
-        assert!(core_err.source().is_some());
-        // Check that the source is the original LoggingError
-        match core_err.source().unwrap().downcast_ref::<LoggingError>() {
-            Some(original_err) => assert_eq!(original_err, &logging_err),
-            None => panic!("Source is not a LoggingError"),
-        }
-    }
-
-    // --- LoggingError Tests ---
-    #[test]
-    fn test_logging_error_display() {
-        assert_eq!(
-            format!("{}", LoggingError::InitializationFailure("init_test".to_string())),
-            "Logging system initialization failed: init_test"
-        );
-        assert_eq!(
-            format!("{}", LoggingError::ConfigurationError("config_test".to_string())),
-            "Logging configuration error: config_test"
-        );
-        assert_eq!(
-            format!("{}", LoggingError::OutputError("output_test".to_string())),
-            "Logging output error: output_test"
-        );
+        // CoreError::Logging(String) does not have a source by default with this change.
+        assert!(core_err.source().is_none());
     }
 
     #[test]
-    fn test_core_error_from_logging_error_conversion() {
-        // Test InitializationFailure
-        let init_fail_msg = "init_fail_core_conversion".to_string();
-        let logging_err_init = LoggingError::InitializationFailure(init_fail_msg.clone());
-        let core_err_init: CoreError = logging_err_init.clone().into();
-        assert_eq!(
-            format!("{}", core_err_init),
-            format!("Logging Error: Logging system initialization failed: {}", init_fail_msg)
-        );
-        assert!(matches!(core_err_init, CoreError::Logging(_)));
-        if let CoreError::Logging(ref inner_err) = core_err_init {
-            assert_eq!(inner_err, &logging_err_init);
-        } else {
-            panic!("CoreError is not CoreError::Logging for InitializationFailure variant check");
-        }
-        assert!(core_err_init.source().is_some());
-        assert_eq!(core_err_init.source().unwrap().downcast_ref::<LoggingError>().unwrap(), &logging_err_init);
+    fn test_core_error_invalid_config_value_variant() {
+        let key = "timeout".to_string();
+        let message = "must be a positive integer".to_string();
+        let core_err = CoreError::InvalidConfigValue { key: key.clone(), message: message.clone() };
 
-        // Test ConfigurationError
-        let config_err_msg = "config_err_core_conversion".to_string();
-        let logging_err_config = LoggingError::ConfigurationError(config_err_msg.clone());
-        let core_err_config: CoreError = logging_err_config.clone().into();
         assert_eq!(
-            format!("{}", core_err_config),
-            format!("Logging Error: Logging configuration error: {}", config_err_msg)
+            format!("{}", core_err),
+            format!("Invalid configuration value for key '{}': {}", key, message)
         );
-        assert!(matches!(core_err_config, CoreError::Logging(_)));
-        if let CoreError::Logging(ref inner_err) = core_err_config {
-            assert_eq!(inner_err, &logging_err_config);
-        } else {
-            panic!("CoreError is not CoreError::Logging for ConfigurationError variant check");
-        }
-        assert!(core_err_config.source().is_some());
-        assert_eq!(core_err_config.source().unwrap().downcast_ref::<LoggingError>().unwrap(), &logging_err_config);
-        
-        // Test OutputError
-        let output_err_msg = "output_err_core_conversion".to_string();
-        let logging_err_output = LoggingError::OutputError(output_err_msg.clone());
-        let core_err_output: CoreError = logging_err_output.clone().into();
-        assert_eq!(
-            format!("{}", core_err_output),
-            format!("Logging Error: Logging output error: {}", output_err_msg)
-        );
-        assert!(matches!(core_err_output, CoreError::Logging(_)));
-        if let CoreError::Logging(ref inner_err) = core_err_output {
-            assert_eq!(inner_err, &logging_err_output);
-        } else {
-            panic!("CoreError is not CoreError::Logging for OutputError variant check");
-        }
-        assert!(core_err_output.source().is_some());
-        assert_eq!(core_err_output.source().unwrap().downcast_ref::<LoggingError>().unwrap(), &logging_err_output);
+        assert!(core_err.source().is_none());
     }
+
+    #[test]
+    fn test_core_error_setting_not_found_variant() {
+        let name = "theme_name".to_string();
+        let core_err = CoreError::SettingNotFound { name: name.clone() };
+
+        assert_eq!(
+            format!("{}", core_err),
+            format!("Setting '{}' not found.", name)
+        );
+        assert!(core_err.source().is_none());
+    }
+
+    // --- LoggingError Tests (Removed as LoggingError enum is removed) ---
 
     #[test]
     fn test_core_error_filesystem_variant() {
