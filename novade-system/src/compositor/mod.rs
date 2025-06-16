@@ -13,3 +13,4 @@ pub mod shell; // Changed from xdg_shell
 pub mod nova_compositor_logic;
 pub mod composition_engine;
 pub mod scene_graph;
+pub mod display_management; // Added display_management module
