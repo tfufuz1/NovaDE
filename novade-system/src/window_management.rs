@@ -201,7 +201,7 @@ impl DomainWindowManager for NovaWindowManager {
         let desktop_state_guard = self.desktop_state.lock().map_err(|e| format!("Failed to lock DesktopState: {}", e))?;
         let smithay_window = self.find_smithay_window_by_id_with_state(id, &desktop_state_guard)
             .ok_or_else(|| format!("Window not found for hide: {}", id))?;
-        
+
         // ANCHOR: Actual "hiding" vs "unmapping".
         // Unmapping removes it from the space, effectively hiding it.
         // True visibility might be a rendering flag later.
@@ -316,8 +316,119 @@ fn convert_smithay_window_to_domain_window(smithay_window: &SmithayWindow, deskt
 }
 
 // No tests for now as they would require a running compositor instance or extensive mocking.
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     // Placeholder tests
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compositor::state::DesktopState; // Needed for Arc<StdMutex<DesktopState>>
+    use crate::compositor::shell::xdg::{XdgSurfaceData, XdgToplevelData, XdgRoleSpecificData, XdgSurfaceRole, ToplevelState as NovaToplevelStateInternal}; // For XdgSurfaceData
+    use smithay::desktop::{Window as SmithayWindow, WindowSurfaceType};
+    use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+    use smithay::reexports::wayland_server::DisplayHandle; // Needed for dummy WlSurface
+    use smithay::reexports::wayland_server::{Display, Client, GlobalId, Main}; // For creating dummy WlSurface
+    use std::time::Duration; // For event loop
+    use std::sync::Mutex as StdMutex; // Ensure this is std::sync::Mutex
+
+
+    // ANCHOR: Creating a mock DesktopState is highly complex and out of scope for simple unit tests.
+    // These tests will be skeletons or focus on parts that can be tested with simpler mocks.
+
+    #[tokio::test]
+    async fn test_nwm_get_windows_skeleton() {
+        // let mock_desktop_state = Arc::new(StdMutex::new( /* ... mock DesktopState ... */ ));
+        // let nova_wm = NovaWindowManager::new(mock_desktop_state).unwrap();
+        // let windows = nova_wm.get_windows().await;
+        // assert!(windows.is_ok());
+        println!("ANCHOR: test_nwm_get_windows_skeleton - Requires mock DesktopState or integration test.");
+    }
+
+    #[tokio::test]
+    async fn test_nwm_focus_window_skeleton() {
+        println!("ANCHOR: test_nwm_focus_window_skeleton - Requires mock DesktopState or integration test.");
+    }
+
+    // ... other skeleton tests for move, resize, set_state, close ...
+
+    // Test for convert_smithay_window_to_domain_window
+    // This requires mocking SmithayWindow and its underlying data (WlSurface, XdgSurfaceData).
+    // This is still quite involved.
+
+    // Helper to create a dummy WlSurface for testing. This is non-trivial.
+    // Requires a DisplayHandle.
+    fn create_dummy_wl_surface(dh: &DisplayHandle) -> Main<WlSurface> {
+        // Create a dummy client
+        let client = Client::from_credentials(dh.backend_handle().make_connection().unwrap());
+        // Create a WlSurface. This is simplified; real creation is more complex.
+        // WlSurface::new is not public. Surface creation is usually through wl_compositor.
+        // This highlights the difficulty of mocking Wayland objects.
+        // Smithay's test_utils might have helpers, or we use a very high-level approach.
+
+        // For now, let's assume we can't easily create a valid WlSurface for pure unit testing here
+        // without setting up a significant part of the Display/EventLoop.
+        // We'll mark this as a known difficulty.
+        unimplemented!("Creating a dummy WlSurface for unit tests is complex without a full test harness.");
+    }
+
+    #[test]
+    fn test_convert_smithay_window_to_domain_window_basic() {
+        // ANCHOR: This test is highly dependent on ability to mock/stub Smithay objects.
+        // 1. Create a dummy Display and EventLoop to get a DisplayHandle.
+        // let mut display = Display::<DesktopState>::new().unwrap(); // Problem: DesktopState needs an Arc<Mutex<Self>> for NovaWindowManager
+        // For this test, we might need a simpler state for the Display if DesktopState is too complex to mock here.
+        // Let's assume we use a unit Display<()> for the DisplayHandle for internal Smithay object creation.
+
+        // This setup is becoming an integration test snippet rather than a pure unit test.
+        // The goal is to test the conversion logic, so if we can manually construct XdgSurfaceData
+        // and a SmithayWindow-like structure, that's better.
+
+        // Let's try to mock parts of SmithayWindow and XdgSurfaceData directly.
+        // SmithayWindow is a struct we can potentially create if we can satisfy its fields.
+        // It often takes an XdgToplevel or similar enum, which are Wayland objects.
+
+        // Given the complexity, a full unit test for `convert_smithay_window_to_domain_window`
+        // without a proper test harness or more mockable Smithay components is very difficult.
+        // We will focus on the logic within the function assuming its inputs can be obtained.
+
+        // Example of what we'd want to test:
+        // - Correct ID extraction (if get_domain_id_from_smithay_window works)
+        // - Title extraction
+        // - Geometry (requires mock Space)
+        // - WindowType (currently hardcoded to Normal for XDG Toplevel)
+        // - WindowState (from XdgToplevelData)
+
+        println!("ANCHOR: test_convert_smithay_window_to_domain_window_basic - Requires extensive mocking of Smithay objects or an integration test setup.");
+
+        // If we assume `get_domain_id_from_smithay_window` can be tested separately by mocking UserData on WlSurface,
+        // and that `smithay_window.title()` and `desktop_state.space.element_geometry()` can be mocked/controlled:
+
+        // Create a mock XdgToplevelData
+        let toplevel_data = XdgToplevelData {
+            title: Some("Test Window".to_string()),
+            app_id: Some("test.app".to_string()),
+            parent: None,
+            current_state: NovaToplevelStateInternal {
+                maximized: true, fullscreen: false, minimized: false, activated: true, resizing: false,
+            },
+            min_size: None, max_size: None,
+            decoration_mode: None,
+        };
+        // Create mock XdgSurfaceData
+        let surface_data = XdgSurfaceData {
+            role: XdgSurfaceRole::Toplevel,
+            role_data: XdgRoleSpecificData::Toplevel(toplevel_data),
+            parent: None,
+            // window: SmithayWindow::new(...), // This is the hard part to mock
+            domain_id: Some(WindowId::from_string("test-domain-id-123")), // Pre-set domain_id
+            // window field is problematic.
+            // Let's assume for this specific test, we don't need a real `window` field if we can mock `title()` etc.
+        };
+
+        // We can't easily create a mock SmithayWindow that `convert_smithay_window_to_domain_window` can use
+        // because it calls methods like `smithay_window.wl_surface()`, `smithay_window.title()`, etc.
+        // which expect a real, properly initialized SmithayWindow.
+
+        // Conclusion: True unit testing of this function is difficult without either:
+        // 1. A test harness that provides minimal live Wayland objects.
+        // 2. Making SmithayWindow and its dependencies more trait-based for easier mocking.
+        // 3. Refactoring convert_smithay_window_to_domain_window to take more primitive data if possible.
+    }
+}

@@ -215,7 +215,27 @@ impl WorkspaceManager {
     /// If `monitor_id` is None, assigns according to internal logic (e.g., focused or primary monitor).
     pub fn create_workspace(&mut self, name: String, monitor_id: Option<String>) -> WorkspaceId {
         let new_ws_id = self.create_workspace_internal(name, monitor_id);
-        tracing::info!("Created workspace with ID {:?} on monitor {:?}.", new_ws_id, self.get_workspace_by_id(new_ws_id).unwrap().monitor_id);
+        // Log is now inside create_workspace_internal or should be done by caller if needed
+        new_ws_id
+    }
+
+    /// Creates a new workspace specifically for a given monitor, using a default name if none provided.
+    /// This is a convenience method often called when a window is moved to a monitor without an existing workspace.
+    pub fn create_workspace_on_monitor(&mut self, monitor_id: String, name: Option<String>) -> WorkspaceId {
+        // Changed Result<(), WorkspaceError> to WorkspaceId for create_workspace
+        let ws_name = name.unwrap_or_else(|| {
+            let mut default_name_base = format!("Workspace M{}", monitor_id);
+            // Ensure name is unique if just using default
+            let mut counter = 1;
+            let mut final_name = default_name_base.clone();
+            while self.workspaces.iter().any(|ws| ws.name == final_name) {
+                final_name = format!("{} ({})", default_name_base, counter);
+                counter += 1;
+            }
+            final_name
+        });
+        let new_ws_id = self.create_workspace_internal(ws_name, Some(monitor_id));
+        tracing::info!("Created workspace {:?} on monitor {:?} (helper).", new_ws_id, self.get_workspace_by_id(new_ws_id).unwrap().monitor_id);
         new_ws_id
     }
 
@@ -337,17 +357,59 @@ impl WorkspaceManager {
 
     /// Finds the workspace ID that a given window belongs to.
     pub fn find_workspace_for_window(&self, window_id: WindowId) -> Option<WorkspaceId> { // window_id is core::WindowId
-        // if let Some(ws_id) = self.window_to_workspace_map.get(&window_id) { // Key is core::WindowId
-        //     return Some(*ws_id);
-        // }
-        // Fallback by iterating through workspaces if map is not used or out of sync
         for ws in &self.workspaces {
-            if ws.windows.contains(&window_id) { // window_id is core::WindowId
+            if ws.windows.contains(&window_id) {
                 return Some(ws.id);
             }
         }
         None
     }
+
+    /// Moves a window to a specified target monitor.
+    ///
+    /// This involves:
+    /// 1. Removing the window from its current workspace.
+    /// 2. Finding or creating a workspace on the target monitor.
+    /// 3. Adding the window to this target workspace.
+    ///
+    /// Returns the ID of the target workspace.
+    /// ANCHOR: This method is currently synchronous and uses `block_on` for async WindowManager calls.
+    /// This should be refactored to be fully async in a production environment.
+    pub fn move_window_to_monitor(&mut self, window_id: WindowId, target_monitor_id: String) -> Result<WorkspaceId, WorkspaceError> {
+        let source_workspace_id = self.find_workspace_for_window(window_id);
+
+        // Remove from source workspace if it's in one
+        if let Some(sws_id) = source_workspace_id {
+            let source_ws = self.get_mut_workspace_by_id_internal(sws_id)
+                .ok_or(WorkspaceError::NotFound(sws_id))?; // Should not happen if find_workspace_for_window worked
+            source_ws.windows.retain(|&id| id != window_id);
+            tracing::info!("Window {:?} removed from source workspace {:?}", window_id, sws_id);
+        } else {
+            tracing::warn!("Window {:?} not found in any workspace, cannot remove from source.", window_id);
+        }
+
+        // Find or create workspace on target monitor
+        let target_workspace_id = self.workspaces.iter()
+            .find(|ws| ws.monitor_id.as_ref() == Some(&target_monitor_id))
+            .map(|ws| ws.id)
+            .unwrap_or_else(|| {
+                self.create_workspace_on_monitor(target_monitor_id.clone(), None)
+            });
+
+        // Add to target workspace
+        let target_ws = self.get_mut_workspace_by_id_internal(target_workspace_id)
+            .ok_or(WorkspaceError::NotFound(target_workspace_id))?; // Should exist as we just found/created it
+
+        if !target_ws.windows.contains(&window_id) {
+            target_ws.windows.push(window_id);
+            tracing::info!("Window {:?} added to target workspace {:?} on monitor {}", window_id, target_workspace_id, target_monitor_id);
+        } else {
+            tracing::info!("Window {:?} already in target workspace {:?}", window_id, target_workspace_id);
+        }
+
+        Ok(target_workspace_id)
+    }
+
 
     /// Returns an immutable reference to the active workspace, if any.
     pub fn get_active_workspace(&self) -> Option<&Workspace> {
@@ -397,3 +459,279 @@ impl WorkspaceManager {
 }
 
 // Removed local placeholder `mod traits` as it's now imported from `crate::workspaces::traits`.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspaces::core::{Window, WindowId, WindowState, WindowType};
+    use crate::workspaces::traits::{WindowManager as DomainWindowManager, DomainResult};
+    use novade_core::types::geometry::{Point, Size, Rect};
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    // Mock WindowManager for testing WorkspaceManager
+    #[derive(Debug, Default)]
+    struct MockWindowManager {
+        // Store calls or state if needed for assertions
+        focused_output_id: Option<String>,
+        primary_output_id: Option<String>,
+        output_work_areas: HashMap<String, Rect>,
+    }
+
+    impl MockWindowManager {
+        fn new() -> Self {
+            let mut m = Self::default();
+            // Setup a default primary monitor for tests
+            let primary_id = "test-monitor-1".to_string();
+            m.primary_output_id = Some(primary_id.clone());
+            m.focused_output_id = Some(primary_id.clone());
+            m.output_work_areas.insert(primary_id.clone(), Rect::new(Point::new(0,0), Size::new(1920,1080)));
+            m
+        }
+    }
+
+    #[async_trait]
+    impl DomainWindowManager for MockWindowManager {
+        async fn get_windows(&self) -> DomainResult<Vec<Window>> { Ok(vec![]) }
+        async fn get_window(&self, _id: WindowId) -> DomainResult<Window> { Err("Not implemented for mock".to_string()) }
+        async fn focus_window(&self, _id: WindowId) -> DomainResult<()> { Ok(()) }
+        async fn move_window(&self, _id: WindowId, _position: Point) -> DomainResult<()> { Ok(()) }
+        async fn resize_window(&self, _id: WindowId, _size: Size) -> DomainResult<()> { Ok(()) }
+        async fn set_window_state(&self, _id: WindowId, _state: WindowState) -> DomainResult<()> { Ok(()) }
+        async fn close_window(&self, _id: WindowId) -> DomainResult<()> { Ok(()) }
+        async fn hide_window_for_workspace(&self, _id: WindowId) -> DomainResult<()> { Ok(()) }
+        async fn show_window_for_workspace(&self, _id: WindowId) -> DomainResult<()> { Ok(()) }
+
+        async fn get_primary_output_id(&self) -> DomainResult<Option<String>> { Ok(self.primary_output_id.clone()) }
+        async fn get_output_work_area(&self, output_id: &str) -> DomainResult<Rect> {
+            self.output_work_areas.get(output_id).cloned()
+                .ok_or_else(|| "Output not found in mock".to_string())
+        }
+        async fn get_focused_output_id(&self) -> DomainResult<Option<String>> { Ok(self.focused_output_id.clone()) }
+    }
+
+    fn create_mock_wm_arc() -> Arc<dyn DomainWindowManager> {
+        Arc::new(MockWindowManager::new())
+    }
+
+    #[test]
+    fn test_new_workspace_manager() {
+        let wm_mock = create_mock_wm_arc();
+        let manager = WorkspaceManager::new(wm_mock);
+        assert_eq!(manager.workspaces.len(), 1, "Should create one default workspace");
+        let default_ws = &manager.workspaces[0];
+        assert_eq!(default_ws.name, "Workspace 1");
+        assert!(default_ws.active, "Default workspace should be active");
+        assert_eq!(manager.active_workspace_id, Some(default_ws.id));
+        // Default workspace should be on primary monitor if available
+        assert_eq!(default_ws.monitor_id, Some("test-monitor-1".to_string()));
+    }
+
+    #[test]
+    fn test_create_workspace() {
+        let wm_mock = create_mock_wm_arc();
+        let mut manager = WorkspaceManager::new(wm_mock);
+        let initial_ws_count = manager.workspaces.len();
+
+        let ws2_id = manager.create_workspace("Workspace 2".to_string(), Some("test-monitor-2".to_string()));
+        assert_eq!(manager.workspaces.len(), initial_ws_count + 1);
+        let ws2 = manager.get_workspace_by_id(ws2_id).unwrap();
+        assert_eq!(ws2.name, "Workspace 2");
+        assert!(!ws2.active); // New workspaces are not active by default
+        assert_eq!(ws2.monitor_id, Some("test-monitor-2".to_string()));
+
+        // Test creating workspace without specifying monitor (should use default logic)
+        let ws3_id = manager.create_workspace("Workspace 3".to_string(), None);
+        let ws3 = manager.get_workspace_by_id(ws3_id).unwrap();
+        assert_eq!(ws3.monitor_id, Some("test-monitor-1".to_string())); // Mock defaults to primary
+    }
+
+    #[test]
+    fn test_remove_workspace() {
+        let wm_mock = create_mock_wm_arc();
+        let mut manager = WorkspaceManager::new(wm_mock);
+        let ws2_id = manager.create_workspace("Workspace 2".to_string(), None);
+
+        // Remove ws2 (it's empty)
+        assert!(manager.remove_workspace(ws2_id).is_ok());
+        assert!(manager.get_workspace_by_id(ws2_id).is_none());
+        assert_eq!(manager.workspaces.len(), 1); // Back to default
+
+        // Try to remove last workspace
+        let default_ws_id = manager.workspaces[0].id;
+        assert_eq!(manager.remove_workspace(default_ws_id), Err(WorkspaceError::CannotRemoveLastWorkspace));
+
+        // Try to remove non-empty workspace
+        let ws3_id = manager.create_workspace("Workspace 3".to_string(), None);
+        let window_id = WindowId::new();
+        manager.add_window_to_workspace(window_id, ws3_id).unwrap();
+        assert_eq!(manager.remove_workspace(ws3_id), Err(WorkspaceError::NotEmpty(ws3_id)));
+    }
+
+    #[tokio::test] // switch_workspace is async
+    async fn test_switch_workspace() {
+        let wm_mock = create_mock_wm_arc();
+        let mut manager = WorkspaceManager::new(wm_mock);
+        let ws1_id = manager.get_active_workspace_id().unwrap();
+        let ws2_id = manager.create_workspace("Workspace 2".to_string(), None);
+
+        assert_ne!(manager.active_workspace_id, Some(ws2_id));
+        manager.switch_workspace(ws2_id).await.unwrap();
+        assert_eq!(manager.active_workspace_id, Some(ws2_id));
+        assert!(manager.get_workspace_by_id(ws2_id).unwrap().active);
+        assert!(!manager.get_workspace_by_id(ws1_id).unwrap().active);
+
+        // Switch to non-existent
+        let non_existent_id = WorkspaceId::new(999);
+        assert!(manager.switch_workspace(non_existent_id).await.is_err());
+        assert_eq!(manager.active_workspace_id, Some(ws2_id)); // Should not change
+    }
+
+    #[test]
+    fn test_window_management_in_workspaces() {
+        let wm_mock = create_mock_wm_arc();
+        let mut manager = WorkspaceManager::new(wm_mock);
+        let ws1_id = manager.get_active_workspace_id().unwrap();
+        let ws2_id = manager.create_workspace("Workspace 2".to_string(), None);
+        let window_a = WindowId::new();
+        let window_b = WindowId::new();
+
+        // Add windows
+        manager.add_window_to_workspace(window_a, ws1_id).unwrap();
+        manager.add_window_to_workspace(window_b, ws2_id).unwrap();
+        assert!(manager.get_workspace_by_id(ws1_id).unwrap().windows.contains(&window_a));
+        assert!(manager.get_workspace_by_id(ws2_id).unwrap().windows.contains(&window_b));
+        assert_eq!(manager.find_workspace_for_window(window_a), Some(ws1_id));
+        assert_eq!(manager.find_workspace_for_window(window_b), Some(ws2_id));
+
+        // Try adding existing window
+        assert_eq!(manager.add_window_to_workspace(window_a, ws1_id), Err(WorkspaceError::WindowAlreadyExists(window_a, ws1_id)));
+
+        // Move window
+        manager.move_window_to_workspace(window_a, ws2_id).unwrap();
+        assert!(!manager.get_workspace_by_id(ws1_id).unwrap().windows.contains(&window_a));
+        assert!(manager.get_workspace_by_id(ws2_id).unwrap().windows.contains(&window_a));
+        assert_eq!(manager.find_workspace_for_window(window_a), Some(ws2_id));
+
+        // Remove window
+        manager.remove_window_from_workspace(window_a, ws2_id).unwrap();
+        assert!(!manager.get_workspace_by_id(ws2_id).unwrap().windows.contains(&window_a));
+        assert_eq!(manager.find_workspace_for_window(window_a), None);
+
+        // Try removing non-existent window
+        assert_eq!(manager.remove_window_from_workspace(window_a, ws2_id), Err(WorkspaceError::WindowNotFoundInWorkspace(window_a, ws2_id)));
+    }
+
+    #[test]
+    fn test_create_workspace_on_monitor() {
+        let wm_mock = create_mock_wm_arc();
+        let mut manager = WorkspaceManager::new(wm_mock); // Default ws on "test-monitor-1"
+
+        let monitor2_id_str = "test-monitor-2".to_string();
+        let ws_on_mon2_id = manager.create_workspace_on_monitor(monitor2_id_str.clone(), Some("CAD Apps".to_string()));
+        let ws_on_mon2 = manager.get_workspace_by_id(ws_on_mon2_id).unwrap();
+        assert_eq!(ws_on_mon2.monitor_id, Some(monitor2_id_str.clone()));
+        assert_eq!(ws_on_mon2.name, "CAD Apps");
+
+        // Test default naming
+        let ws_on_mon2_default_name_id = manager.create_workspace_on_monitor(monitor2_id_str.clone(), None);
+        let ws_on_mon2_default_name = manager.get_workspace_by_id(ws_on_mon2_default_name_id).unwrap();
+        assert_eq!(ws_on_mon2_default_name.monitor_id, Some(monitor2_id_str.clone()));
+        assert_eq!(ws_on_mon2_default_name.name, format!("Workspace M{}", monitor2_id_str));
+
+        // Test unique default naming
+        let ws_on_mon2_default_name2_id = manager.create_workspace_on_monitor(monitor2_id_str.clone(), None);
+        let ws_on_mon2_default_name2 = manager.get_workspace_by_id(ws_on_mon2_default_name2_id).unwrap();
+        assert_eq!(ws_on_mon2_default_name2.name, format!("Workspace M{} (1)", monitor2_id_str));
+    }
+
+    #[test]
+    fn test_move_window_to_monitor() {
+        let mut mock_wm = MockWindowManager::new();
+        let monitor1_id = "monitor1".to_string();
+        let monitor2_id = "monitor2".to_string();
+        mock_wm.output_work_areas.insert(monitor1_id.clone(), Rect::new(Point::new(0,0), Size::new(1920,1080)));
+        mock_wm.output_work_areas.insert(monitor2_id.clone(), Rect::new(Point::new(1920,0), Size::new(1920,1080)));
+        mock_wm.primary_output_id = Some(monitor1_id.clone());
+        mock_wm.focused_output_id = Some(monitor1_id.clone());
+
+        let mut manager = WorkspaceManager::new(Arc::new(mock_wm));
+        let window_id = WindowId::new();
+
+        // Initial workspace (ws1) should be on monitor1
+        let ws1_id = manager.get_active_workspace_id().unwrap();
+        assert_eq!(manager.get_workspace_by_id(ws1_id).unwrap().monitor_id, Some(monitor1_id.clone()));
+        manager.add_window_to_workspace(window_id, ws1_id).unwrap();
+        assert!(manager.get_workspace_by_id(ws1_id).unwrap().windows.contains(&window_id));
+
+        // Move window to monitor2
+        let target_ws_id_on_mon2 = manager.move_window_to_monitor(window_id, monitor2_id.clone()).unwrap();
+        let ws_on_mon2 = manager.get_workspace_by_id(target_ws_id_on_mon2).unwrap();
+        assert_eq!(ws_on_mon2.monitor_id, Some(monitor2_id.clone()));
+        assert!(ws_on_mon2.windows.contains(&window_id));
+        assert!(!manager.get_workspace_by_id(ws1_id).unwrap().windows.contains(&window_id)); // Should be removed from old ws
+
+        // Check if a new workspace was created or an existing one on monitor2 was used
+        // In this test, it should create a new one.
+        assert_ne!(ws1_id, target_ws_id_on_mon2);
+    }
+
+    // Tests for Workspace::apply_layout
+    #[test]
+    fn test_workspace_apply_floating_layout() {
+        let initial_monitor_id = Some("monitor-float".to_string());
+        let ws = Workspace::new(WorkspaceId::new(1), "Floating WS".to_string(), initial_monitor_id);
+        // Add some windows, though their current positions are not tracked by Workspace for Floating mode yet
+        // ws.windows.push(WindowId::new());
+
+        let screen_area = Rect::new(Point::new(0,0), Size::new(1920,1080));
+        let geometries = ws.apply_layout(screen_area);
+
+        // Current behavior for Floating is to return empty map, as positions are externally managed.
+        assert!(geometries.is_empty(), "Floating layout should return empty map currently");
+        // ANCHOR: When floating window positions are stored in Workspace, this test should check they are returned.
+    }
+
+    #[test]
+    fn test_workspace_apply_tiling_layout_master_stack() {
+        let monitor_id = Some("monitor-tile".to_string());
+        let master_stack_options = crate::workspaces::tiling::MasterStackLayout {
+            num_master: 1,
+            master_width_percentage: 0.5,
+        };
+        let layout = WorkspaceLayout::Tiling(crate::workspaces::tiling::TilingOptions::MasterStack(master_stack_options));
+
+        let mut ws = Workspace::new(WorkspaceId::new(1), "Tiling WS".to_string(), monitor_id);
+        let win_ids = (0..3).map(|i| WindowId::from_string(&format!("win{}", i + 1))).collect::<Vec<_>>();
+        ws.windows = win_ids.clone();
+        ws.layout = layout;
+
+        let screen_area = Rect::new(Point::new(0,0), Size::new(1000,600));
+        let geometries = ws.apply_layout(screen_area);
+
+        assert_eq!(geometries.len(), 3);
+        assert!(geometries.contains_key(&win_ids[0]));
+        assert!(geometries.contains_key(&win_ids[1]));
+        assert!(geometries.contains_key(&win_ids[2]));
+
+        // Check master window (win_ids[0])
+        let master_geom = geometries[&win_ids[0]];
+        assert_eq!(master_geom.position.x, 0);
+        assert_eq!(master_geom.position.y, 0);
+        assert_eq!(master_geom.size.width, 500); // 50% of 1000
+        assert_eq!(master_geom.size.height, 600); // Full height
+
+        // Check stack windows (win_ids[1], win_ids[2])
+        let stack1_geom = geometries[&win_ids[1]];
+        assert_eq!(stack1_geom.position.x, 500);
+        assert_eq!(stack1_geom.position.y, 0);
+        assert_eq!(stack1_geom.size.width, 500);
+        assert_eq!(stack1_geom.size.height, 300); // 600 / 2
+
+        let stack2_geom = geometries[&win_ids[2]];
+        assert_eq!(stack2_geom.position.x, 500);
+        assert_eq!(stack2_geom.position.y, 300);
+        assert_eq!(stack2_geom.size.width, 500);
+        assert_eq!(stack2_geom.size.height, 300);
+    }
+}
