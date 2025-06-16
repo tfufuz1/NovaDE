@@ -2,6 +2,7 @@ pub mod backend;
 pub mod core;
 pub mod cursor_manager; // Add this line
 pub mod display_loop;
+pub mod input;
 pub mod renderer_interface;
 pub mod renderers; // Ensure this line is present and public
 pub mod shm;
