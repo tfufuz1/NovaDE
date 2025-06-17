@@ -61,6 +61,8 @@ impl ConfigServiceAsync for SimpleFileConfigService {
 
 fn main() {
     // Initialize logging (optional, but good for debugging)
+    // Initialize Adwaita
+    adw::init().expect("Failed to initialize Adwaita.");
     tracing_subscriber::fmt::init();
 
     // Initialize CoreConfig (using default for now)
@@ -122,17 +124,19 @@ fn main() {
         // It's better to initialize GtkThemeManager after the main window is created,
         // so we can get its gdk::Display.
 
-        // Create the SystemHealthDashboardView
-        let dashboard_view = SystemHealthDashboardView::new(service_for_ui.clone());
-
-        // Create a new window
-        let window = ApplicationWindow::builder()
+        // Create a new Adwaita window first (without content)
+        let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("NovaDE System Health Dashboard")
             .default_width(800)
             .default_height(600)
-            .child(&dashboard_view)
             .build();
+
+        // Create the SystemHealthDashboardView, passing the downgraded window reference
+        let dashboard_view = SystemHealthDashboardView::new(service_for_ui.clone(), window.downgrade());
+
+        // Set the dashboard_view as the content of the window
+        window.set_content(Some(&dashboard_view));
 
         // Now that we have a window, we can get its display to init GtkThemeManager
         let display = window.display();
