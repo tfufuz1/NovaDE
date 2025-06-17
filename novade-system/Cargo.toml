@@ -24,9 +24,11 @@ thiserror = "1.0" # Added
 libc = "0.2" # Added
 drm = "0.11.0"
 gbm = "0.11.0"
-nix = { version = "0.27.1", features = ["fs", "mount", "socket", "process", "cmsg"] }
-tempfile = "3.2" # For tests in socket.rs
+nix = { version = "0.27.1", features = ["fs", "mount", "socket", "process"] } # Removed cmsg, ucred
+tempfile = "3.8" # Updated version for Wayland compositor core, was 3.2
 byteorder = "1.4" # For message parsing
+memmap2 = "0.9" # For Wayland compositor core (SHM)
+mio = { version = "0.8", features = ["os-ext", "net"] } # For Wayland compositor core (event loop)
 glob = "0.3"
 sd-journal = "0.1.0"
 futures-core = "0.3"
@@ -37,7 +39,7 @@ ash = "0.37" # For Vulkan bindings
 ash-window = "0.12" # For Wayland surface creation with Ash
 gpu-allocator = { version = "0.22", features = ["ash"] } # Rust wrapper for VMA
 raw-window-handle = "0.5" # For integrating with Wayland surfaces
-vk-mem = "0.2.3"
+vk-mem = "0.3.0" # Upgraded from 0.2.2 to try and fix C++ build error
 uuid = { version = "1.4.1", features = ["v4"] }
 log = "0.4"
 psutil = "3.2" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for CPU and memory metrics
@@ -45,7 +47,7 @@ once_cell = "1.10" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for static
 nvml-wrapper = "0.7" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for NVIDIA GPU monitoring (optional)
 #TODO [NovaDE Developers <dev@novade.org>] Research and add AMD GPU monitoring crate (e.g., amdgpu-sysfs or similar)
 prometheus = { version = "0.13", features = ["process"] } #ANCHOR [NovaDE Developers <dev@novade.org>] Added for Prometheus metrics exposition
-warp = "0.3" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for exposing HTTP metrics endpoint
+warp = "0.3" # Restored from 0.1.23
 
 
 [features]
