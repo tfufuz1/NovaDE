@@ -64,3 +64,11 @@ prometheus_exporter = [] #ANCHOR [NovaDE Developers <dev@novade.org>] Feature fl
 [[example]]
 name = "vulkan_renderer_test"
 path = "examples/vulkan_renderer_test.rs"
+
+[[example]]
+name = "run_echo_service"
+path = "examples/run_echo_service.rs"
+
+[[example]]
+name = "test_upower_client"
+path = "examples/test_upower_client.rs"
