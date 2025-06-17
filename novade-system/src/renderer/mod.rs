@@ -5,6 +5,9 @@
 
 pub mod wgpu_renderer;
 pub mod wgpu_texture; // Add this line
+pub mod vulkan_frame_renderer;
 
 pub use wgpu_renderer::NovaWgpuRenderer;
 pub use wgpu_texture::WgpuRenderableTexture; // Add this line
+pub use vulkan_frame_renderer::VulkanContext;
+pub use vulkan_frame_renderer::FrameRenderer;
