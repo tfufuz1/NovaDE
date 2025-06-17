@@ -11,6 +11,7 @@ pub mod system_services;
 pub mod system_settings_service; // Added for assistant integration
 pub mod window_info_provider;
 pub mod window_mechanics;
+pub mod wayland_compositor_core; // Added Wayland compositor core module
 //ANCHOR [NovaDE Developers <dev@novade.org>] Added debug_interface module.
 pub mod debug_interface;
 pub use application_manager::{ApplicationManager, AppInfo}; // Added for assistant integration

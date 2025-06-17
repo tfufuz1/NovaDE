@@ -21,8 +21,8 @@ log = { version = "0.4.21" }
 atty = { version = "0.2.14" }
 once_cell = { version = "1.19.0" }
 num-traits = { version = "0.2.18" }
-sentry = { version = "0.31", features = ["backtrace", "contexts", "panic", "transport"] } #ANCHOR [NovaDE Developers <dev@novade.org>] Added for error tracking
-sentry-tracing = "0.31" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for Sentry integration with Tracing
+sentry = { version = "0.27.0", features = ["backtrace", "contexts", "panic", "transport"] } # Set to 0.27.0 as per baseline
+# sentry-tracing commented out as 0.27.0 might not exist or was problematic
 
 # Added for tests, but good to have as explicit dev-dependencies
 [dev-dependencies]
