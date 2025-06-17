@@ -1,3 +1,4 @@
+// This module is deprecated. Please use novade-domain/src/theming/service.rs::ThemingEngine instead.
 //! Theming engine module for the NovaDE domain layer.
 //!
 //! This module provides the theming engine interface and implementation
@@ -14,6 +15,7 @@ use crate::theming::provider::ThemeProvider;
 
 /// Interface for the theming engine.
 #[async_trait]
+#[deprecated(note = "Use novade-domain/src/theming/service.rs::ThemingEngine instead")]
 pub trait ThemingEngine: Send + Sync {
     /// Gets a theme by ID.
     ///
@@ -115,6 +117,7 @@ pub trait ThemingEngine: Send + Sync {
 }
 
 /// Default implementation of the theming engine.
+#[deprecated(note = "Use novade-domain/src/theming/service.rs::ThemingEngine instead")]
 pub struct DefaultThemingEngine {
     /// The themes, keyed by ID.
     themes: Arc<RwLock<HashMap<ThemeId, Theme>>>,

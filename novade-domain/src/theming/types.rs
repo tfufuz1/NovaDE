@@ -1,13 +1,27 @@
+//! Defines the core data structures used throughout the NovaDE theming system.
+//!
+//! This module contains types for identifying themes and tokens, representing token values,
+//! defining the structure of themes (including variants and accent color support),
+//! storing user theme preferences, and representing the fully resolved theme state
+//! that is applied to the UI.
+
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use novade_core::types::Color as CoreColor;
 
 // --- TokenIdentifier ---
+/// A unique identifier for a design token.
+///
+/// Token identifiers are typically hierarchical, using dots as separators
+/// (e.g., `color.background.primary`, `font.size.body`).
+/// They must consist of ASCII alphanumeric characters, dots (.), or hyphens (-).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct TokenIdentifier(String);
 
 impl TokenIdentifier {
+    /// Creates a new `TokenIdentifier`.
+    /// Panics in debug mode if the ID string is empty or contains invalid characters.
     pub fn new(id: impl Into<String>) -> Self {
         let id_str = id.into();
         debug_assert!(!id_str.is_empty() && id_str.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'), "TokenIdentifier: '{}' contains invalid characters or is empty", id_str);
@@ -40,32 +54,62 @@ impl fmt::Display for TokenIdentifier {
 }
 
 // --- TokenValue ---
+/// Represents the actual value of a design token.
+///
+/// A `TokenValue` can be a direct value (like a color string, dimension, number)
+/// or a reference to another `TokenIdentifier`. The specific types (Color, Dimension, etc.)
+/// help in categorizing and validating tokens, although they are often resolved to strings
+/// for final CSS output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case")] // Ensures enum variants are serialized like "kebab-case" in JSON
 pub enum TokenValue {
+    /// A color value, typically a hex string (e.g., "#RRGGBB", "#RRGGBBAA") or CSS color name.
     Color(String),
+    /// A sizing value, typically including units (e.g., "16px", "2em", "100%").
     Dimension(String),
+    /// A font family string (e.g., "'Inter', sans-serif").
     FontFamily(String),
+    /// A font weight string or number (e.g., "bold", "normal", "700").
     FontWeight(String),
+    /// A font size, typically including units (e.g., "1rem", "12pt").
     FontSize(String),
+    /// Letter spacing value, typically with units (e.g., "0.5px", "normal").
     LetterSpacing(String),
+    /// Line height value, unitless (e.g., "1.5") or with units (e.g., "20px").
     LineHeight(String),
+    /// A CSS border string (e.g., "1px solid #CCCCCC").
     Border(String),
+    /// A CSS box-shadow string (e.g., "2px 2px 5px rgba(0,0,0,0.2)").
     Shadow(String),
+    /// An opacity value, typically a float between 0.0 and 1.0.
     Opacity(f64),
+    /// A generic number value.
     Number(f64),
+    /// A generic string value.
     String(String),
+    /// A reference to another `TokenIdentifier`. This allows tokens to inherit values.
     Reference(TokenIdentifier),
 }
 
 // --- RawToken ---
+/// Represents a token as defined in a theme or token file, before resolution.
+///
+/// It includes the token's `id`, its `value` (which might be a direct value or a reference),
+/// and optional metadata like `description` and `group`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawToken {
-    #[serde(default, skip_serializing_if = "is_default_id_from_key")] // Potentially skip if ID is map key
-    pub id: TokenIdentifier, 
+    /// The unique identifier for this token.
+    /// When tokens are stored in a `TokenSet` (BTreeMap), this `id` field should
+    /// typically match the key in the map. Serialization might skip this field if it's
+    /// considered redundant with the map key in some contexts, though current setup includes it.
+    #[serde(default, skip_serializing_if = "is_default_id_from_key")]
+    pub id: TokenIdentifier,
+    /// The `TokenValue` of this token.
     pub value: TokenValue,
+    /// An optional description of the token's purpose or usage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// An optional group name, used for organizing tokens (e.g., in a design tool or documentation).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
 }
@@ -74,18 +118,91 @@ pub struct RawToken {
 // This is a simple default check; BTreeMap might not need this if id is always present.
 #[allow(clippy::trivially_copy_pass_by_ref)] // Cloned anyway by TokenIdentifier
 fn is_default_id_from_key(id: &TokenIdentifier) -> bool {
-    id.as_str().is_empty() // Assuming default TokenIdentifier is empty, adjust if different
+    id.as_str().is_empty() // Assuming default TokenIdentifier means an empty string, adjust if different.
 }
 
 
 // --- TokenSet ---
+/// A collection of `RawToken`s, keyed by their `TokenIdentifier`.
+///
+/// This is the primary structure for storing sets of tokens, whether they are
+/// global tokens, base tokens within a theme, or tokens specific to a theme variant.
+/// Using `BTreeMap` ensures that tokens are iterated in a consistent (sorted by ID) order.
 pub type TokenSet = BTreeMap<TokenIdentifier, RawToken>;
 
 // --- ThemeIdentifier ---
+/// A unique identifier for a theme (e.g., "nova-dark", "solarized-light").
+/// Theme identifiers must consist of ASCII alphanumeric characters or hyphens (-).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct ThemeIdentifier(String);
 
 impl ThemeIdentifier {
+    /// Creates a new `ThemeIdentifier`.
+    /// Panics in debug mode if the ID string is empty or contains invalid characters.
+    pub fn new(id: impl Into<String>) -> Self {
+    Color(String), // Value is a CSS color string e.g. "#RRGGBB", "rgba(...)", "blue"
+    Dimension(String), // Value is a CSS dimension string e.g. "16px", "2em"
+    FontFamily(String), // Value is a CSS font-family string e.g. "'Inter', sans-serif"
+    FontWeight(String), // Value is a CSS font-weight string e.g. "bold", "400"
+    FontSize(String), // Value is a CSS font-size string e.g. "1rem", "12pt"
+    LetterSpacing(String), // Value is a CSS letter-spacing string e.g. "0.5px"
+    LineHeight(String), // Value is a CSS line-height string or unitless number e.g. "1.5", "20px"
+    Border(String), // Value is a CSS border string e.g. "1px solid #000"
+    Shadow(String), // Value is a CSS box-shadow string e.g. "2px 2px 5px rgba(0,0,0,0.2)"
+    Opacity(f64), // Value is a number between 0.0 and 1.0
+    Number(f64), // A unitless number
+    String(String), // A generic string value
+    Reference(TokenIdentifier), // A reference to another token by its ID
+}
+
+// --- RawToken ---
+/// Represents a token as defined in a theme or token file, before resolution.
+///
+/// It includes the token's `id`, its `value` (which might be a direct value or a reference),
+/// and optional metadata like `description` and `group`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RawToken {
+    /// The unique identifier for this token.
+    /// When tokens are stored in a `TokenSet` (BTreeMap), this `id` field should
+    /// typically match the key in the map. Serialization might skip this field if it's
+    /// considered redundant with the map key in some contexts, though current setup includes it.
+    #[serde(default, skip_serializing_if = "is_default_id_from_key")]
+    pub id: TokenIdentifier,
+    /// The `TokenValue` of this token.
+    pub value: TokenValue,
+    /// An optional description of the token's purpose or usage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// An optional group name, used for organizing tokens (e.g., in a design tool or documentation).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
+// Helper for RawToken serde: if ID is same as key in map, it might be omitted.
+// This is a simple default check; BTreeMap might not need this if id is always present.
+#[allow(clippy::trivially_copy_pass_by_ref)] // Cloned anyway by TokenIdentifier
+fn is_default_id_from_key(id: &TokenIdentifier) -> bool {
+    id.as_str().is_empty() // Assuming default TokenIdentifier means an empty string, adjust if different.
+}
+
+
+// --- TokenSet ---
+/// A collection of `RawToken`s, keyed by their `TokenIdentifier`.
+///
+/// This is the primary structure for storing sets of tokens, whether they are
+/// global tokens, base tokens within a theme, or tokens specific to a theme variant.
+/// Using `BTreeMap` ensures that tokens are iterated in a consistent (sorted by ID) order.
+pub type TokenSet = BTreeMap<TokenIdentifier, RawToken>;
+
+// --- ThemeIdentifier ---
+/// A unique identifier for a theme (e.g., "nova-dark", "solarized-light").
+/// Theme identifiers must consist of ASCII alphanumeric characters or hyphens (-).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+pub struct ThemeIdentifier(String);
+
+impl ThemeIdentifier {
+    /// Creates a new `ThemeIdentifier`.
+    /// Panics in debug mode if the ID string is empty or contains invalid characters.
     pub fn new(id: impl Into<String>) -> Self {
         let id_str = id.into();
         debug_assert!(!id_str.is_empty() && id_str.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "ThemeIdentifier: '{}' contains invalid characters or is empty", id_str);
@@ -118,46 +235,82 @@ impl fmt::Display for ThemeIdentifier {
 }
 
 // --- ColorSchemeType ---
+/// Specifies the preferred color scheme, typically Light or Dark.
+/// This is used to select appropriate theme variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ColorSchemeType {
+    /// A light color scheme, typically with light backgrounds and dark text.
     #[default]
     Light,
+    /// A dark color scheme, typically with dark backgrounds and light text.
     Dark,
 }
 
 // --- AccentColor ---
+/// Represents a named accent color option available within a theme.
+///
+/// An accent color is a specific color value (defined by `CoreColor`) that can be
+/// used by a theme to modify certain `accentable_tokens`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AccentColor {
+    /// An optional human-readable name for the accent color (e.g., "Sky Blue", "Crimson Red").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The actual color value, using `novade_core::types::Color`.
     pub value: CoreColor,
 }
-// Note: CoreColor might require custom Eq/Hash if it contains f32 and is used in HashMaps directly.
-// For AccentColor itself, PartialEq is derived. If AccentColor is used as a key, this becomes relevant.
+// Note: `novade_core::types::Color`'s `PartialEq` (and `Hash` if used in keys)
+// needs to correctly handle floating point numbers if they are part of its structure.
 
 // --- ThemeVariantDefinition ---
+/// Defines a set of tokens that apply to a specific `ColorSchemeType`.
+///
+/// Theme variants allow a single `ThemeDefinition` to support multiple color schemes
+/// (e.g., light and dark modes) by overriding or adding to the `base_tokens`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThemeVariantDefinition {
+    /// The color scheme to which this variant's tokens apply.
     pub applies_to_scheme: ColorSchemeType,
+    /// The set of tokens specific to this variant. These tokens will override
+    /// `base_tokens` with the same `TokenIdentifier` when this variant is active.
     pub tokens: TokenSet,
 }
 
 // --- AccentModificationType ---
+/// Specifies how an accent color should modify a base token's color value.
+///
+/// This enum defines the types of operations that can be performed when an
+/// accent color is applied to an `accentable_token`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AccentModificationType {
+    /// Directly replaces the token's original color with the selected accent color.
     DirectReplace,
-    Lighten(f32), // Factor 0.0 to 1.0
-    Darken(f32),  // Factor 0.0 to 1.0
-    // Opacity(f32), // Removed as per plan, can be added later if needed
-    // Custom(String), // Removed as per plan
+    /// Lightens the token's original color by a specified factor (0.0 to 1.0).
+    /// The factor determines the amount of lightening, where 0.0 means no change
+    /// and 1.0 means maximum lightening (approaching white, depending on implementation).
+    Lighten(f32),
+    /// Darkens the token's original color by a specified factor (0.0 to 1.0).
+    /// The factor determines the amount of darkening, where 0.0 means no change
+    /// and 1.0 means maximum darkening (approaching black, depending on implementation).
+    Darken(f32),
 }
 
 // --- ThemeDefinition ---
+/// The primary structure for defining a theme in NovaDE.
+///
+/// A `ThemeDefinition` encapsulates all aspects of a theme, including its identity,
+/// metadata, base set of design tokens, variations for different color schemes (e.g., light/dark),
+/// and support for accent colors.
+///
+/// This structure is typically deserialized from a `.theme.json` file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThemeDefinition {
+    /// The unique identifier for this theme.
     pub id: ThemeIdentifier,
+    /// The human-readable name of the theme (e.g., "Nova Default", "Solarized Dark").
     pub name: String,
+    /// An optional longer description of the theme.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,44 +318,88 @@ pub struct ThemeDefinition {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     
+    /// The core set of design tokens that form the basis of this theme.
+    /// These tokens apply unless overridden by a specific `ThemeVariantDefinition`
+    /// or user preferences.
     pub base_tokens: TokenSet,
     
+    /// A list of `ThemeVariantDefinition`s, allowing the theme to adapt to different
+    /// `ColorSchemeType`s (e.g., providing a distinct set of tokens for dark mode).
+    /// If empty, the `base_tokens` are used for all schemes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<ThemeVariantDefinition>,
     
+    /// An optional list of `AccentColor`s that this theme supports.
+    /// Users can select one of these to customize the theme's appearance further.
+    /// If `None` or empty, the theme does not support user-selectable accent colors through this mechanism.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supported_accent_colors: Option<Vec<AccentColor>>,
     
+    /// An optional map defining which tokens are affected by the selected accent color
+    /// and how they are modified. The key is the `TokenIdentifier` of the token to be
+    /// accented, and the value is the `AccentModificationType` specifying the transformation.
+    /// If `None` or empty, accent colors (even if supported) will not modify any tokens by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accentable_tokens: Option<HashMap<TokenIdentifier, AccentModificationType>>,
 }
 
 // --- AppliedThemeState ---
+/// Represents the fully resolved state of the current theme, ready for UI consumption.
+///
+/// This struct is the output of the theming engine after processing the selected
+/// `ThemeDefinition`, `ThemingConfiguration` (including preferred color scheme,
+/// selected accent color, and user overrides), and global tokens.
+/// It contains all the information a UI rendering system needs to style components.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppliedThemeState {
+    /// The `ThemeIdentifier` of the theme that was applied.
     pub theme_id: ThemeIdentifier,
+    /// The `ColorSchemeType` (e.g., Light or Dark) for which this state was resolved.
     pub color_scheme: ColorSchemeType,
+    /// The `AccentColor` that is currently active, if any. This includes its name (if provided
+    /// in the `ThemeDefinition`) and its resolved `CoreColor` value.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_accent_color: Option<AccentColor>,
+    /// A map of `TokenIdentifier` to their final, resolved string values.
+    /// These are the values that should be directly used by the UI (e.g., as CSS custom properties).
+    /// All references have been resolved, variants applied, accents processed, and user overrides incorporated.
     pub resolved_tokens: BTreeMap<TokenIdentifier, String>,
 }
 
 // --- ThemingConfiguration ---
+/// Stores the user's theme preferences.
+///
+/// This configuration determines which theme is active, the preferred color scheme (light/dark),
+/// any selected accent color, and custom token overrides set by the user.
+/// It is typically loaded from and saved to a persistent storage (e.g., `theming.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThemingConfiguration {
+    /// The `ThemeIdentifier` of the theme selected by the user.
     pub selected_theme_id: ThemeIdentifier,
+    /// The user's preferred `ColorSchemeType` (e.g., Light or Dark).
     pub preferred_color_scheme: ColorSchemeType,
+    /// The `CoreColor` value of the accent color selected by the user.
+    /// This should be one of the colors defined in the `supported_accent_colors` list
+    /// of the selected `ThemeDefinition`, or `None` if no accent is chosen or supported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_accent_color: Option<CoreColor>,
+    /// An optional set of `RawToken`s provided by the user to override any tokens
+    /// from the theme definition (base or variant) or global tokens.
+    /// These overrides have the highest precedence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_user_token_overrides: Option<TokenSet>,
 }
 
 impl Default for ThemingConfiguration {
+    /// Provides a default `ThemingConfiguration`.
+    ///
+    /// This default typically selects a system-default theme identifier and a light color scheme,
+    /// with no accent color or user overrides. The actual fallback to a usable theme if
+    /// "default-system" is not found is handled by the `ThemingEngine`.
     fn default() -> Self {
         Self {
-            selected_theme_id: ThemeIdentifier::new("default-system"),
-            preferred_color_scheme: ColorSchemeType::default(),
+            selected_theme_id: ThemeIdentifier::new("default-system"), // A conventional ID for a default theme
+            preferred_color_scheme: ColorSchemeType::default(), // Defaults to Light
             selected_accent_color: None,
             custom_user_token_overrides: None,
         }

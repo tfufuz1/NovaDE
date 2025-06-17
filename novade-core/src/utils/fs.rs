@@ -107,6 +107,54 @@ pub fn read_to_string(path: &Path) -> Result<String, CoreError> {
     })
 }
 
+/// Writes a string to a file.
+///
+/// This is a convenience wrapper around `std::fs::write` that maps
+/// the `std::io::Error` to `CoreError::Filesystem`. It will create the file
+/// if it does not exist, and will truncate it if it does.
+///
+/// # Arguments
+///
+/// * `path`: A reference to a `Path` representing the file to write to.
+/// * `content`: The string content to write to the file.
+///
+/// # Returns
+///
+/// * `Ok(())` if the content was successfully written.
+/// * `Err(CoreError)` if the file cannot be written (e.g., permissions error, path is a directory).
+///
+/// # Examples
+///
+/// ```no_run
+/// # use std::path::Path;
+/// # use novade_core::utils::fs::{write_string_to_file, read_to_string};
+/// # use tempfile::NamedTempFile;
+/// // Create a temporary file path for the example
+/// let temp_file = NamedTempFile::new().unwrap();
+/// let file_path = temp_file.path();
+/// let content = "Hello from NovaDE write_string_to_file!";
+///
+/// match write_string_to_file(file_path, content) {
+///     Ok(_) => println!("Content written to {:?}", file_path),
+///     Err(e) => eprintln!("Error writing file: {}", e),
+/// }
+///
+/// // Verify by reading back
+/// # match read_to_string(file_path) {
+/// #     Ok(read_content) if read_content == content => (), // Correct
+/// #     Ok(read_content) => panic!("Content mismatch"),
+/// #     Err(e) => panic!("Failed to read back: {}", e),
+/// # }
+/// // temp_file is automatically deleted on drop
+/// ```
+pub fn write_string_to_file(path: &Path, content: &str) -> Result<(), CoreError> {
+    fs::write(path, content).map_err(|e| CoreError::Filesystem {
+        message: "Failed to write string to file".to_string(),
+        path: path.to_path_buf(),
+        source: e,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,4 +271,67 @@ mod tests {
     
     // Note: Testing permissions errors for read_to_string is also complex in unit tests.
     // Such tests are usually better as integration tests with specific filesystem setups.
+
+    #[test]
+    fn test_write_string_to_file_creates_and_writes() {
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file for test");
+        let file_path = temp_file.path();
+        let content = "Test content for write_string_to_file.";
+
+        // Ensure file doesn't exist or is empty initially (NamedTempFile creates it)
+        // We'll overwrite it.
+
+        let result_write = write_string_to_file(file_path, content);
+        assert!(result_write.is_ok(), "write_string_to_file failed: {:?}", result_write.err());
+
+        let read_content = read_to_string(file_path).expect("Failed to read back file for verification");
+        assert_eq!(read_content, content);
+    }
+
+    #[test]
+    fn test_write_string_to_file_overwrites_existing_content() {
+        let mut temp_file = NamedTempFile::new().expect("Failed to create temp file for test");
+        writeln!(temp_file, "Initial content.").unwrap();
+        let file_path = temp_file.path();
+
+        let new_content = "Overwritten content.";
+        let result_write = write_string_to_file(file_path, new_content);
+        assert!(result_write.is_ok(), "write_string_to_file failed on overwrite: {:?}", result_write.err());
+
+        let read_content = read_to_string(file_path).expect("Failed to read back file after overwrite");
+        assert_eq!(read_content, new_content);
+    }
+
+    #[test]
+    fn test_write_string_to_file_error_on_directory() {
+        let temp_dir = tempdir().expect("Failed to create temp dir for test");
+        let dir_path = temp_dir.path(); // Path to the directory itself
+        let content = "Trying to write to a directory.";
+
+        let result = write_string_to_file(dir_path, content);
+        assert!(result.is_err(), "write_string_to_file should have failed for a directory");
+
+        match result.err().unwrap() {
+            CoreError::Filesystem { message, path, source: _ } => {
+                assert_eq!(message, "Failed to write string to file");
+                assert_eq!(path, dir_path.to_path_buf());
+                // The specific std::io::Error::kind() might vary by OS for this case (e.g., IsADirectory on Unix)
+            }
+            other_error => panic!("Unexpected error type: {:?}", other_error),
+        }
+    }
+
+    // Note: Testing for non-writable paths (permissions errors) for `write_string_to_file`
+    // is difficult and platform-dependent in unit tests.
+    // On Unix-like systems, one could try to create a file in a directory owned by root,
+    // or change file permissions to read-only, but this often requires specific test runner
+    // privileges or setup that is not typical for standard unit tests.
+    // For example, setting a file to read-only:
+    // ```
+    // let mut perms = fs::metadata(file_path)?.permissions();
+    // perms.set_readonly(true);
+    // fs::set_permissions(file_path, perms)?;
+    // ```
+    // Then attempting to write and checking for `std::io::ErrorKind::PermissionDenied`.
+    // However, this is more involved and might not work consistently across all test environments.
 }

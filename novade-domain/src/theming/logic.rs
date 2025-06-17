@@ -1,3 +1,13 @@
+//! Core algorithms for the NovaDE theming system.
+//!
+//! This module provides functions for loading, validating, and resolving theme definitions
+//! (`ThemeDefinition`) and token sets (`TokenSet`) based on a given `ThemingConfiguration`.
+//! It handles the complexities of token referencing, cycle detection, application of
+//! theme variants (for light/dark schemes), accent color modifications, and user overrides.
+//! The primary entry point for resolving a full theme configuration into a set of
+//! applicable styles is `resolve_tokens_for_config`. This module also includes logic
+//! for generating a fallback theme state if primary theme loading or resolution fails.
+
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -23,7 +33,18 @@ const BASE_TOKENS_JSON: &str = include_str!("default_themes/base.tokens.json"); 
 
 // --- File Loading and Validation (async) ---
 
-/// Loads raw tokens from a single JSON file.
+/// Loads raw tokens from a single JSON file using the provided `ConfigServiceAsync`.
+///
+/// Each token in the file is validated (e.g., for valid opacity values).
+/// Duplicate token identifiers within the same file will result in an error.
+///
+/// # Arguments
+/// * `path`: Path to the JSON file containing an array of `RawToken` objects.
+/// * `config_service`: Service used to read the file content.
+///
+/// # Returns
+/// A `TokenSet` containing the loaded tokens, or a `ThemingError` if loading,
+/// parsing, or validation fails.
 pub async fn load_raw_tokens_from_file(
     path: &Path,
     config_service: &Arc<dyn ConfigServiceAsync>,
@@ -71,7 +92,18 @@ pub async fn load_raw_tokens_from_file(
     Ok(token_set)
 }
 
-/// Loads and validates multiple token files, merging them.
+/// Loads and validates `RawToken`s from multiple JSON files, merging them into a single `TokenSet`.
+///
+/// Tokens from files later in the `paths` list will override tokens with the same ID
+/// from earlier files. After merging, the combined `TokenSet` is validated for circular references.
+///
+/// # Arguments
+/// * `paths`: A slice of `PathBuf`s, each pointing to a JSON token file.
+/// * `config_service`: Service used to read the file contents.
+///
+/// # Returns
+/// A merged `TokenSet` from all files, or a `ThemingError` if any file operation,
+/// parsing, or validation (including cycle detection) fails.
 pub async fn load_and_validate_token_files(
     paths: &[PathBuf],
     config_service: &Arc<dyn ConfigServiceAsync>,
@@ -90,7 +122,19 @@ pub async fn load_and_validate_token_files(
     Ok(merged_tokens)
 }
 
-/// Loads a theme definition from a single JSON file.
+/// Loads a `ThemeDefinition` from a single JSON file using the `ConfigServiceAsync`.
+///
+/// It also verifies that the `id` field within the loaded `ThemeDefinition` matches
+/// the `theme_id_from_path` (derived from the filename).
+///
+/// # Arguments
+/// * `path`: Path to the `.theme.json` file.
+/// * `theme_id_from_path`: The `ThemeIdentifier` expected, typically derived from the filename.
+/// * `config_service`: Service used to read the file content.
+///
+/// # Returns
+/// The loaded `ThemeDefinition`, or a `ThemingError` if file operations, parsing,
+/// or ID validation fails.
 pub async fn load_theme_definition_from_file(
     path: &Path,
     theme_id_from_path: &ThemeIdentifier,
@@ -122,7 +166,22 @@ pub async fn load_theme_definition_from_file(
     Ok(theme_def)
 }
 
-/// Loads and validates multiple theme definition files.
+/// Loads and validates multiple `ThemeDefinition` files from the given paths.
+///
+/// For each theme file, it:
+/// 1. Derives the expected `ThemeIdentifier` from the filename.
+/// 2. Loads the `ThemeDefinition` using `load_theme_definition_from_file`.
+/// 3. Validates all token references within the loaded theme definition (base and variants)
+///    against the provided `global_tokens` and tokens defined within the theme itself.
+///
+/// # Arguments
+/// * `paths`: A slice of `PathBuf`s, each pointing to a `.theme.json` file.
+/// * `global_tokens`: A `TokenSet` of globally available tokens that can be referenced by themes.
+/// * `config_service`: Service used to read file contents.
+///
+/// # Returns
+/// A `Vec` of loaded and validated `ThemeDefinition`s, or a `ThemingError` if any
+/// operation fails for any theme.
 pub async fn load_and_validate_theme_files(
     paths: &[PathBuf], // Each path is expected to be a theme file, e.g., my-theme.theme.json
     global_tokens: &TokenSet,
@@ -148,6 +207,13 @@ pub async fn load_and_validate_theme_files(
 
 // --- Validation Logic (sync) ---
 
+/// Validates a `TokenSet` for circular dependencies among `TokenValue::Reference` entries.
+///
+/// # Arguments
+/// * `tokens`: The `TokenSet` to validate.
+///
+/// # Returns
+/// `Ok(())` if no cycles are detected, otherwise `Err(ThemingError::CyclicTokenReference)`.
 pub fn validate_tokenset_for_cycles(tokens: &TokenSet) -> Result<(), ThemingError> {
     let mut visited = HashMap::new();
     enum VisitState { Visiting, Visited }
@@ -197,6 +263,21 @@ fn detect_cycle_dfs<'a>(
     Ok(())
 }
 
+/// Validates that all `TokenValue::Reference` entries within a `ThemeDefinition`
+/// (including its base tokens and all variant tokens) point to known tokens.
+///
+/// A reference is considered valid if it points to:
+/// 1. A token within the same `TokenSet` (e.g., another token in `base_tokens` or within the same variant's `tokens`).
+/// 2. A token in the theme's `base_tokens` (if checking a variant).
+/// 3. A token in the provided `global_tokens`.
+///
+/// # Arguments
+/// * `theme_def`: The `ThemeDefinition` to validate.
+/// * `global_tokens`: A `TokenSet` of globally available tokens.
+///
+/// # Returns
+/// `Ok(())` if all references are valid, otherwise `Err(ThemingError::TokenResolutionError)`
+/// indicating an undefined token reference.
 pub fn validate_theme_definition_references(
     theme_def: &ThemeDefinition,
     global_tokens: &TokenSet,
@@ -255,12 +336,35 @@ pub fn validate_theme_definition_references(
 
 // --- Token Resolution Pipeline (sync) ---
 
+/// Recursively resolves a single `TokenValue` to its final string representation.
+///
+/// This function handles `TokenValue::Reference` by looking up the referenced token
+/// in `all_tokens` and resolving it. It detects circular references and enforces
+/// a maximum resolution depth to prevent infinite loops. Other `TokenValue` variants
+/// are converted directly to their string form.
+///
+/// # Arguments
+/// * `original_id`: The `TokenIdentifier` of the token for which resolution was initially requested.
+///   Used for error reporting to provide context.
+/// * `current_id_to_resolve`: The `TokenIdentifier` of the token currently being processed.
+///   This might be the `original_id` or an ID from a reference chain.
+/// * `current_value`: The `TokenValue` of the `current_id_to_resolve`.
+/// * `all_tokens`: A map of all available token identifiers to their `TokenValue`s at the current
+///   stage of resolution (e.g., after merging base, variant, global, and user tokens, but before
+///   resolving references and applying functions like opacity formatting).
+/// * `visited_path`: A vector used to track the chain of references being followed, for cycle detection.
+/// * `current_depth`: The current depth in the reference chain.
+/// * `max_depth`: The maximum allowed depth for reference chains.
+///
+/// # Returns
+/// The resolved string value of the token, or a `ThemingError` if resolution fails
+/// (e.g., cycle detected, max depth exceeded, undefined reference).
 pub fn resolve_single_token_value(
     original_id: &TokenIdentifier, // The ID we are trying to resolve for the final map
     current_id_to_resolve: &TokenIdentifier, // The ID of the token currently being processed (could be a reference)
     current_value: &TokenValue,    // The value of current_id_to_resolve
-    all_tokens: &BTreeMap<TokenIdentifier, TokenValue>,
-    visited_path: &mut Vec<TokenIdentifier>, // Path of reference lookups
+    all_tokens: &BTreeMap<TokenIdentifier, TokenValue>, // Map of available token values for lookup
+    visited_path: &mut Vec<TokenIdentifier>, // Path of reference lookups for cycle detection
     current_depth: u8,
     max_depth: u8,
 ) -> Result<String, ThemingError> {
@@ -314,6 +418,31 @@ pub fn resolve_single_token_value(
 }
 
 
+/// Resolves a complete `ThemingConfiguration` into a final set of string-based token values.
+///
+/// This is the main function for processing a theme into a state ready for UI consumption.
+/// The process involves several steps:
+/// 1. **Merging**: Combines tokens from `global_tokens`, the `theme_def.base_tokens`,
+///    and the appropriate `theme_def.variants[n].tokens` based on `config.preferred_color_scheme`.
+///    Tokens from later stages override earlier ones (Variant > Base > Global).
+/// 2. **Accent Application**: If `config.selected_accent_color` is set and the `theme_def`
+///    has `accentable_tokens`, it modifies the colors of specified tokens according to
+///    their `AccentModificationType`.
+/// 3. **User Overrides**: Applies `config.custom_user_token_overrides`, which take the
+///    highest precedence, potentially overriding any token from previous steps.
+/// 4. **Reference Resolution**: Iterates through the resulting merged set of tokens and resolves
+///    all `TokenValue::Reference` entries to their final string values using
+///    `resolve_single_token_value`. This also handles formatting for types like `Opacity`.
+///
+/// # Arguments
+/// * `config`: The `ThemingConfiguration` specifying user preferences (selected theme, scheme, accent, overrides).
+/// * `theme_def`: The `ThemeDefinition` for the `config.selected_theme_id`.
+/// * `global_tokens`: A `TokenSet` of globally available raw tokens.
+/// * `accentable_tokens_map`: A pre-processed map from `theme_def.accentable_tokens` for efficient lookup.
+///
+/// # Returns
+/// A `BTreeMap` where keys are `TokenIdentifier`s and values are their fully resolved string
+/// representations, or a `ThemingError` if any part of the process fails.
 pub fn resolve_tokens_for_config(
     config: &ThemingConfiguration,
     theme_def: &ThemeDefinition,
@@ -394,6 +523,15 @@ pub fn resolve_tokens_for_config(
 
 // --- Fallback Theme Logic (sync) ---
 
+/// Loads and validates the embedded fallback `ThemeDefinition` and its associated `TokenSet`.
+///
+/// The fallback theme is defined in `default_themes/fallback.theme.json`. This function
+/// parses this JSON, validates it for internal consistency (references, cycles), and
+/// returns the theme definition and its base tokens.
+///
+/// # Returns
+/// A `Result` containing a tuple of (`ThemeDefinition`, `TokenSet`) for the fallback theme,
+/// or a `ThemingError` if parsing or validation of the embedded fallback theme fails.
 pub fn generate_fallback_theme_definition_and_tokens() -> Result<(ThemeDefinition, TokenSet), ThemingError> {
     let fallback_theme_def: ThemeDefinition = serde_json::from_str(FALLBACK_THEME_JSON)
         .map_err(|e| ThemingError::ConfigurationError {
@@ -411,6 +549,23 @@ pub fn generate_fallback_theme_definition_and_tokens() -> Result<(ThemeDefinitio
     Ok((fallback_theme_def, fallback_theme_tokens))
 }
 
+/// Generates a fully resolved `AppliedThemeState` for the system's fallback theme.
+///
+/// This function is called when the `ThemingEngine` cannot apply any user-specified
+/// or default theme (e.g., due to missing files, corrupted definitions, or resolution errors).
+/// It ensures that the application always has a usable, albeit basic, theme.
+///
+/// The process involves:
+/// 1. Loading the fallback `ThemeDefinition` and its tokens using `generate_fallback_theme_definition_and_tokens`.
+/// 2. Creating a default `ThemingConfiguration` that selects the fallback theme and a default scheme (e.g., Dark).
+/// 3. Resolving this configuration using `resolve_tokens_for_config`.
+///
+/// If any of these steps fail (which would indicate a critical issue with the embedded
+/// fallback theme itself), an error is logged, and an even more basic, hardcoded error
+/// theme state is returned.
+///
+/// # Returns
+/// An `AppliedThemeState` representing the resolved fallback theme.
 pub fn generate_fallback_applied_state() -> AppliedThemeState {
     match generate_fallback_theme_definition_and_tokens() {
         Ok((fallback_theme_def, _)) => { 
@@ -667,5 +822,263 @@ mod tests {
         let resolved = result.unwrap();
         assert_eq!(resolved.get(&TokenIdentifier::new("color.primary")).unwrap(), "blue");
         assert_eq!(resolved.get(&TokenIdentifier::new("color.text")).unwrap(), "blue");
+    }
+
+    // --- Enhanced Tests for resolve_tokens_for_config ---
+
+    fn create_raw_token(id_str: &str, value: TokenValue) -> RawToken {
+        RawToken {
+            id: TokenIdentifier::new(id_str),
+            value,
+            description: Some(format!("Test token {}", id_str)),
+            group: Some("TestGroup".to_string()),
+        }
+    }
+
+    fn create_test_theme_def(id_str: &str, base_tokens: TokenSet, variants: Vec<ThemeVariantDefinition>, supported_accents: Option<Vec<AccentColor>>, accentable: Option<HashMap<TokenIdentifier, AccentModificationType>>) -> ThemeDefinition {
+        ThemeDefinition {
+            id: ThemeIdentifier::new(id_str),
+            name: format!("Theme {}", id_str),
+            description: Some(format!("Description for theme {}", id_str)),
+            author: Some("Test Author".to_string()),
+            version: Some("1.0.0".to_string()),
+            base_tokens,
+            variants,
+            supported_accent_colors: supported_accents,
+            accentable_tokens: accentable,
+        }
+    }
+
+    #[test]
+    fn test_resolve_variant_application() {
+        let mut base_tokens = TokenSet::new();
+        base_tokens.insert(TokenIdentifier::new("color.background"), create_raw_token("color.background", TokenValue::Color("white".to_string())));
+        base_tokens.insert(TokenIdentifier::new("color.text"), create_raw_token("color.text", TokenValue::Color("black".to_string())));
+        base_tokens.insert(TokenIdentifier::new("spacing.base"), create_raw_token("spacing.base", TokenValue::Dimension("4px".to_string())));
+
+        let mut dark_variant_tokens = TokenSet::new();
+        dark_variant_tokens.insert(TokenIdentifier::new("color.background"), create_raw_token("color.background", TokenValue::Color("black".to_string()))); // Override
+        dark_variant_tokens.insert(TokenIdentifier::new("color.variant.specific"), create_raw_token("color.variant.specific", TokenValue::Color("grey".to_string()))); // New
+
+        let dark_variant = ThemeVariantDefinition {
+            applies_to_scheme: ColorSchemeType::Dark,
+            tokens: dark_variant_tokens,
+        };
+
+        let theme_def = create_test_theme_def("variant-theme", base_tokens, vec![dark_variant], None, None);
+        let global_tokens = TokenSet::new();
+        let accentable_map = HashMap::new();
+
+        // Test Dark Variant
+        let config_dark = ThemingConfiguration {
+            selected_theme_id: theme_def.id.clone(),
+            preferred_color_scheme: ColorSchemeType::Dark,
+            selected_accent_color: None,
+            custom_user_token_overrides: None,
+        };
+        let resolved_dark = resolve_tokens_for_config(&config_dark, &theme_def, &global_tokens, &accentable_map).unwrap();
+
+        assert_eq!(resolved_dark.get(&TokenIdentifier::new("color.background")).unwrap(), "black", "Dark variant override failed");
+        assert_eq!(resolved_dark.get(&TokenIdentifier::new("color.text")).unwrap(), "black", "Base token should persist if not overridden in variant");
+        assert_eq!(resolved_dark.get(&TokenIdentifier::new("color.variant.specific")).unwrap(), "grey", "Variant specific token missing");
+        assert_eq!(resolved_dark.get(&TokenIdentifier::new("spacing.base")).unwrap(), "4px", "Base token (non-color) should persist");
+
+        // Test Light Variant (should use base tokens as no light variant defined)
+        let config_light = ThemingConfiguration {
+            selected_theme_id: theme_def.id.clone(),
+            preferred_color_scheme: ColorSchemeType::Light,
+            ..config_dark // rest is same
+        };
+        let resolved_light = resolve_tokens_for_config(&config_light, &theme_def, &global_tokens, &accentable_map).unwrap();
+        assert_eq!(resolved_light.get(&TokenIdentifier::new("color.background")).unwrap(), "white", "Light scheme should use base token");
+        assert_eq!(resolved_light.get(&TokenIdentifier::new("color.text")).unwrap(), "black");
+        assert!(!resolved_light.contains_key(&TokenIdentifier::new("color.variant.specific")), "Variant specific token should not be present for light scheme");
+    }
+
+    #[test]
+    fn test_resolve_accent_color_application() {
+        let mut base_tokens = TokenSet::new();
+        base_tokens.insert(TokenIdentifier::new("color.primary"), create_raw_token("color.primary", TokenValue::Color("#0000FF".to_string()))); // Blue
+        base_tokens.insert(TokenIdentifier::new("color.secondary"), create_raw_token("color.secondary", TokenValue::Color("#00FF00".to_string()))); // Green
+        base_tokens.insert(TokenIdentifier::new("size.font"), create_raw_token("size.font", TokenValue::Dimension("16px".to_string())));
+
+
+        let supported_accents = vec![
+            AccentColor { name: Some("Test Red".to_string()), value: CoreColor::from_hex("#FF0000").unwrap() }, // Red
+        ];
+        let red_accent_value = CoreColor::from_hex("#FF0000").unwrap();
+
+        let mut accentable = HashMap::new();
+        accentable.insert(TokenIdentifier::new("color.primary"), AccentModificationType::DirectReplace);
+        accentable.insert(TokenIdentifier::new("color.secondary"), AccentModificationType::Lighten(0.5)); // Lighten green
+
+        let theme_def = create_test_theme_def("accent-theme", base_tokens, vec![], Some(supported_accents), Some(accentable));
+        let global_tokens = TokenSet::new();
+
+        // Scenario 1: DirectReplace
+        let config_replace = ThemingConfiguration {
+            selected_theme_id: theme_def.id.clone(),
+            preferred_color_scheme: ColorSchemeType::Light,
+            selected_accent_color: Some(red_accent_value.clone()),
+            custom_user_token_overrides: None,
+        };
+        let resolved_replace = resolve_tokens_for_config(&config_replace, &theme_def, &global_tokens, &theme_def.accentable_tokens.as_ref().unwrap()).unwrap();
+        assert_eq!(resolved_replace.get(&TokenIdentifier::new("color.primary")).unwrap().to_lowercase(), "#ff0000", "DirectReplace failed");
+
+        // Scenario 2: Lighten (Green #00FF00 lighten 0.5 -> #80ff80)
+        // Note: CoreColor::lighten behavior needs to be consistent. Assuming it is.
+        let expected_lightened_green = CoreColor::from_hex("#00FF00").unwrap().lighten(0.5).to_hex_string();
+        assert_eq!(resolved_replace.get(&TokenIdentifier::new("color.secondary")).unwrap().to_lowercase(), expected_lightened_green.to_lowercase(), "Lighten failed");
+
+        // Scenario 3: Darken (Add a darken case)
+        let mut accentable_darken = theme_def.accentable_tokens.clone().unwrap();
+        accentable_darken.insert(TokenIdentifier::new("color.primary"), AccentModificationType::Darken(0.5)); // Darken blue
+        let theme_def_darken = ThemeDefinition { accentable_tokens: Some(accentable_darken), ..theme_def.clone() };
+        let resolved_darken = resolve_tokens_for_config(&config_replace, &theme_def_darken, &global_tokens, &theme_def_darken.accentable_tokens.as_ref().unwrap()).unwrap();
+        let expected_darkened_blue = CoreColor::from_hex("#0000FF").unwrap().darken(0.5).to_hex_string();
+        assert_eq!(resolved_darken.get(&TokenIdentifier::new("color.primary")).unwrap().to_lowercase(), expected_darkened_blue.to_lowercase(), "Darken failed");
+
+        // Scenario 4: No accent color selected
+        let config_no_accent = ThemingConfiguration { selected_accent_color: None, ..config_replace.clone() };
+        let resolved_no_accent = resolve_tokens_for_config(&config_no_accent, &theme_def, &global_tokens, &theme_def.accentable_tokens.as_ref().unwrap()).unwrap();
+        assert_eq!(resolved_no_accent.get(&TokenIdentifier::new("color.primary")).unwrap().to_lowercase(), "#0000ff", "No accent should use base color");
+
+        // Scenario 5: Accenting a non-color token (should error)
+        let mut accentable_error = theme_def.accentable_tokens.clone().unwrap();
+        accentable_error.insert(TokenIdentifier::new("size.font"), AccentModificationType::DirectReplace);
+        let theme_def_error = ThemeDefinition { accentable_tokens: Some(accentable_error), ..theme_def.clone() };
+        let result_error = resolve_tokens_for_config(&config_replace, &theme_def_error, &global_tokens, &theme_def_error.accentable_tokens.as_ref().unwrap());
+        assert!(matches!(result_error, Err(ThemingError::AccentColorApplicationError {token_id, .. }) if token_id.as_str() == "size.font" ), "Accenting non-color should error");
+    }
+
+    #[test]
+    fn test_resolve_user_token_overrides() {
+        let mut base_tokens = TokenSet::new();
+        base_tokens.insert(TokenIdentifier::new("spacing.medium"), create_raw_token("spacing.medium", TokenValue::Dimension("8px".to_string())));
+        base_tokens.insert(TokenIdentifier::new("color.background"), create_raw_token("color.background", TokenValue::Color("white".to_string())));
+
+        let theme_def = create_test_theme_def("override-theme", base_tokens, vec![], None, None);
+        let global_tokens = TokenSet::new();
+        let accentable_map = HashMap::new();
+
+        let mut user_overrides = TokenSet::new();
+        user_overrides.insert(TokenIdentifier::new("spacing.medium"), create_raw_token("spacing.medium", TokenValue::Dimension("10px".to_string()))); // Override
+        user_overrides.insert(TokenIdentifier::new("user.custom"), create_raw_token("user.custom", TokenValue::String("my-value".to_string()))); // New
+
+        let config = ThemingConfiguration {
+            selected_theme_id: theme_def.id.clone(),
+            preferred_color_scheme: ColorSchemeType::Light,
+            selected_accent_color: None,
+            custom_user_token_overrides: Some(user_overrides),
+        };
+
+        let resolved = resolve_tokens_for_config(&config, &theme_def, &global_tokens, &accentable_map).unwrap();
+        assert_eq!(resolved.get(&TokenIdentifier::new("spacing.medium")).unwrap(), "10px", "User override for existing token failed");
+        assert_eq!(resolved.get(&TokenIdentifier::new("user.custom")).unwrap(), "my-value", "User specific token failed");
+        assert_eq!(resolved.get(&TokenIdentifier::new("color.background")).unwrap(), "white", "Base token should persist if not overridden by user");
+    }
+
+    #[test]
+    fn test_resolve_interaction_variant_accent_override() {
+        let mut base_tokens = TokenSet::new(); // color.primary: blue
+        base_tokens.insert(TokenIdentifier::new("color.primary"), create_raw_token("color.primary", TokenValue::Color("#0000FF".to_string())));
+
+        let mut dark_variant_tokens = TokenSet::new(); // color.primary: purple (#800080) in dark variant
+        dark_variant_tokens.insert(TokenIdentifier::new("color.primary"), create_raw_token("color.primary", TokenValue::Color("#800080".to_string())));
+        let dark_variant = ThemeVariantDefinition { applies_to_scheme: ColorSchemeType::Dark, tokens: dark_variant_tokens };
+
+        let supported_accents = vec![AccentColor { name: Some("Test Green".to_string()), value: CoreColor::from_hex("#00FF00").unwrap() }]; // Green accent
+        let green_accent_value = CoreColor::from_hex("#00FF00").unwrap();
+        let mut accentable = HashMap::new(); // color.primary is accentable by direct replace
+        accentable.insert(TokenIdentifier::new("color.primary"), AccentModificationType::DirectReplace);
+
+        let theme_def = create_test_theme_def("interaction-theme", base_tokens, vec![dark_variant], Some(supported_accents), Some(accentable.clone()));
+        let global_tokens = TokenSet::new();
+
+        // 1. User override takes highest precedence
+        let mut user_overrides = TokenSet::new(); // color.primary: yellow (#FFFF00) by user
+        user_overrides.insert(TokenIdentifier::new("color.primary"), create_raw_token("color.primary", TokenValue::Color("#FFFF00".to_string())));
+        let config_with_override = ThemingConfiguration {
+            selected_theme_id: theme_def.id.clone(),
+            preferred_color_scheme: ColorSchemeType::Dark, // Dark variant active
+            selected_accent_color: Some(green_accent_value.clone()), // Green accent selected
+            custom_user_token_overrides: Some(user_overrides),
+        };
+        let resolved_override = resolve_tokens_for_config(&config_with_override, &theme_def, &global_tokens, &accentable).unwrap();
+        assert_eq!(resolved_override.get(&TokenIdentifier::new("color.primary")).unwrap().to_lowercase(), "#ffff00", "User override should take precedence");
+
+        // 2. No user override: Accent applies to Variant token
+        let config_variant_accent = ThemingConfiguration {
+            custom_user_token_overrides: None, // No user override
+            ..config_with_override.clone()
+        };
+        let resolved_variant_accent = resolve_tokens_for_config(&config_variant_accent, &theme_def, &global_tokens, &accentable).unwrap();
+        // Dark variant is purple (#800080), accent is green (#00FF00). DirectReplace means green wins.
+        assert_eq!(resolved_variant_accent.get(&TokenIdentifier::new("color.primary")).unwrap().to_lowercase(), "#00ff00", "Accent should apply to variant token");
+
+        // 3. No user override, no accent: Variant token used
+        let config_variant_only = ThemingConfiguration {
+            selected_accent_color: None, // No accent
+            custom_user_token_overrides: None,
+            ..config_with_override.clone()
+        };
+        let resolved_variant_only = resolve_tokens_for_config(&config_variant_only, &theme_def, &global_tokens, &accentable).unwrap();
+        assert_eq!(resolved_variant_only.get(&TokenIdentifier::new("color.primary")).unwrap().to_lowercase(), "#800080", "Variant token should be used");
+
+        // 4. No user override, no accent, light scheme: Base token used
+        let config_base_only = ThemingConfiguration {
+            preferred_color_scheme: ColorSchemeType::Light, // Light scheme (no variant defined for it)
+            selected_accent_color: None,
+            custom_user_token_overrides: None,
+            ..config_with_override.clone()
+        };
+        let resolved_base_only = resolve_tokens_for_config(&config_base_only, &theme_def, &global_tokens, &accentable).unwrap();
+        assert_eq!(resolved_base_only.get(&TokenIdentifier::new("color.primary")).unwrap().to_lowercase(), "#0000ff", "Base token should be used for light scheme");
+    }
+
+    #[test]
+    fn test_resolve_reference_resolution_with_overrides_variants() {
+        let mut base_tokens = TokenSet::new();
+        base_tokens.insert(TokenIdentifier::new("base.actual"), create_raw_token("base.actual", TokenValue::Color("blue".to_string())));
+        base_tokens.insert(TokenIdentifier::new("base.ref"), create_raw_token("base.ref", TokenValue::Reference(TokenIdentifier::new("base.actual"))));
+        base_tokens.insert(TokenIdentifier::new("another.actual"), create_raw_token("another.actual", TokenValue::Color("yellow".to_string())));
+
+        let mut dark_variant_tokens = TokenSet::new();
+        dark_variant_tokens.insert(TokenIdentifier::new("base.actual"), create_raw_token("base.actual", TokenValue::Color("red".to_string()))); // Variant overrides base.actual
+        let dark_variant = ThemeVariantDefinition { applies_to_scheme: ColorSchemeType::Dark, tokens: dark_variant_tokens };
+
+        let theme_def = create_test_theme_def("ref-theme", base_tokens, vec![dark_variant], None, None);
+        let global_tokens = TokenSet::new();
+        let accentable_map = HashMap::new();
+
+        // 1. Reference resolves to variant's overridden value
+        let config_variant = ThemingConfiguration {
+            selected_theme_id: theme_def.id.clone(),
+            preferred_color_scheme: ColorSchemeType::Dark, // Dark variant active
+            selected_accent_color: None,
+            custom_user_token_overrides: None,
+        };
+        let resolved_variant = resolve_tokens_for_config(&config_variant, &theme_def, &global_tokens, &accentable_map).unwrap();
+        assert_eq!(resolved_variant.get(&TokenIdentifier::new("base.ref")).unwrap(), "red", "Reference should resolve to variant's value");
+
+        // 2. User override of the target (`base.actual`) affects reference
+        let mut user_overrides_target = TokenSet::new();
+        user_overrides_target.insert(TokenIdentifier::new("base.actual"), create_raw_token("base.actual", TokenValue::Color("green".to_string())));
+        let config_user_target = ThemingConfiguration {
+            custom_user_token_overrides: Some(user_overrides_target),
+            ..config_variant.clone()
+        };
+        let resolved_user_target = resolve_tokens_for_config(&config_user_target, &theme_def, &global_tokens, &accentable_map).unwrap();
+        assert_eq!(resolved_user_target.get(&TokenIdentifier::new("base.ref")).unwrap(), "green", "Reference should resolve to user-overridden target value");
+
+        // 3. User override of the reference itself (`base.ref`)
+        let mut user_overrides_ref = TokenSet::new();
+        user_overrides_ref.insert(TokenIdentifier::new("base.ref"), create_raw_token("base.ref", TokenValue::Reference(TokenIdentifier::new("another.actual"))));
+        let config_user_ref = ThemingConfiguration {
+            custom_user_token_overrides: Some(user_overrides_ref),
+            ..config_variant.clone()
+        };
+        let resolved_user_ref = resolve_tokens_for_config(&config_user_ref, &theme_def, &global_tokens, &accentable_map).unwrap();
+        assert_eq!(resolved_user_ref.get(&TokenIdentifier::new("base.ref")).unwrap(), "yellow", "User-overridden reference should point to new target's value");
     }
 }
