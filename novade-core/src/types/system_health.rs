@@ -2,9 +2,11 @@
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
+use glib;
 
 /// Represents CPU usage metrics.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, glib::Boxed)]
+#[boxed_type(name = "NovaCpuMetrics")]
 pub struct CpuMetrics {
     /// Total CPU usage across all cores, as a percentage.
     pub total_usage_percent: f32,
@@ -14,7 +16,8 @@ pub struct CpuMetrics {
 }
 
 /// Represents memory usage metrics.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, glib::Boxed)]
+#[boxed_type(name = "NovaMemoryMetrics")]
 pub struct MemoryMetrics {
     /// Total physical memory in bytes.
     pub total_bytes: u64,
@@ -31,7 +34,8 @@ pub struct MemoryMetrics {
 }
 
 /// Represents disk I/O activity metrics.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, glib::Boxed)]
+#[boxed_type(name = "NovaDiskActivityMetrics")]
 pub struct DiskActivityMetrics {
     /// Bytes read per second.
     pub read_bytes_per_sec: u64,
@@ -41,7 +45,8 @@ pub struct DiskActivityMetrics {
 }
 
 /// Represents disk space usage metrics for a specific partition/mount point.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, glib::Boxed)]
+#[boxed_type(name = "NovaDiskSpaceMetrics")]
 pub struct DiskSpaceMetrics {
     /// Name of the disk device (e.g., "sda1", "nvme0n1p2").
     pub device_name: String,
@@ -58,7 +63,8 @@ pub struct DiskSpaceMetrics {
 }
 
 /// Represents network I/O activity metrics for a specific interface.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, glib::Boxed)]
+#[boxed_type(name = "NovaNetworkActivityMetrics")]
 pub struct NetworkActivityMetrics {
     /// Name of the network interface (e.g., "eth0", "wlan0").
     pub interface_name: String,
@@ -74,7 +80,8 @@ pub struct NetworkActivityMetrics {
 }
 
 /// Represents a temperature reading from a system sensor.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, glib::Boxed)]
+#[boxed_type(name = "NovaTemperatureMetric")]
 pub struct TemperatureMetric {
     /// Name of the sensor (e.g., "CPU Core 0", "GPU", "Ambient").
     pub sensor_name: String,
@@ -139,11 +146,13 @@ pub struct TimeRange {
 }
 
 /// A unique identifier for a diagnostic test.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, glib::Boxed)]
+#[boxed_type(name = "NovaDiagnosticTestId")]
 pub struct DiagnosticTestId(pub String);
 
 /// Provides information about an available diagnostic test.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, glib::Boxed)]
+#[boxed_type(name = "NovaDiagnosticTestInfo")]
 pub struct DiagnosticTestInfo {
     /// Unique ID of the diagnostic test.
     pub id: DiagnosticTestId,
@@ -155,7 +164,8 @@ pub struct DiagnosticTestInfo {
 }
 
 /// Represents the status of a diagnostic test.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, glib::Enum)]
+#[enum_type(name = "NovaDiagnosticStatus")]
 pub enum DiagnosticStatus {
     NotRun,
     Running,
@@ -167,7 +177,8 @@ pub enum DiagnosticStatus {
 }
 
 /// Contains the results of a diagnostic test execution.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, glib::Boxed)]
+#[boxed_type(name = "NovaDiagnosticTestResult")]
 pub struct DiagnosticTestResult {
     /// ID of the diagnostic test that was run.
     pub id: DiagnosticTestId,
