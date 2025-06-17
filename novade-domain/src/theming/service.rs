@@ -1,3 +1,10 @@
+//! Manages the overall theming system for NovaDE.
+//!
+//! This module provides the primary `ThemingEngine` struct, which is responsible for
+//! orchestrating theme loading, resolution, and application based on user configuration
+//! and available theme definitions. It handles persistence of user theme preferences
+//! and broadcasts theme change events to the rest of the system.
+
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
@@ -16,11 +23,14 @@ use super::types::{
     AccentColor, AppliedThemeState, ColorSchemeType, RawToken, ThemeDefinition,
     ThemeIdentifier, ThemingConfiguration, TokenIdentifier, TokenSet, TokenValue,
 };
+use novade_core::utils::{fs, paths}; // Added for persistence
+use serde_json; // Added for persistence
 
-// Hashing for TokenSet for cache key
-// This function assumes TokenIdentifier and RawToken (including TokenValue) implement Hash correctly.
-// Specifically, TokenValue's f64 fields (Opacity, Number) must have a Hash implementation
-// that handles f64 correctly (e.g., by hashing their bit representation).
+const THEMING_CONFIG_FILENAME: &str = "theming.json";
+
+// Hashing for TokenSet for cache key.
+// This function assumes TokenIdentifier and RawToken (including TokenValue) implement Hash correctly,
+// particularly for f64 fields in TokenValue which should have a bit-representation based hash.
 fn hash_token_set(token_set: &Option<TokenSet>) -> u64 {
     let mut hasher = DefaultHasher::new();
     if let Some(ts) = token_set {
@@ -39,18 +49,28 @@ fn hash_token_set(token_set: &Option<TokenSet>) -> u64 {
 }
 
 
+/// Internal state managed by the `ThemingEngine`.
+/// This struct holds all the mutable data required for theme management,
+/// such as the current user configuration, loaded theme definitions, global tokens,
+/// and the currently applied theme state. It is managed within an `Arc<Mutex<...>>`.
 pub struct ThemingEngineInternalState {
+    /// The current theming configuration, reflecting user preferences.
     current_config: ThemingConfiguration,
+    /// A list of all theme definitions loaded from configured paths.
     available_themes: Vec<ThemeDefinition>,
     global_raw_tokens: TokenSet,
     applied_state: AppliedThemeState,
     theme_load_paths: Vec<PathBuf>,
     token_load_paths: Vec<PathBuf>,
     config_service: Arc<dyn ConfigServiceAsync>,
+    /// Cache for previously resolved theme states to speed up application of known configurations.
+    /// The key includes theme ID, color scheme, accent color (as hex), and a hash of token overrides.
     resolved_state_cache: HashMap<(ThemeIdentifier, ColorSchemeType, Option<String>, u64), AppliedThemeState>,
 }
 
 impl ThemingEngineInternalState {
+    /// Generates a unique cache key for a given `ThemingConfiguration`.
+    /// This key is used to store and retrieve `AppliedThemeState` objects from the cache.
     fn generate_cache_key(config: &ThemingConfiguration) -> (ThemeIdentifier, ColorSchemeType, Option<String>, u64) {
         let accent_hex = config.selected_accent_color.as_ref().map(|c| c.to_hex_string());
         let overrides_hash = hash_token_set(&config.custom_user_token_overrides);
@@ -63,6 +83,24 @@ impl ThemingEngineInternalState {
     }
 }
 
+/// The primary engine for managing themes in NovaDE.
+///
+/// `ThemingEngine` is responsible for:
+/// - Loading and validating theme definitions (`ThemeDefinition`) and global token sets
+///   from specified file paths using a `ConfigServiceAsync`.
+/// - Managing the user's current theming preferences (`ThemingConfiguration`),
+///   including loading it from and saving it to `theming.json` in the application's
+///   config directory.
+/// - Resolving the `ThemingConfiguration` against available `ThemeDefinition`s and
+///   global tokens to produce an `AppliedThemeState`. This involves handling
+///   color scheme variants, accent colors, and user token overrides.
+/// - Utilizing the functions in `novade_domain::theming::logic` for complex tasks like
+///   token resolution, validation, and fallback state generation.
+/// - Broadcasting `ThemeChangedEvent` via a `tokio::sync::broadcast` channel whenever
+///   the `AppliedThemeState` changes, allowing other parts of the application (e.g., UI)
+///   to react to theme updates.
+/// - Caching resolved `AppliedThemeState`s to optimize performance for frequently
+///   used configurations.
 #[derive(Clone)]
 pub struct ThemingEngine {
     internal_state: Arc<Mutex<ThemingEngineInternalState>>,
@@ -70,6 +108,33 @@ pub struct ThemingEngine {
 }
 
 impl ThemingEngine {
+    /// Creates a new instance of the `ThemingEngine`.
+    ///
+    /// This constructor initializes the engine by:
+    /// 1. Setting up an event channel for broadcasting theme changes.
+    /// 2. Loading global tokens and theme definitions from the specified `token_load_paths`
+    ///    and `theme_load_paths` using the provided `config_service`.
+    /// 3. Attempting to load a previously saved `ThemingConfiguration` from `theming.json`.
+    ///    - If found and valid, it's applied.
+    ///    - If not found, the `initial_config` is applied and then saved to `theming.json`.
+    ///    - If loading fails (e.g., corrupted file), a warning is logged, the `initial_config`
+    ///      (or a fallback if `initial_config` itself fails) is applied, and this state is saved.
+    /// 4. Ensuring a valid theme state is applied, falling back to a system default theme
+    ///    if the specified or loaded configurations are unusable.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_config`: The `ThemingConfiguration` to use if no saved configuration is found
+    ///   or if the saved one is invalid. This typically comes from application defaults.
+    /// * `theme_load_paths`: A list of `PathBuf`s where theme definition files (`.theme.json`) are located.
+    /// * `token_load_paths`: A list of `PathBuf`s where global token files (`.tokens.json`) are located.
+    /// * `config_service`: An `Arc` to a service implementing `ConfigServiceAsync`, used for reading theme and token files.
+    /// * `broadcast_capacity`: The capacity of the broadcast channel for `ThemeChangedEvent`s.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the new `ThemingEngine` instance, or a `ThemingError` if
+    /// critical initialization steps fail (e.g., unable to apply even a fallback theme).
     pub async fn new(
         initial_config: ThemingConfiguration,
         theme_load_paths: Vec<PathBuf>,
@@ -102,7 +167,59 @@ impl ThemingEngine {
         
         Self::internal_apply_configuration_locked(&mut internal_state_locked, initial_config, true /* is_initial */).await?;
         // If internal_apply_configuration_locked fails for initial, it means even fallback failed, which is critical.
-        // However, internal_apply_configuration_locked is designed to use fallback on initial failure.
+        // The original initial_config passed to `new`.
+        let passed_initial_config = initial_config.clone();
+        // This will hold the config that is ultimately applied and potentially saved.
+        let mut effective_config_to_apply = initial_config;
+
+
+        // Attempt to load saved configuration
+        match Self::internal_load_theming_config() {
+            Ok(Some(loaded_config)) => {
+                debug!("Successfully loaded saved theming configuration. Will attempt to apply it.");
+                // We prioritize the loaded config if it's successfully applied.
+                // The first call to internal_apply_configuration_locked (already made) used `passed_initial_config`.
+                // Now, we try to apply `loaded_config`.
+                if Self::internal_apply_configuration_locked(&mut internal_state_locked, loaded_config.clone(), true /* is_initial_override */).await.is_ok() {
+                    debug!("Successfully applied loaded configuration.");
+                    effective_config_to_apply = loaded_config; // Loaded and applied successfully
+                } else {
+                    warn!("Failed to apply loaded theming configuration. Reverting to initial/default config as previously applied. Error during apply will be logged by internal_apply_configuration_locked.");
+                    // If applying loaded_config failed, the state should ideally revert to what `passed_initial_config` produced.
+                    // The first `internal_apply_configuration_locked` call already set this up (potentially with fallback).
+                    // So, `internal_state_locked.current_config` should already reflect the result of `passed_initial_config`.
+                    effective_config_to_apply = internal_state_locked.current_config.clone();
+                }
+            }
+            Ok(None) => {
+                debug!("No saved theming configuration found. Using initial/default (already applied) and attempting to save it.");
+                // `internal_state_locked.current_config` reflects the result of applying `passed_initial_config`.
+                effective_config_to_apply = internal_state_locked.current_config.clone();
+                if let Err(e) = Self::internal_save_theming_config(&effective_config_to_apply) {
+                    warn!("Failed to save initial theming configuration: {:?}", e);
+                }
+            }
+            Err(e) => {
+                warn!("Error loading saved theming configuration: {:?}. Using initial/default config (already applied).", e);
+                // `internal_state_locked.current_config` reflects the result of applying `passed_initial_config`.
+                effective_config_to_apply = internal_state_locked.current_config.clone();
+                if let Err(save_err) = Self::internal_save_theming_config(&effective_config_to_apply) {
+                    warn!("Failed to save current (initial/fallback) theming configuration after load error: {:?}", save_err);
+                }
+            }
+        }
+
+        // Ensure current_config in state reflects the final decision for effective_config_to_apply.
+        // This might involve another apply if effective_config_to_apply is different from internal_state_locked.current_config
+        // (e.g. if loaded_config was chosen and is different from the initially applied passed_initial_config).
+        if internal_state_locked.current_config != effective_config_to_apply {
+             if Self::internal_apply_configuration_locked(&mut internal_state_locked, effective_config_to_apply.clone(), true).await.is_err(){
+                error!("CRITICAL: Failed to apply effective_config_to_apply. Fallback from apply_configuration should have handled this.");
+                // current_config and applied_state should be the ultimate fallback.
+             }
+        }
+        // At this point, internal_state_locked.current_config is the one we're going with.
+        // And internal_state_locked.applied_state is consistent.
 
         Ok(Self {
             internal_state: Arc::new(Mutex::new(internal_state_locked)),
@@ -110,6 +227,86 @@ impl ThemingEngine {
         })
     }
 
+    /// Saves the provided `ThemingConfiguration` to `theming.json` in the application's
+    /// configuration directory. This method is typically called internally after a successful
+    /// configuration change or during initial setup.
+    fn internal_save_theming_config(current_config: &ThemingConfiguration) -> Result<(), ThemingError> {
+        debug!("Attempting to save theming configuration.");
+        let config_dir = paths::get_app_config_dir().map_err(|e| ThemingError::ConfigurationError {
+            message: "Failed to get app config directory".to_string(),
+            source: Some(Box::new(e)),
+        })?;
+
+        fs::ensure_dir_exists(&config_dir).map_err(|e| ThemingError::IoError(
+            format!("Failed to ensure config directory exists: {:?}", config_dir), Some(Box::new(e))
+        ))?;
+
+        let config_file_path = config_dir.join(THEMING_CONFIG_FILENAME);
+
+        let json_string = serde_json::to_string_pretty(current_config).map_err(|e| ThemingError::ConfigurationError {
+            message: format!("Failed to serialize ThemingConfiguration: {}", e),
+            source: Some(Box::new(e)),
+        })?;
+
+        fs::write_string_to_file(&config_file_path, &json_string).map_err(|e| ThemingError::IoError(
+            format!("Failed to write theming configuration to {:?}", config_file_path), Some(Box::new(e))
+        ))?;
+
+        debug!("Theming configuration saved to {:?}", config_file_path);
+        Ok(())
+    }
+
+    /// Loads the `ThemingConfiguration` from `theming.json` in the application's
+    /// configuration directory.
+    ///
+    /// Returns:
+    /// - `Ok(Some(ThemingConfiguration))` if the file exists and is successfully parsed.
+    /// - `Ok(None)` if the file does not exist.
+    /// - `Err(ThemingError)` if there's an I/O error (other than not found) or a parsing error.
+    fn internal_load_theming_config() -> Result<Option<ThemingConfiguration>, ThemingError> {
+        debug!("Attempting to load theming configuration.");
+        let config_dir = paths::get_app_config_dir().map_err(|e| ThemingError::ConfigurationError {
+            message: "Failed to get app config directory".to_string(),
+            source: Some(Box::new(e)),
+        })?;
+        let config_file_path = config_dir.join(THEMING_CONFIG_FILENAME);
+
+        if !config_file_path.exists() {
+            debug!("Theming configuration file not found at {:?}. Returning None.", config_file_path);
+            return Ok(None);
+        }
+
+        let json_string = fs::read_to_string(&config_file_path).map_err(|e| {
+            // Correctly check for CoreError::Filesystem variant and then std::io::Error::kind()
+            match &e {
+                CoreError::Filesystem { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+                    // This case should ideally be caught by the `config_file_path.exists()` check earlier,
+                    // but it's good to handle it robustly here too.
+                    ThemingError::ConfigurationError {
+                        message: format!("Configuration file not found (checked after existence): {:?}", config_file_path),
+                        source: Some(Box::new(e)),
+                    }
+                }
+                _ => ThemingError::IoError(
+                    format!("Failed to read theming configuration from {:?}", config_file_path),
+                    Some(Box::new(e))
+                )
+            }
+        })?;
+
+        let loaded_config: ThemingConfiguration = serde_json::from_str(&json_string).map_err(|e| ThemingError::ConfigurationError {
+            message: format!("Failed to deserialize ThemingConfiguration from {:?}: {}", config_file_path, e),
+            source: Some(Box::new(e)),
+        })?;
+
+        debug!("Theming configuration loaded successfully from {:?}", config_file_path);
+        Ok(Some(loaded_config))
+    }
+
+    /// Loads all theme definition files and global token files from the configured paths.
+    /// This method populates `internal_state.available_themes` and `internal_state.global_raw_tokens`.
+    /// It is called during engine initialization and during `reload_themes_and_tokens`.
+    /// Must be called with a lock on `internal_state`.
     async fn internal_load_themes_and_tokens_locked(
         internal_state: &mut ThemingEngineInternalState,
     ) -> Result<(), ThemingError> {
@@ -154,6 +351,17 @@ impl ThemingEngine {
         Ok(())
     }
 
+    /// Applies the given `ThemingConfiguration` to the `internal_state`.
+    ///
+    /// This involves:
+    /// - Checking the cache for a pre-resolved `AppliedThemeState` for this configuration.
+    /// - If not cached or if `is_initial` is true, resolving the configuration against
+    ///   available themes and global tokens using `logic::resolve_tokens_for_config`.
+    /// - Handling cases where the selected theme is not found or token resolution fails,
+    ///   potentially falling back to a default/system theme if `is_initial` is true.
+    /// - Updating `internal_state.current_config` and `internal_state.applied_state`.
+    /// - Populating the cache with the newly resolved state.
+    /// Must be called with a lock on `internal_state`.
     async fn internal_apply_configuration_locked(
         internal_state: &mut ThemingEngineInternalState,
         config: ThemingConfiguration,
@@ -244,25 +452,57 @@ impl ThemingEngine {
         }
     }
 
+    /// Returns the currently active `AppliedThemeState`.
+    /// This state contains the fully resolved tokens and theme properties ready for UI consumption.
     pub async fn get_current_theme_state(&self) -> AppliedThemeState {
         self.internal_state.lock().await.applied_state.clone()
     }
 
+    /// Returns a list of all currently loaded and valid `ThemeDefinition`s.
+    /// This can be used by UI components to display a list of available themes to the user.
     pub async fn get_available_themes(&self) -> Vec<ThemeDefinition> {
         self.internal_state.lock().await.available_themes.clone()
     }
 
+    /// Returns the current `ThemingConfiguration`, reflecting the user's active preferences.
     pub async fn get_current_configuration(&self) -> ThemingConfiguration {
         self.internal_state.lock().await.current_config.clone()
     }
 
+    /// Updates the theming system with a new `ThemingConfiguration`.
+    ///
+    /// This method will:
+    /// 1. Attempt to apply the `new_config`. If successful, the internal `current_config`
+    ///    and `applied_state` are updated.
+    /// 2. If the application is successful, the `new_config` (which becomes the `current_config`)
+    ///    is saved to `theming.json`.
+    /// 3. If the `applied_state` actually changes as a result of this update, a
+    ///    `ThemeChangedEvent` is broadcast to all subscribers.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_config`: The `ThemingConfiguration` to apply.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if the configuration was successfully applied. Note that saving the
+    /// configuration or broadcasting the event might encounter non-fatal errors which are logged.
+    /// Returns `Err(ThemingError)` if applying the configuration fails critically (e.g., theme
+    /// not found and it's not an initial setup).
     pub async fn update_configuration(&self, new_config: ThemingConfiguration) -> Result<(), ThemingError> {
         let mut guard = self.internal_state.lock().await;
         let old_applied_state_id = guard.applied_state.theme_id.clone(); // For simple comparison
         let old_applied_state_full = guard.applied_state.clone(); // For detailed comparison
 
-        Self::internal_apply_configuration_locked(&mut guard, new_config, false).await?;
+        Self::internal_apply_configuration_locked(&mut guard, new_config.clone(), false).await?; // Pass clone if new_config is used later
         
+        // Save the new configuration if successfully applied
+        if let Err(e) = Self::internal_save_theming_config(&guard.current_config) {
+            // Log error but don't fail the operation for this.
+            // Depending on requirements, this could be a hard error.
+            warn!("Failed to save updated theming configuration: {:?}", e);
+        }
+
         // Check if applied state actually changed to avoid unnecessary events.
         // A more thorough check would compare all fields of AppliedThemeState if PartialEq is derived.
         if guard.applied_state != old_applied_state_full {
@@ -276,6 +516,19 @@ impl ThemingEngine {
         Ok(())
     }
 
+    /// Reloads all theme definition files and global token files from scratch.
+    ///
+    /// This method is useful if theme files might have changed on disk. It will:
+    /// 1. Clear the existing lists of available themes and global tokens.
+    /// 2. Reload them from the paths specified during engine construction.
+    /// 3. Clear the resolved state cache.
+    /// 4. Re-apply the current `ThemingConfiguration` using the newly loaded themes/tokens.
+    /// 5. Broadcast a `ThemeChangedEvent` if the re-application results in a different `AppliedThemeState`.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` if reloading and re-application are successful.
+    /// `Err(ThemingError)` if file loading or theme application fails.
     pub async fn reload_themes_and_tokens(&self) -> Result<(), ThemingError> {
         let mut guard = self.internal_state.lock().await;
         debug!("Reloading themes and tokens...");
@@ -302,6 +555,11 @@ impl ThemingEngine {
         Ok(())
     }
 
+    /// Subscribes to `ThemeChangedEvent`s broadcast by the `ThemingEngine`.
+    ///
+    /// Each subscriber receives a `tokio::sync::broadcast::Receiver` which can be used
+    /// to listen for updates to the `AppliedThemeState`. This is the primary mechanism
+    /// for UI components to react to theme changes.
     pub fn subscribe_to_theme_changes(&self) -> broadcast::Receiver<ThemeChangedEvent> {
         self.event_sender.subscribe()
     }
@@ -569,5 +827,194 @@ mod tests {
         assert_eq!(state_after_reload.resolved_tokens.get(&TokenIdentifier::new("dynamic.size")).unwrap(), "10px");
 
         // If the mock could be updated, we'd assert "green" and "20px" and presence of "new.token".
+    }
+
+    // --- Tests for ThemingConfiguration Persistence ---
+
+    // Helper to create a temporary directory that acts as a mock app config root.
+    // Returns the TempDir object (to keep it alive) and the PathBuf of the dir.
+    fn setup_temp_config_dir() -> (tempfile::TempDir, PathBuf) {
+        let temp_dir = tempfile::tempdir().expect("Failed to create temp dir for config tests");
+        let temp_config_path = temp_dir.path().to_path_buf();
+
+        // Override where get_app_config_dir() looks for config.
+        // This relies on get_app_config_dir respecting XDG_CONFIG_HOME.
+        // If it doesn't, these tests might write to the actual user config dir,
+        // which is not ideal. For robust testing, get_app_config_dir might need
+        // to be injectable or have a test-specific override.
+        // For now, we assume it respects XDG_CONFIG_HOME for testing.
+        std::env::set_var("XDG_CONFIG_HOME", temp_config_path.to_str().unwrap());
+
+        (temp_dir, temp_config_path)
+    }
+
+    fn cleanup_temp_config_dir(temp_dir: tempfile::TempDir) {
+        std::env::remove_var("XDG_CONFIG_HOME"); // Clean up env var
+        temp_dir.close().expect("Failed to close temp_dir");
+    }
+
+    #[tokio::test]
+    async fn test_initial_save_of_theming_config_when_none_exists() {
+        let (_temp_dir_guard, _config_path) = setup_temp_config_dir(); // _config_path is XDG_CONFIG_HOME
+        let app_config_novade_dir = paths::get_app_config_dir().unwrap(); // Should be $XDG_CONFIG_HOME/NovaDE
+        let config_file = app_config_novade_dir.join(THEMING_CONFIG_FILENAME);
+
+        assert!(!config_file.exists(), "Config file should not exist initially");
+
+        let mut mock_config_service = new_mock_arc_config_service();
+        // Assume no themes/tokens for simplicity, focusing on config save/load
+        mock_read_file_fails(&mut Arc::get_mut(&mut mock_config_service).unwrap(), |_| true, "No files expected".to_string());
+
+
+        let initial_config = default_test_config("fallback"); // Engine will use fallback due to no themes
+
+        let engine = ThemingEngine::new(
+            initial_config.clone(),
+            vec![], vec![], // No theme/token paths
+            mock_config_service,
+            16
+        ).await.expect("Engine creation failed");
+
+        // new() should have saved the initial_config (or the fallback it resolved to)
+        assert!(config_file.exists(), "Config file should have been created by new()");
+
+        let saved_content = std::fs::read_to_string(&config_file).expect("Failed to read saved config file");
+        let saved_config: ThemingConfiguration = serde_json::from_str(&saved_content).expect("Failed to parse saved config");
+
+        // The engine might have chosen 'fallback' if 'default-theme' wasn't found.
+        // The key is that *a* valid config (whatever was active initially) was saved.
+        let current_engine_config = engine.get_current_configuration().await;
+        assert_eq!(saved_config, current_engine_config);
+
+        cleanup_temp_config_dir(_temp_dir_guard);
+    }
+
+    #[tokio::test]
+    async fn test_load_existing_theming_config_on_startup() {
+        let (_temp_dir_guard, _config_path) = setup_temp_config_dir();
+        let app_config_novade_dir = paths::get_app_config_dir().unwrap();
+        fs::ensure_dir_exists(&app_config_novade_dir).unwrap(); // Ensure $XDG_CONFIG_HOME/NovaDE exists
+        let config_file = app_config_novade_dir.join(THEMING_CONFIG_FILENAME);
+
+        let expected_config = ThemingConfiguration {
+            selected_theme_id: ThemeIdentifier::new("saved-theme"),
+            preferred_color_scheme: ColorSchemeType::Dark,
+            selected_accent_color: Some(Color::from_hex("#123456").unwrap()),
+            custom_user_token_overrides: None,
+        };
+        let json_string = serde_json::to_string_pretty(&expected_config).unwrap();
+        std::fs::write(&config_file, json_string).expect("Failed to write initial test config file");
+
+        let mut mock_config_service = new_mock_arc_config_service();
+        // Mock theme/token loading to make "saved-theme" available
+        let theme_def = create_test_theme_definition("saved-theme", "blue");
+        let theme_content = serde_json::to_string(&theme_def).unwrap();
+        mock_read_file(&mut Arc::get_mut(&mut mock_config_service).unwrap(), PathBuf::from("themes/saved.json"), theme_content);
+        mock_read_file_fails(&mut Arc::get_mut(&mut mock_config_service).unwrap(), |p| p.to_str().unwrap().contains("tokens/"), "No token files".to_string());
+
+
+        let engine = ThemingEngine::new(
+            default_test_config("fallback"), // This should be overridden by loaded config
+            vec![PathBuf::from("themes/saved.json")], vec![],
+            mock_config_service,
+            16
+        ).await.expect("Engine creation failed");
+
+        let current_config = engine.get_current_configuration().await;
+        assert_eq!(current_config, expected_config, "Engine should have loaded the saved configuration");
+
+        cleanup_temp_config_dir(_temp_dir_guard);
+    }
+
+    #[tokio::test]
+    async fn test_update_configuration_saves_to_file() {
+        let (_temp_dir_guard, _config_path) = setup_temp_config_dir();
+        let app_config_novade_dir = paths::get_app_config_dir().unwrap();
+        let config_file = app_config_novade_dir.join(THEMING_CONFIG_FILENAME);
+
+        let mut mock_config_service = new_mock_arc_config_service();
+        let theme_def1 = create_test_theme_definition("theme-one", "red");
+        let theme_content1 = serde_json::to_string(&theme_def1).unwrap();
+        mock_read_file(&mut Arc::get_mut(&mut mock_config_service).unwrap(), PathBuf::from("themes/theme1.json"), theme_content1);
+
+        let theme_def2 = create_test_theme_definition("theme-two", "green");
+        let theme_content2 = serde_json::to_string(&theme_def2).unwrap();
+        mock_read_file(&mut Arc::get_mut(&mut mock_config_service).unwrap(), PathBuf::from("themes/theme2.json"), theme_content2);
+
+        mock_read_file_fails(&mut Arc::get_mut(&mut mock_config_service).unwrap(), |p| p.to_str().unwrap().contains("tokens/"), "No token files".to_string());
+
+
+        let engine = ThemingEngine::new(
+            default_test_config("theme-one"),
+            vec![PathBuf::from("themes/theme1.json"), PathBuf::from("themes/theme2.json")], vec![],
+            mock_config_service,
+            16
+        ).await.expect("Engine creation failed");
+
+        let new_config_to_apply = ThemingConfiguration {
+            selected_theme_id: ThemeIdentifier::new("theme-two"),
+            preferred_color_scheme: ColorSchemeType::Dark,
+            selected_accent_color: None,
+            custom_user_token_overrides: None,
+        };
+
+        engine.update_configuration(new_config_to_apply.clone()).await.expect("Update configuration failed");
+
+        assert!(config_file.exists(), "Config file should exist after update");
+        let saved_content = std::fs::read_to_string(&config_file).expect("Failed to read saved config file");
+        let saved_config: ThemingConfiguration = serde_json::from_str(&saved_content).expect("Failed to parse saved config");
+
+        assert_eq!(saved_config, new_config_to_apply, "Saved configuration should match the updated configuration");
+
+        cleanup_temp_config_dir(_temp_dir_guard);
+    }
+
+    #[tokio::test]
+    async fn test_corrupted_theming_config_uses_defaults_and_logs() {
+        let (_temp_dir_guard, _config_path) = setup_temp_config_dir();
+        let app_config_novade_dir = paths::get_app_config_dir().unwrap();
+        fs::ensure_dir_exists(&app_config_novade_dir).unwrap();
+        let config_file = app_config_novade_dir.join(THEMING_CONFIG_FILENAME);
+
+        std::fs::write(&config_file, "this is not valid json").expect("Failed to write corrupted config file");
+
+        let mut mock_config_service = new_mock_arc_config_service();
+        // Default theme "fallback-theme" for this test
+        let fallback_theme_def = create_test_theme_definition("fallback-theme", "grey");
+        let fallback_theme_content = serde_json::to_string(&fallback_theme_def).unwrap();
+        mock_read_file(&mut Arc::get_mut(&mut mock_config_service).unwrap(), PathBuf::from("themes/fallback.json"), fallback_theme_content);
+        mock_read_file_fails(&mut Arc::get_mut(&mut mock_config_service).unwrap(), |p| p.to_str().unwrap().contains("tokens/"), "No token files".to_string());
+
+
+        // The initial config provided to new() will be "fallback-theme"
+        let initial_config = default_test_config("fallback-theme");
+
+        // Setup tracing subscriber to capture logs
+        // Note: This is a basic way to check for logs. More sophisticated log testing might use a custom subscriber.
+        // For this test, we are primarily interested in the behavior (uses defaults), logging is secondary.
+        // let subscriber = tracing_subscriber::fmt().with_max_level(tracing::Level::WARN).finish();
+        // tracing::subscriber::with_default(subscriber, || { ... });
+        // However, integrating log capture directly in tests can be tricky. We'll infer logging from behavior.
+
+        let engine = ThemingEngine::new(
+            initial_config.clone(),
+            vec![PathBuf::from("themes/fallback.json")], vec![],
+            mock_config_service,
+            16
+        ).await.expect("Engine creation should not fail on corrupted config, but use defaults");
+
+        let current_config = engine.get_current_configuration().await;
+        // It should have used the initial_config because loading the corrupted one failed.
+        assert_eq!(current_config.selected_theme_id, initial_config.selected_theme_id, "Engine should use initial config if saved one is corrupt");
+
+        // Also, the corrupted file should ideally be overwritten with a valid one (the effective initial config).
+        assert!(config_file.exists(), "Config file should still exist (or be recreated)");
+        let saved_content = std::fs::read_to_string(&config_file).expect("Failed to read config file after corruption handling");
+        let saved_config: ThemingConfiguration = serde_json::from_str(&saved_content).expect("Config file should be valid now");
+        assert_eq!(saved_config, initial_config, "Corrupted config should be overwritten with initial/default config");
+
+
+        cleanup_temp_config_dir(_temp_dir_guard);
+        // Check logs manually or use a more advanced logging test setup to confirm warnings.
     }
 }

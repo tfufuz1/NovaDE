@@ -1,3 +1,4 @@
+// This module is deprecated. Please use novade-domain/src/theming/types.rs (specifically ThemeDefinition) for theme structures.
 //! Core theming types for the NovaDE domain layer.
 //!
 //! This module provides the fundamental types and structures
@@ -16,6 +17,7 @@ pub type ThemeId = EntityId;
 
 /// The variant of a theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[deprecated(note = "Use novade-domain/src/theming/types.rs instead")]
 pub enum ThemeVariant {
     /// A light theme variant.
     Light,
@@ -37,6 +39,7 @@ impl fmt::Display for ThemeVariant {
 
 /// Metadata for a theme.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[deprecated(note = "Use novade-domain/src/theming/types.rs instead")]
 pub struct ThemeMetadata {
     /// The name of the theme.
     pub name: String,
@@ -135,6 +138,7 @@ impl ThemeMetadata {
 
 /// A theme in the NovaDE desktop environment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[deprecated(note = "Use novade-domain/src/theming/types.rs::ThemeDefinition instead")]
 pub struct Theme {
     /// The unique identifier of the theme.
     id: ThemeId,
