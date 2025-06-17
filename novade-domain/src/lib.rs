@@ -223,12 +223,26 @@ pub async fn initialize_domain_layer(
                 ThemingConfiguration::default()
             }, 
             |appearance_settings| {
-                tracing::info!("Deriving initial ThemingConfiguration from AppearanceSettings. Active theme: '{}'", appearance_settings.active_theme_name);
+                tracing::info!("Deriving initial ThemingConfiguration from AppearanceSettings. Active theme: '{}', Scheme: {:?}, Accent Token: '{}'",
+                    appearance_settings.active_theme_name,
+                    appearance_settings.color_scheme,
+                    appearance_settings.accent_color_token
+                );
+
+                let preferred_color_scheme = match appearance_settings.color_scheme {
+                    global_settings::types::ColorScheme::Light => theming::types::ColorSchemeType::Light,
+                    global_settings::types::ColorScheme::Dark => theming::types::ColorSchemeType::Dark,
+                    global_settings::types::ColorScheme::SystemPreference => {
+                        //ANCHOR [SYSTEM_PREFERENCE_COLOR_SCHEME] Placeholder for system preference detection. Defaulting to Light.
+                        tracing::info!("SystemPreference color scheme detected, defaulting to Light. Actual system preference detection TBD.");
+                        theming::types::ColorSchemeType::Light
+                    }
+                };
+
                 ThemingConfiguration {
-                    selected_theme_id: ThemeIdentifier::new(appearance_settings.active_theme_name),
-                    // TODO: Map color_scheme and accent_color if they exist in AppearanceSettings and are compatible
-                    preferred_color_scheme: Default::default(), // Placeholder
-                    selected_accent_color: None, // Placeholder
+                    selected_theme_id: ThemeIdentifier::new(appearance_settings.active_theme_name.clone()),
+                    preferred_color_scheme,
+                    selected_accent_color: None, // Per plan, this remains None for now.
                     custom_user_token_overrides: None,
                 }
             }
