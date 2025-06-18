@@ -10,7 +10,8 @@ rust-version = "1.70.0"
 [dependencies]
 thiserror = "1.0.59"
 uuid = { version = "1.8.0", features = ["v4", "serde"] }
-chrono = "0.4" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for timestamping in log rotation
+chrono = { version = "0.4", features = ["serde"] } #ANCHOR [NovaDE Developers <dev@novade.org>] Added for timestamping in log rotation, added serde feature
+glib = "0.18" # Added for glib types and macros, removed incorrect "macros" feature
 tracing = "0.1" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for structured logging
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] } #ANCHOR [NovaDE Developers <dev@novade.org>] Added for structured logging
 tracing-appender = "0.2" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for log rotation
@@ -22,13 +23,14 @@ atty = { version = "0.2.14" }
 once_cell = { version = "1.19.0" }
 num-traits = { version = "0.2.18" }
 sentry = { version = "0.27.0", features = ["backtrace", "contexts", "panic", "transport"] } # Set to 0.27.0 as per baseline
-# sentry-tracing commented out as 0.27.0 might not exist or was problematic
+sentry-tracing = "0.27.0" # Uncommented and version set
+serde_json = "1.0" # Moved from dev-dependencies
 
 # Added for tests, but good to have as explicit dev-dependencies
 [dev-dependencies]
 static_assertions = "1.1.0"
 tempfile = "3.10.1" # Or a version compatible with your needs
-serde_json = "1.0" # For testing serde serialization in examples/tests
+# serde_json = "1.0" # Moved to main dependencies
 pretty_assertions = "1.4.0" # For nicer diffs in tests
 rstest = "0.19.0" # For parameterized tests, if needed later
 # uuid = { version = "1.8.0", features = ["v4", "serde"] } # Already in [dependencies]

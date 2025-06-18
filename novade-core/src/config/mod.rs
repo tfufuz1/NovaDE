@@ -50,6 +50,7 @@ use crate::error::{ConfigError, CoreError};
 use crate::utils; // For utils::paths and utils::fs
 use once_cell::sync::OnceCell;
 use serde::Deserialize;
+use serde::Serialize; // Ensure this is correctly added
 // std::fs and std::path::PathBuf are no longer directly used here for ConfigLoader logic
 use std::path::PathBuf; // Still used by LoggingConfig
 use crate::types::system_health::SystemHealthDashboardConfig;
@@ -64,7 +65,7 @@ pub use loader::ConfigLoader; // Re-export ConfigLoader
 ///
 /// Holds settings for various subsystems like logging and feature flags.
 /// This structure is typically loaded from a `config.toml` file.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)] // Added Serialize
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)] // Added Serialize back
 #[serde(deny_unknown_fields)]
 pub struct CoreConfig {
     /// Logging configuration settings.
@@ -224,7 +225,7 @@ impl Default for DebugInterfaceConfig {
 /// Configuration for feature flags.
 ///
 /// Allows toggling experimental or optional features within the application.
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)] // Added Serialize
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)] // Added Serialize back
 #[serde(deny_unknown_fields)]
 pub struct FeatureFlags {
     /// Example of an experimental feature flag.
@@ -320,7 +321,7 @@ mod tests {
         
         let test_config = CoreConfig {
             logging: LoggingConfig {
-                level: "test".to_string(),
+                log_level: "test".to_string(), // Corrected field name
                 ..Default::default()
             },
             ..Default::default()
@@ -337,7 +338,7 @@ mod tests {
             Ok(_) => { // Successfully initialized
                 let retrieved_config = get_core_config();
                 assert_eq!(retrieved_config, &test_config);
-                assert_eq!(retrieved_config.logging.level, "test");
+                assert_eq!(retrieved_config.logging.log_level, "test"); // Corrected field name
 
                 // Test trying to initialize again fails
                 let another_config = CoreConfig::default();
@@ -347,7 +348,7 @@ mod tests {
                 // Config was already initialized by another test. We can still test get_core_config.
                 println!("Warning: CORE_CONFIG was already initialized. Testing get_core_config only.");
                 let retrieved_config = get_core_config(); // Should not panic if already set
-                assert!(!retrieved_config.logging.level.is_empty()); // Check it's a valid CoreConfig
+                assert!(!retrieved_config.logging.log_level.is_empty()); // Check it's a valid CoreConfig & corrected field
             }
         }
     }

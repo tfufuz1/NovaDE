@@ -10,6 +10,7 @@
 use zbus::{object_server::{Guard as ObjectServerGuard, ObjectServer}, Connection, Error as ZbusError, Result as ZbusResult};
 use zbus::names::WellKnownName;
 use std::sync::Arc;
+use crate::dbus_interfaces::core_system_service::CoreSystemService; // Added
 use crate::dbus_interfaces::notifications_server::NotificationsServer;
 use novade_domain::notifications::NotificationService as DomainNotificationService;
 use thiserror::Error;
@@ -166,6 +167,37 @@ impl DbusServiceManager {
             DbusManagerError::NameRequestFailed { name: name.to_string(), source: e }
         })?;
         tracing::info!("Successfully requested D-Bus name: {}", name);
+        Ok(())
+    }
+
+    // ANCHOR: ServeCoreSystemServiceMethod
+    /// Serves the `CoreSystemService` on D-Bus.
+    ///
+    /// This method requests the well-known name "org.novade.CoreSystem" and
+    /// makes the `CoreSystemService` available at the "/org/novade/CoreSystem" object path.
+    #[tracing::instrument(skip_all)]
+    pub async fn serve_core_system_service(&self) -> Result<()> {
+        tracing::info!("Preparing to serve CoreSystemService on D-Bus...");
+
+        let service_name = "org.novade.CoreSystem";
+        let service_path = "/org/novade/CoreSystem";
+
+        // 1. Request the service name
+        self.request_name(service_name).await?;
+        tracing::debug!("Successfully requested D-Bus name: {}", service_name);
+
+        // 2. Create an instance of the service logic
+        let core_system_logic = Arc::new(CoreSystemService::new());
+        tracing::debug!("CoreSystemService logic instance created.");
+
+        // 3. Serve the service instance at the specified path
+        self.serve_at(core_system_logic, service_path).await?;
+        tracing::info!(
+            "CoreSystemService successfully served at path '{}' under name '{}'.",
+            service_path,
+            service_name
+        );
+
         Ok(())
     }
 

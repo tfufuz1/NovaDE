@@ -149,28 +149,44 @@ pub fn init_logging(config: &LoggingConfig, is_reload: bool) -> Result<(), CoreE
     };
 
     //ANCHOR [NovaDE Developers <dev@novade.org>] Configure EnvFilter for all layers, respecting RUST_LOG.
-    let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(&level_filter_str))
-        .unwrap_or_else(|_| EnvFilter::new(Level::INFO.to_string())); // Fallback
+    // Determine the filter string first.
+    let filter_directive_str = EnvFilter::try_from_default_env()
+        .map(|filter| filter.to_string()) // Attempt to get directives if RUST_LOG is set
+        .unwrap_or_else(|_| level_filter_str.clone()); // Fallback to configured level_filter_str
 
     let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync + 'static>> = Vec::new();
 
     //ANCHOR [NovaDE Developers <dev@novade.org>] Configure layer based on log_output config.
     match &config.log_output {
         LogOutput::Stdout => {
-            let stdout_layer = fmt::layer()
-                .with_writer(stdout)
-                .with_ansi(atty::is(atty::Stream::Stdout))
-                .with_filter(env_filter.clone()); // Clone env_filter if used by multiple layers
+            let stdout_env_filter = EnvFilter::try_new(&filter_directive_str)
+                .unwrap_or_else(|_| EnvFilter::new(Level::INFO.to_string())); // Fallback if directive is bad
 
             match config.log_format {
-                LogFormat::Json => layers.push(stdout_layer.json().boxed()),
-                LogFormat::Text => layers.push(stdout_layer.boxed()),
+                LogFormat::Json => {
+                    let layer = fmt::layer()
+                        .with_writer(stdout)
+                        .with_ansi(atty::is(atty::Stream::Stdout))
+                        .json() // Apply .json() before .with_filter()
+                        .with_filter(stdout_env_filter);
+                    layers.push(layer.boxed());
+                }
+                LogFormat::Text => {
+                    let layer = fmt::layer()
+                        .with_writer(stdout)
+                        .with_ansi(atty::is(atty::Stream::Stdout))
+                        .with_filter(stdout_env_filter);
+                    layers.push(layer.boxed());
+                }
             };
         }
         LogOutput::File { path, rotation } => {
+            // For file layer, create_file_layer already handles format (json/text) internally.
+            // So we just apply the filter to the layer it returns.
+            let file_env_filter = EnvFilter::try_new(&filter_directive_str)
+                .unwrap_or_else(|_| EnvFilter::new(Level::INFO.to_string())); // Fallback if directive is bad
             let file_layer_base = create_file_layer(path, rotation, &config.log_format)?;
-            layers.push(file_layer_base.with_filter(env_filter.clone()).boxed());
+            layers.push(file_layer_base.with_filter(file_env_filter).boxed());
         }
     }
 
