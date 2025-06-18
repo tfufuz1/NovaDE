@@ -164,7 +164,7 @@ pub struct DiagnosticTestInfo {
 }
 
 /// Represents the status of a diagnostic test.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, glib::Enum)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, glib::Enum)] // Added Copy
 #[enum_type(name = "NovaDiagnosticStatus")]
 pub enum DiagnosticStatus {
     NotRun,

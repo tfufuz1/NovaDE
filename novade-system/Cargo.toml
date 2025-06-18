@@ -48,6 +48,8 @@ nvml-wrapper = "0.7" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for NVID
 #TODO [NovaDE Developers <dev@novade.org>] Research and add AMD GPU monitoring crate (e.g., amdgpu-sysfs or similar)
 prometheus = { version = "0.13", features = ["process"] } #ANCHOR [NovaDE Developers <dev@novade.org>] Added for Prometheus metrics exposition
 warp = "0.3" # Restored from 0.1.23
+anyhow = "1.0" # Added for client example error handling
+futures-util = "0.3" # Added for client example StreamExt
 
 
 [features]
@@ -74,3 +76,7 @@ path = "examples/run_echo_service.rs"
 [[example]]
 name = "test_upower_client"
 path = "examples/test_upower_client.rs"
+
+[[example]]
+name = "demo_core_system_client"
+path = "examples/demo_core_system_client.rs"

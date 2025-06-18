@@ -153,53 +153,48 @@ impl ConfigLoader {
     /// - Filesystem operations (like creating log directories) fail, resulting in [`CoreError::Filesystem`].
     fn validate_config(config: &mut CoreConfig) -> Result<(), CoreError> {
         // Validate logging level
-        let level_lower = config.logging.level.to_lowercase();
+        let level_lower = config.logging.log_level.to_lowercase(); // Corrected: level -> log_level
         match level_lower.as_str() {
             "trace" | "debug" | "info" | "warn" | "error" => {
-                config.logging.level = level_lower; // Normalize
+                config.logging.log_level = level_lower; // Normalize // Corrected: level -> log_level
             }
             _ => {
                 return Err(CoreError::Config(ConfigError::ValidationError(format!(
                     "Invalid log level: '{}'. Must be one of trace, debug, info, warn, error.",
-                    config.logging.level
+                    config.logging.log_level // Corrected: level -> log_level
                 ))));
             }
         }
 
         // Validate logging format
-        let format_lower = config.logging.format.to_lowercase();
-        match format_lower.as_str() {
-            "text" | "json" => {
-                config.logging.format = format_lower; // Normalize
-            }
-            _ => {
-                return Err(CoreError::Config(ConfigError::ValidationError(format!(
-                    "Invalid log format: '{}'. Must be one of text, json.",
-                    config.logging.format
-                ))));
-            }
-        }
+        // This block is removed as serde handles enum validation during deserialization.
+        // If an invalid value for log_format was in the config, toml::from_str would have failed.
+        // The LogFormat enum itself guarantees that it's either Text or Json.
 
         // Handle log file path
-        if let Some(relative_path) = &config.logging.file_path {
-            if relative_path.is_absolute() {
-                // If it's already absolute, use it as is, but ensure parent dir exists
-                if let Some(parent_dir) = relative_path.parent() {
-                    if !parent_dir.exists() {
-                         nova_fs::ensure_dir_exists(parent_dir)?;
-                    }
+        if let crate::config::LogOutput::File { path: ref mut log_file_path_ref, .. } = config.logging.log_output {
+            // If the path is relative, make it absolute with respect to the app's state directory.
+            if log_file_path_ref.is_relative() {
+                let state_dir = get_app_state_dir()?; // This can return CoreError::Config(ConfigError::DirectoryUnavailable)
+                *log_file_path_ref = state_dir.join(&*log_file_path_ref);
+            }
+
+            // Ensure the parent directory for the log file exists.
+            if let Some(parent_dir) = log_file_path_ref.parent() {
+                if !parent_dir.exists() {
+                    nova_fs::ensure_dir_exists(parent_dir)?; // This can return CoreError::Filesystem
                 }
             } else {
-                // If relative, make it absolute to the app state directory
-                let state_dir = get_app_state_dir()?;
-                let absolute_path = state_dir.join(relative_path);
-                
-                if let Some(parent_dir) = absolute_path.parent() {
-                     if !parent_dir.exists() {
-                        nova_fs::ensure_dir_exists(parent_dir)?;
-                    }
-                }
-                config.logging.file_path = Some(absolute_path);
+                // This case (e.g., path is just "logfile.log" without "./") might imply the state directory itself.
+                // If log_file_path_ref was initially relative like "log.txt", it's now absolute like "/path/to/state/log.txt".
+                // Its parent is "/path/to/state", which should exist or be creatable by get_app_state_dir's contract or ensure_dir_exists.
+                // If log_file_path_ref was absolute like "/log.txt", parent is "/". This is unusual for logs.
+                // It's safer to ensure the state directory (if path was relative) or the direct parent (if path was absolute) exists.
+                // The current logic handles parent_dir correctly. If parent_dir is None (e.g. for "/log.txt"),
+                // we might log a warning or error, as writing to root is usually not intended/allowed.
+                // For now, if no parent_dir, we assume it's an issue or an edge case not requiring dir creation.
+                // However, ensure_dir_exists on a non-existent parent of an absolute path (e.g. /nonexistent/log.txt) will try to create /nonexistent.
+                // If log_file_path_ref is "/log.txt", parent is Some("/"). nova_fs::ensure_dir_exists("/") should be a no-op or succeed.
             }
         }
         

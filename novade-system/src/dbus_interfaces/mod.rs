@@ -1,7 +1,5 @@
 // novade-system/src/dbus_interfaces/mod.rs
 
-// novade-system/src/dbus_interfaces/mod.rs
-
 // ANCHOR: AddObjectManagerModule
 pub mod object_manager;
 pub mod notifications_server;
@@ -9,6 +7,10 @@ pub mod notifications_server;
 pub mod properties;
 // ANCHOR: AddExampleEchoServiceModule
 pub mod example_echo_service;
+// ANCHOR: AddCoreSystemInterfaceModule
+pub mod core_system_interface;
+// ANCHOR: AddCoreSystemServiceModule
+pub mod core_system_service; // Added new module for the service implementation
 
 // ANCHOR: ExportObjectManager
 pub use object_manager::ObjectManager;
@@ -17,5 +19,11 @@ pub use properties::Properties;
 // ANCHOR: ExportExampleEchoService
 pub use example_echo_service::EchoService;
 pub use notifications_server::NotificationsDBusService; // Assuming this was meant to be NotificationsServer or similar
-// TODO: Review NotificationsDBusService, might be NotificationsServer from previous tasks.
-// For now, keeping it as is to avoid breaking other parts if it's used elsewhere.
+
+// ANCHOR: ExportCoreSystemInterfaceAndTypes
+pub use core_system_interface::CoreSystemInterface;
+pub use core_system_interface::ComponentInfo;
+pub use core_system_interface::ComponentStatus;
+
+// ANCHOR: ExportCoreSystemService
+pub use core_system_service::CoreSystemService; // Exported new service implementation
