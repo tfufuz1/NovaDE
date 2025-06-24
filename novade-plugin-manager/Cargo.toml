@@ -1,0 +1,34 @@
+[package]
+name = "novade-plugin-manager"
+version = "0.1.0"
+edition = "2021"
+authors = ["NovaDE Team <nova-de@example.com>"]
+license = "MIT OR Apache-2.0"
+description = "Plugin management library for NovaDE, responsible for loading, managing, and interacting with plugins."
+repository = "https://github.com/NovaDE/NovaDE" # Placeholder
+readme = "README.md"
+
+[dependencies]
+# For parsing Plugin.toml files
+toml = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+log = "0.4"
+
+# Dependency for the plugin API traits (e.g., Plugin, PanelWidget)
+# This creates a circular dependency if novade-ui also depends on novade-plugin-manager (e.g. for a global plugin registry).
+# For now, we assume novade-plugin-manager uses the traits, and higher-level crates like 'shell' in novade-ui use the manager.
+# If direct two-way interaction is needed at this level, we might need a new `novade-plugin-api-traits` crate.
+novade-ui = { path = "../novade-ui" } # This is problematic if novade-ui needs to use the plugin manager directly for registration.
+                                     # For now, let's assume the manager is a library used by novade-ui/shell, not the other way around.
+
+# For dynamic library loading (will be used later)
+# libloading = { version = "0.8", optional = true }
+
+[dev-dependencies]
+# For testing, e.g. creating mock plugins or testing loading logic
+# tempfile = "3.8"
+
+[features]
+# default = ["dynamic_loading"]
+# dynamic_loading = ["dep:libloading"]

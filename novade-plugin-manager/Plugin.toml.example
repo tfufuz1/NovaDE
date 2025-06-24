@@ -1,0 +1,85 @@
+# Example manifest for a NovaDE Plugin
+# This file describes the plugin to the NovaDE Plugin Manager.
+
+[plugin]
+# Unique identifier for the plugin, e.g., "org.novade.WeatherWidget"
+id = "com.example.MyAwesomePlugin"
+
+# Human-readable name of the plugin
+name = "My Awesome NovaDE Plugin"
+
+# Version of the plugin, following Semantic Versioning (SemVer) is recommended.
+version = "0.1.0"
+
+# Author(s) of the plugin
+author = "Your Name <your.email@example.com>"
+
+# A brief description of what the plugin does.
+description = "A demonstration plugin for NovaDE that does awesome things."
+
+# License of the plugin, e.g., "MIT", "GPL-3.0-or-later"
+license = "MIT"
+
+# Specifies the main library file (relative to this manifest) or a module path
+# that the plugin manager should load.
+# For Rust plugins, this would typically be the name of the compiled .so/.dylib file
+# (without the extension, as it's platform-dependent).
+# The plugin manager will look for `lib<entry_point_name>.so` on Linux,
+# `lib<entry_point_name>.dylib` on macOS, and `<entry_point_name>.dll` on Windows.
+entry_point = "my_awesome_plugin_entry"
+
+# Optional: Minimum version of NovaDE required for this plugin to function correctly.
+# This helps in preventing compatibility issues.
+# Example: "0.5.0"
+requires_novade_version = "0.1.0"
+
+[plugin.dependencies]
+# Optional: List of other NovaDE plugin IDs that this plugin depends on.
+# The plugin manager can use this to ensure dependencies are loaded first.
+# "com.example.AnotherPlugin" = ">=0.2.0" # Specify version requirements
+
+[plugin.permissions]
+# Optional: Defines the permissions this plugin requests.
+# This section is for future security enhancements and might not be enforced initially.
+# Examples:
+# network_access = "Required for fetching weather data."
+# filesystem_read = "/home/user/.config/myplugin/"
+# dbus_access = ["org.freedesktop.Notifications"]
+
+[plugin.extension_points]
+# Describes what kind of extensions this plugin provides.
+# This helps NovaDE know what to expect from this plugin without loading it fully.
+# Example:
+# panel_widgets = [
+#   { id = "my_weather_widget", name = "Weather Widget", description = "Shows current weather." },
+# ]
+# settings_pages = [
+#   { id = "my_plugin_settings", name = "My Plugin Settings", icon = "preferences-plugin" },
+# ]
+# command_palette_commands = [
+#   { command = "myplugin:action1", name = "Do Awesome Action 1" },
+# ]
+# sidebar_widgets = []
+#
+# The exact structure of these entries will be defined by the corresponding
+# interfaces in novade-ui.
+# For now, this section can be considered illustrative of future capabilities.
+# We will start with simpler registration mechanisms.
+
+# Example for a panel widget
+# This is a more specific way to declare a panel widget, which might be preferred
+# over the generic extension_points if a plugin *only* provides one type of extension.
+# [[panel_widget]]
+# id = "my_clock_widget"
+# name = "Simple Clock"
+# description = "A simple clock widget for the panel."
+# # Class or function name within the plugin's entry_point library that implements the PanelWidget trait.
+# # This is highly dependent on the plugin loading and registration mechanism.
+# # For Rust, this could be a function that returns a Box<dyn PanelWidget>.
+# rust_entry_function = "create_clock_widget"
+
+# [[settings_page]]
+# id = "my_plugin_settings_page"
+# name = "My Plugin Specific Settings"
+# description = "Configure the awesome features of My Awesome Plugin."
+# rust_entry_function = "create_settings_page_provider"

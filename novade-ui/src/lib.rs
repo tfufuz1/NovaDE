@@ -24,6 +24,7 @@ pub mod shell;
 pub mod theming_gtk;
 pub mod system_health_dashboard;
 pub mod ui_feedback; // Added new module
+pub mod plugin_api; // Added for plugin support
 
 // Re-export key types for convenience
 pub use error::UiError;

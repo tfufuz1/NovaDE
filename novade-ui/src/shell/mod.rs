@@ -13,3 +13,7 @@ pub use active_window_service::ActiveWindowService;
 // pub use shell_workspace_service::ShellWorkspaceService; // Old name
 pub mod domain_workspace_connector; // New name
 pub use domain_workspace_connector::DomainWorkspaceConnector; // New name
+
+pub mod panel_widget_service;
+// Optionally re-export PanelWidgetService if it's commonly used directly from shell module
+// pub use panel_widget_service::PanelWidgetService;

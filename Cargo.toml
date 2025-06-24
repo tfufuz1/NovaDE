@@ -5,6 +5,7 @@ members = [
     "novade-domain",
     "novade-system",
     "novade-ui",
+    "novade-plugin-manager",
     # nova_compositor will be merged into novade-system
 ]
 
