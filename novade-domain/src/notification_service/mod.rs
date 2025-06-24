@@ -8,17 +8,19 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // Actual D-Bus hints are more complex (HashMap<String, zvariant::Value>).
 // This can be refined when implementing the D-Bus layer.
 
+pub mod policies;
+
 #[derive(Debug, Clone)]
 pub struct Notification {
     pub app_name: String,
-    pub replaces_id: u32, // ID of notification to replace, or 0 if new
-    pub app_icon: String, // Path or name
-    pub summary: String,  // Single line summary
-    pub body: String,     // Multi-line body
+    pub replaces_id: u32,     // ID of notification to replace, or 0 if new
+    pub app_icon: String,     // Path or name
+    pub summary: String,      // Single line summary
+    pub body: String,         // Multi-line body
     pub actions: Vec<String>, // Alternating action_key, display_name
     pub hints: HashMap<String, String>, // Placeholder for common hints like urgency, category.
-                                   // Real hints are zvariant::Value. This will need mapping.
-    pub timeout: i32,     // Milliseconds, or -1 for default, 0 for persistent
+    // Real hints are zvariant::Value. This will need mapping.
+    pub timeout: i32, // Milliseconds, or -1 for default, 0 for persistent
 }
 
 impl Default for Notification {
@@ -58,7 +60,7 @@ pub trait NotificationManager: Send + Sync {
 pub struct DefaultNotificationManager {
     notifications: std::collections::HashMap<u32, Notification>,
     next_id: AtomicU32, // For generating unique IDs
-    // Potentially add a sender for a channel to communicate with UI/logging later
+                        // Potentially add a sender for a channel to communicate with UI/logging later
 }
 
 impl DefaultNotificationManager {
@@ -85,14 +87,19 @@ impl NotificationManager for DefaultNotificationManager {
         // Or, always use generated ID if replaces_id is not found.
         // Let's simplify: if replaces_id is set and exists, we replace. Otherwise, new ID.
 
-        let final_id = if notification.replaces_id != 0 && self.notifications.contains_key(&notification.replaces_id) {
+        let final_id = if notification.replaces_id != 0
+            && self.notifications.contains_key(&notification.replaces_id)
+        {
             notification.replaces_id
         } else {
             self.generate_id() // Ensure a truly new ID if replaces_id is bogus or 0
         };
         notification.replaces_id = final_id; // Ensure the stored notification knows its actual ID.
 
-        println!("Domain: Storing notification (id: {}): {:?}", final_id, notification.summary);
+        println!(
+            "Domain: Storing notification (id: {}): {:?}",
+            final_id, notification.summary
+        );
         self.notifications.insert(final_id, notification);
         Ok(final_id)
     }
@@ -112,16 +119,16 @@ impl NotificationManager for DefaultNotificationManager {
             "body".to_string(),
             "actions".to_string(), // Assuming we'll support them
             "persistence".to_string(), // If notifications can persist until explicitly closed
-            // "sound".to_string(), // Example of another capability
+                                   // "sound".to_string(), // Example of another capability
         ])
     }
 
     fn get_server_information(&self) -> Result<(String, String, String, String), Error> {
         Ok((
             "NovaDE Domain Notification Manager".to_string(), // name
-            "NovaDE Project".to_string(),                   // vendor
-            "0.1.0".to_string(),                            // version
-            "1.2".to_string(),                              // spec_version (of freedesktop standard)
+            "NovaDE Project".to_string(),                     // vendor
+            "0.1.0".to_string(),                              // version
+            "1.2".to_string(), // spec_version (of freedesktop standard)
         ))
     }
 }

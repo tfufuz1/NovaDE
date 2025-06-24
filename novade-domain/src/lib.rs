@@ -13,6 +13,13 @@ pub mod workspaces;
 pub mod notification_service;
 pub mod display_configuration;
 pub mod system_health_service;
+
+// Re-export key types from notification_service policies for easier access
+pub use notification_service::policies::grouping::{
+    NotificationGroupingPolicy,
+    DefaultGroupingPolicy,
+    GroupingError as NotificationGroupingError // Alias to avoid potential name clashes
+};
 // pub mod entities; // Example, if you have a top-level entities module
 // pub mod error; // Example, for a general DomainError if used
 
