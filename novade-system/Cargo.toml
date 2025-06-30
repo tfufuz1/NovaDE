@@ -50,6 +50,8 @@ prometheus = { version = "0.13", features = ["process"] } #ANCHOR [NovaDE Develo
 warp = "0.3" # Restored from 0.1.23
 anyhow = "1.0" # Added for client example error handling
 futures-util = "0.3" # Added for client example StreamExt
+memoffset = "0.9" # Added for vertex attribute offsets
+glam = "0.24" # Added for matrix math in UBOs
 
 
 [features]
