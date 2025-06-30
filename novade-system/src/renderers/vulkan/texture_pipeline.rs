@@ -25,27 +25,79 @@ pub struct GpuTexture {
     pub format: vk::Format,
     pub extent: vk::Extent2D,
     pub layout: vk::ImageLayout, // Current layout
-    pub mip_levels: u32, // New field
+    pub mip_levels: u32,
+    pub sampler: vk::Sampler, // WP-501: Added sampler
 }
 
 impl GpuTexture {
     // Placeholder for cleanup logic
     pub fn destroy(&mut self, device: &ash::Device, allocator: &mut Allocator) {
         unsafe {
+            device.destroy_sampler(self.sampler, None); // WP-501: Destroy sampler
             device.destroy_image_view(self.image_view, None);
-            // If memory was imported (DMA-BUF), it needs vkFreeMemory
+
             if let Some(mem) = self.memory.take() {
                 device.free_memory(mem, None);
             }
-            // If memory was from allocator, free it via allocator
             if let Some(alloc) = self.allocation.take() {
                  allocator.free(alloc).expect("Failed to free texture allocation");
             }
             device.destroy_image(self.image, None);
-            println!("Destroyed GpuTexture {:?}", self.id);
+            // println!("Destroyed GpuTexture {:?}", self.id); // Keep logs minimal
         }
     }
 }
+
+
+/// Creates a Vulkan texture sampler.
+///
+/// Configures a `vk::Sampler` with common settings for texture sampling, including
+/// linear filtering, repeat address mode, anisotropic filtering (if supported and enabled),
+/// and mipmapping parameters.
+/// Aligns with `Rendering Vulkan.md` (Spec 9.4 - Sampler-Konfiguration).
+///
+/// # Arguments
+/// * `device`: Reference to the logical `ash::Device`.
+/// * `pdevice_properties`: Properties of the physical device, used to query limits like max sampler anisotropy.
+/// * `mip_levels`: The number of mip levels in the texture this sampler will be used with. This sets `max_lod`.
+/// * `enable_anisotropy`: Flag to enable anisotropic filtering if supported.
+///
+/// # Returns
+/// A `Result` containing the created `vk::Sampler` or an error string.
+pub fn create_texture_sampler(
+    device: &ash::Device,
+    pdevice_properties: &vk::PhysicalDeviceProperties,
+    mip_levels: u32,
+    enable_anisotropy: bool,
+) -> Result<vk::Sampler, String> {
+    let mut sampler_info = vk::SamplerCreateInfo::builder()
+        .mag_filter(vk::Filter::LINEAR)
+        .min_filter(vk::Filter::LINEAR)
+        .address_mode_u(vk::SamplerAddressMode::REPEAT)
+        .address_mode_v(vk::SamplerAddressMode::REPEAT)
+        .address_mode_w(vk::SamplerAddressMode::REPEAT)
+        .border_color(vk::BorderColor::INT_OPAQUE_BLACK) // Or FLOAT_OPAQUE_BLACK depending on preference
+        .unnormalized_coordinates(false) // Use normalized texture coordinates (0.0 to 1.0)
+        .compare_enable(false) // No depth comparison
+        .compare_op(vk::CompareOp::ALWAYS)
+        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+        .mip_lod_bias(0.0)
+        .min_lod(0.0)
+        .max_lod(mip_levels as f32); // Use all available mip levels
+
+    if enable_anisotropy && pdevice_properties.limits.max_sampler_anisotropy > 0.0 {
+        sampler_info = sampler_info
+            .anisotropy_enable(true)
+            .max_anisotropy(pdevice_properties.limits.max_sampler_anisotropy.min(16.0)); // Cap at 16 or use full device limit
+    } else {
+        sampler_info = sampler_info.anisotropy_enable(false).max_anisotropy(1.0);
+    }
+
+    unsafe {
+        device.create_sampler(&sampler_info, None)
+    }.map_err(|e| format!("Failed to create texture sampler: {}", e))
+}
+
 
 fn transition_image_layout(
     device: &ash::Device,
@@ -215,13 +267,15 @@ fn generate_mipmaps_for_image(
 pub fn upload_shm_buffer_to_texture(
     device: &ash::Device,
     allocator: &mut Allocator,
-    graphics_queue: vk::Queue, // For submitting copy commands
-    command_pool: vk::CommandPool, // For creating temporary command buffers
+    graphics_queue: vk::Queue,
+    command_pool: vk::CommandPool,
     pixel_data: &[u8],
     width: u32,
     height: u32,
-    format: vk::Format, // e.g., vk::Format::R8G8B8A8_SRGB
-    generate_mipmaps: bool, // New parameter
+    format: vk::Format,
+    generate_mipmaps: bool,
+    pdevice_properties: &vk::PhysicalDeviceProperties, // WP-501: For sampler creation
+    enable_anisotropy_for_sampler: bool, // WP-501: For sampler creation
 ) -> Result<GpuTexture, String> {
     // Calculate image size based on format. This is a simplification.
     let bytes_per_pixel = match format {
@@ -366,16 +420,20 @@ pub fn upload_shm_buffer_to_texture(
             .map_err(|e| format!("Failed to create image view for GPU texture: {}", e))?
     };
 
+    // WP-501: Create sampler for the texture
+    let sampler = create_texture_sampler(device, pdevice_properties, mip_levels, enable_anisotropy_for_sampler)?;
+
     let texture_id = TextureId::new();
     Ok(GpuTexture {
         id: texture_id,
         image: dst_image,
         image_view,
+        sampler, // Stored sampler
         allocation: Some(dst_allocation),
         memory: None,
         format,
         extent: image_extent,
-        layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, // Final layout for sampling
+        layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
         mip_levels,
     })
 }
