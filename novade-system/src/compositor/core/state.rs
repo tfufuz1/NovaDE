@@ -190,7 +190,34 @@ pub struct DesktopState {
     pub primary_output_name: Arc<RwLock<Option<String>>>, // Name of the designated primary output
     // ANCHOR_END: PerOutputWorkspaceFieldsForMultiMonitor
     // ANCHOR_END: AddWorkspaceFieldsToDesktopState
+
+    // ANCHOR: MoveGrabStateField
+    pub active_move_grab: Option<MoveGrabState>,
+    // ANCHOR_END: MoveGrabStateField
+    // ANCHOR: ResizeGrabStateField
+    pub active_resize_grab: Option<ActiveResizeGrabState>,
+    // ANCHOR_END: ResizeGrabStateField
 }
+
+// ANCHOR: MoveGrabStateDefinition
+#[derive(Debug, Clone)]
+pub struct MoveGrabState {
+    pub window: Arc<ManagedWindow>,
+    pub initial_pointer_pos_logical: Point<f64, Logical>, // Pointer position in screen-logical coordinates at grab start
+    pub initial_window_pos_logical: Point<i32, Logical>,  // Window position in screen-logical coordinates at grab start
+}
+// ANCHOR_END: MoveGrabStateDefinition
+
+// ANCHOR: ResizeGrabStateDefinition
+#[derive(Debug, Clone)]
+pub struct ActiveResizeGrabState {
+    pub window: Arc<ManagedWindow>,
+    pub edge: smithay::wayland::shell::xdg::ResizeEdge, // Which edge or corner is being dragged
+    pub initial_pointer_pos_logical: Point<f64, Logical>,
+    pub initial_window_geometry: Rectangle<i32, Logical>, // Initial full geometry of the window
+}
+// ANCHOR_END: ResizeGrabStateDefinition
+
 // TODO MVP: Ensure all core protocol handlers (wl_display, wl_registry, wl_compositor,
 // TODO MVP: wl_surface, wl_shm, wl_buffer, wl_callback) are adequately stubbed or implemented.
 // TODO MVP: Review `globals.rs` for `GlobalDispatch` implementations and ensure they cover client binding
@@ -606,6 +633,8 @@ impl DesktopState {
             active_workspaces: Arc::new(RwLock::new(active_workspaces_map_init)),
             primary_output_name: Arc::new(RwLock::new(primary_output_name_init)),
             // ANCHOR_END: UpdateDesktopStateFieldsInitialization
+            active_move_grab: None, // ANCHOR_REF: MoveGrabStateField Init
+            active_resize_grab: None, // ANCHOR_REF: ResizeGrabStateField Init
         })
     }
 
@@ -705,28 +734,69 @@ impl DesktopState {
             let window_state_data = window_arc.state.read().unwrap(); // For title, activation state
 
             let client_surface_physical_geo: Rectangle<i32, Physical>;
+            let border_px = (types::DEFAULT_BORDER_SIZE as f64 * output_scale).round() as i32;
+            let title_bar_px = (types::DEFAULT_TITLE_BAR_HEIGHT as f64 * output_scale).round() as i32;
 
             if is_ssd {
-                // TODO SSD: Draw actual decorations (borders, title bar)
-                // For now, we'll just calculate the content area for the client surface.
-                // These would be RenderElement::SolidColor or similar.
-                // Example: Border thickness and title bar height in logical pixels
-                let border_px = (types::DEFAULT_BORDER_SIZE as f64 * output_scale).round() as i32;
-                let title_bar_px = (types::DEFAULT_TITLE_BAR_HEIGHT as f64 * output_scale).round() as i32;
+                let active_color = [0.3, 0.3, 0.7, 1.0]; // Bluish for active
+                let inactive_color = [0.2, 0.2, 0.2, 1.0]; // Dark grey for inactive
+                let decoration_color = if window_state_data.activated { active_color } else { inactive_color };
 
-                // Define decoration rectangles based on physical_overall_geo_on_output
-                // Example: Top border
-                // let top_border_rect = Rectangle::from_loc_and_size(
-                //     physical_overall_geo_on_output.loc,
-                //     Size::from((physical_overall_geo_on_output.size.w, border_px))
-                // );
-                // render_elements.push(crate::compositor::render::renderer::RenderElement::SolidColor {
-                //     color: [0.2, 0.2, 0.2, 1.0], // Example color
-                //     geometry: top_border_rect,
-                //     damage: &[top_border_rect], // For simplicity, damage whole element
-                // });
-                // Similar for other borders and title bar background.
-                // Text rendering for title is more complex and would be a TODO for the renderer.
+                // Title bar
+                let title_bar_rect = Rectangle::from_loc_and_size(
+                    Point::from((physical_overall_geo_on_output.loc.x + border_px, physical_overall_geo_on_output.loc.y + border_px)),
+                    Size::from((physical_overall_geo_on_output.size.w - 2 * border_px, title_bar_px))
+                );
+                if title_bar_rect.size.w > 0 && title_bar_rect.size.h > 0 {
+                    render_elements.push(crate::compositor::render::renderer::RenderElement::SolidColor {
+                        color: decoration_color,
+                        geometry: title_bar_rect,
+                        damage: &[title_bar_rect], // Full damage for simplicity
+                    });
+                    // TODO: Render window title text on the title bar here.
+                }
+
+                // Borders (example for top, bottom, left, right - can be optimized)
+                // Top border (above title bar)
+                let top_border_rect = Rectangle::from_loc_and_size(
+                    physical_overall_geo_on_output.loc,
+                    Size::from((physical_overall_geo_on_output.size.w, border_px))
+                );
+                 if top_border_rect.size.w > 0 && top_border_rect.size.h > 0 {
+                    render_elements.push(crate::compositor::render::renderer::RenderElement::SolidColor {
+                        color: decoration_color, geometry: top_border_rect, damage: &[top_border_rect]
+                    });
+                }
+                // Bottom border
+                let bottom_border_rect = Rectangle::from_loc_and_size(
+                    Point::from((physical_overall_geo_on_output.loc.x, physical_overall_geo_on_output.loc.y + physical_overall_geo_on_output.size.h - border_px)),
+                    Size::from((physical_overall_geo_on_output.size.w, border_px))
+                );
+                if bottom_border_rect.size.w > 0 && bottom_border_rect.size.h > 0 {
+                    render_elements.push(crate::compositor::render::renderer::RenderElement::SolidColor {
+                        color: decoration_color, geometry: bottom_border_rect, damage: &[bottom_border_rect]
+                    });
+                }
+                // Left border (excluding top/bottom border parts already drawn)
+                let left_border_rect = Rectangle::from_loc_and_size(
+                    Point::from((physical_overall_geo_on_output.loc.x, physical_overall_geo_on_output.loc.y + border_px)),
+                    Size::from((border_px, physical_overall_geo_on_output.size.h - 2 * border_px))
+                );
+                if left_border_rect.size.w > 0 && left_border_rect.size.h > 0 {
+                     render_elements.push(crate::compositor::render::renderer::RenderElement::SolidColor {
+                        color: decoration_color, geometry: left_border_rect, damage: &[left_border_rect]
+                    });
+                }
+                // Right border
+                let right_border_rect = Rectangle::from_loc_and_size(
+                    Point::from((physical_overall_geo_on_output.loc.x + physical_overall_geo_on_output.size.w - border_px, physical_overall_geo_on_output.loc.y + border_px)),
+                    Size::from((border_px, physical_overall_geo_on_output.size.h - 2 * border_px))
+                );
+                 if right_border_rect.size.w > 0 && right_border_rect.size.h > 0 {
+                    render_elements.push(crate::compositor::render::renderer::RenderElement::SolidColor {
+                        color: decoration_color, geometry: right_border_rect, damage: &[right_border_rect]
+                    });
+                }
 
                 client_surface_physical_geo = Rectangle::from_loc_and_size(
                     Point::from((
@@ -743,28 +813,28 @@ impl DesktopState {
             }
 
             // Add client surface content to render elements
-            if let Some(surface_data_mutex) = wl_surface.data_map().get::<StdMutex<SurfaceData>>() {
-                let surface_data = surface_data_mutex.lock().unwrap();
-                if let Some(texture_arc) = surface_data.texture_handle.clone() {
-                     // The texture_arc is Arc<dyn RenderableTexture>. We need to downcast or ensure it's the correct type.
-                     // Assuming self.renderer uses Gles2Texture as its Self::Texture.
-                    if let Some(gles_texture_arc) = texture_arc.as_any().downcast_ref::<Arc<Gles2Texture>>() {
-                        render_elements.push(crate::compositor::render::renderer::RenderElement::Surface {
-                            texture: gles_texture_arc.clone(),
-                            geometry: client_surface_physical_geo,
-                            damage: &[], // TODO: Pass actual damage from SurfaceData or Space
-                            alpha: manager_data.opacity as f32, // Use window opacity
-                            transform: surface_data.current_buffer_info.as_ref().map_or(Transform::Normal, |info| info.transform),
-                        });
-                        tracing::trace!("Added client surface {:?} content (texture: {:?}) with physical_geo {:?} to render list for output {}", wl_surface.id(), gles_texture_arc.unique_id(), client_surface_physical_geo, output_obj.name());
+            if client_surface_physical_geo.size.w > 0 && client_surface_physical_geo.size.h > 0 { // Only render if content area is valid
+                if let Some(surface_data_mutex) = wl_surface.data_map().get::<StdMutex<SurfaceData>>() {
+                    let surface_data = surface_data_mutex.lock().unwrap();
+                    if let Some(texture_arc) = surface_data.texture_handle.clone() {
+                        if let Some(gles_texture_arc) = texture_arc.as_any().downcast_ref::<Arc<Gles2Texture>>() {
+                            render_elements.push(crate::compositor::render::renderer::RenderElement::Surface {
+                                texture: gles_texture_arc.clone(),
+                                geometry: client_surface_physical_geo,
+                                damage: &[], // TODO: Pass actual damage from SurfaceData or Space
+                                alpha: manager_data.opacity as f32,
+                                transform: surface_data.current_buffer_info.as_ref().map_or(Transform::Normal, |info| info.transform),
+                            });
+                            tracing::trace!("Added client surface {:?} content (texture: {:?}) with physical_geo {:?} to render list for output {}", wl_surface.id(), gles_texture_arc.unique_id(), client_surface_physical_geo, output_obj.name());
+                        } else {
+                            tracing::warn!("Could not downcast RenderableTexture to Arc<Gles2Texture> for surface {:?}", wl_surface.id());
+                        }
                     } else {
-                        tracing::warn!("Could not downcast RenderableTexture to Arc<Gles2Texture> for surface {:?}", wl_surface.id());
+                         tracing::trace!("No texture handle for surface {:?} on output {}", wl_surface.id(), output_obj.name());
                     }
                 } else {
-                     tracing::trace!("No texture handle for surface {:?} on output {}", wl_surface.id(), output_obj.name());
+                    tracing::warn!("SurfaceData not found for surface {:?} during rendering.", wl_surface.id());
                 }
-            } else {
-                tracing::warn!("SurfaceData not found for surface {:?} during rendering.", wl_surface.id());
             }
         }
 
@@ -1374,6 +1444,52 @@ impl SeatHandler for DesktopState {
             }
         }
 
+        // If a move grab is active, handle that exclusively.
+        if let Some(grab) = &self.active_move_grab {
+            let delta = self.pointer_location - grab.initial_pointer_pos_logical;
+            let new_window_loc = grab.initial_window_pos_logical.to_f64() + delta;
+
+            let window_arc = grab.window.clone();
+            let new_logical_geom = Rectangle::from_loc_and_size(new_window_loc.to_i32_round(), window_arc.geometry().size);
+
+            // Update ManagedWindow's current geometry
+            *window_arc.current_geometry.write().unwrap() = new_logical_geom;
+            // Update WindowState's position field
+            window_arc.state.write().unwrap().position = new_logical_geom.loc;
+
+            self.space.map_window(&window_arc, new_logical_geom.loc, true); // Re-map to update space's knowledge, activate = true to keep it on top
+
+            // Request a redraw of all outputs as window moves across them
+            self.damage_all_outputs(); // More efficient damage would be better.
+            // No events are sent to client surfaces during compositor-driven move.
+            return; // Consume the motion event for the grab.
+        }
+
+        // --- Standard motion event handling (enter, leave, motion on surface) ---
+        // Determine the surface currently under the pointer
+        let new_pointer_focus_details = self.space.surface_under(self.pointer_location, true);
+
+        let pointer_handle = seat.get_pointer().expect("Pointer capability missing on seat for motion event.");
+
+        // Manage enter/leave events
+        let old_pointer_focus = pointer_handle.current_focus();
+        let new_pointer_focus_surface = new_pointer_focus_details.as_ref().map(|(s, _)| s);
+
+        if old_pointer_focus.as_ref().map(|s| s.id()) != new_pointer_focus_surface.map(|s|s.id()) {
+            if let Some(old_focus_strong) = old_pointer_focus {
+                if old_focus_strong.alive() {
+                    pointer_handle.leave(&old_focus_strong, serial, time);
+                    tracing::trace!("Pointer left surface {:?}", old_focus_strong.id());
+                }
+            }
+            if let Some(new_focus_strong) = new_pointer_focus_surface {
+                if new_focus_strong.alive() {
+                    pointer_handle.enter(new_focus_strong, serial, time, new_pointer_focus_details.as_ref().unwrap().1);
+                    tracing::trace!("Pointer entered surface {:?} at {:?}", new_focus_strong.id(), new_pointer_focus_details.as_ref().unwrap().1);
+                }
+            }
+        }
+
         // Send motion event to the surface currently under the pointer
         if let Some((focused_surface, mut local_coords)) = new_pointer_focus_details {
             if focused_surface.alive() {
@@ -1419,6 +1535,23 @@ impl SeatHandler for DesktopState {
 
         let mouse_button = smithay::backend::input::MouseButton::from_code(button_code).unwrap_or(MouseButton::Other(button_code as u16));
 
+        // Handle release for an active move grab
+        if mouse_button == MouseButton::Left && button_state == ButtonState::Released && self.active_move_grab.is_some() {
+            let grab_info = self.active_move_grab.take().unwrap(); // Take ownership
+            tracing::info!("Finalized interactive move for window (domain_id: {:?}) at location {:?}. Pointer released.",
+                grab_info.window.domain_id, grab_info.window.geometry().loc);
+            // Optionally, release any explicit pointer grab if one was set.
+            // pointer_handle.unset_grab(self, serial, time);
+            self.damage_all_outputs(); // Final damage after move.
+            return; // Event consumed by grab release.
+        }
+
+        // If a grab is active, button presses (other than release of grabbed button) might be ignored or handled by grab.
+        if self.active_move_grab.is_some() {
+            tracing::trace!("Button event received while move grab active. Ignoring for other actions.");
+            return;
+        }
+
         if let Some((surface_under, surface_local_coords)) = self.space.surface_under(self.pointer_location, true) {
             if surface_under.alive() {
                 let mut event_consumed_by_ssd = false;
@@ -1435,22 +1568,43 @@ impl SeatHandler for DesktopState {
                         );
 
                         if title_bar_rect_local.contains(window_local_pointer_coords_f64) {
-                            tracing::debug!("Button {:?} on title bar of SSD window (domain_id: {:?}). Compositor should handle.", mouse_button, window.domain_id);
                             if mouse_button == MouseButton::Left && button_state == ButtonState::Pressed {
-                                // TODO: Initiate interactive move operation.
-                                tracing::info!("TODO: Initiate interactive move for window {:?}", window.id);
+                                // Initiate interactive move operation.
+                                self.active_move_grab = Some(MoveGrabState {
+                                    window: window.clone(), // Clone Arc<ManagedWindow>
+                                    initial_pointer_pos_logical: self.pointer_location, // Global logical coords
+                                    initial_window_pos_logical: window.geometry().loc, // Window's current logical coords
+                                });
+                                tracing::info!("Initiated interactive move for window (domain_id: {:?}), initial pointer: {:?}, initial window loc: {:?}",
+                                    window.domain_id, self.pointer_location, window.geometry().loc);
+                            }
+                            event_consumed_by_ssd = true; // Event handled by compositor (grab started or other title bar action)
+                        }
+                        // TODO: Add similar checks for border clicks to initiate resize.
+                        let edge = get_resize_edge(overall_geo, window_local_pointer_coords_f64, border_f);
+                        if let Some(resize_edge) = edge {
+                            if mouse_button == MouseButton::Left && button_state == ButtonState::Pressed {
+                                self.active_resize_grab = Some(ActiveResizeGrabState {
+                                    window: window.clone(),
+                                    edge: resize_edge,
+                                    initial_pointer_pos_logical: self.pointer_location,
+                                    initial_window_geometry: overall_geo,
+                                });
+                                tracing::info!("Initiated interactive resize for window (domain_id: {:?}) on edge {:?}, initial_geo: {:?}",
+                                    window.domain_id, resize_edge, overall_geo);
+                                // TODO: Change cursor to resize cursor.
                             }
                             event_consumed_by_ssd = true;
                         }
-                        // TODO: Add similar checks for border clicks to initiate resize.
                     }
 
-                    // Click-to-focus and raise, happens regardless of SSD if event not consumed
+                    // Click-to-focus and raise, happens regardless of SSD if event not consumed by SSD logic above
                     if !event_consumed_by_ssd && mouse_button == MouseButton::Left && button_state == ButtonState::Pressed {
                         let keyboard = seat.get_keyboard().expect("Keyboard capability missing for click-to-focus.");
                         if keyboard.current_focus().as_ref() != Some(&surface_under) {
                             keyboard.set_focus(self, Some(surface_under.clone()), serial);
                         }
+                        // Raise window only if it's a toplevel (popups shouldn't be independently raised like this)
                         if window.xdg_surface.toplevel().is_some() {
                              self.space.raise_window(&window, true);
                         }
@@ -1463,9 +1617,72 @@ impl SeatHandler for DesktopState {
                                   mouse_button, button_code, button_state, surface_under.id(), surface_local_coords, serial);
                 }
             }
-        } else {
+        } else { // Click occurred on no specific surface (e.g., desktop background)
+            if mouse_button == MouseButton::Left && button_state == ButtonState::Released {
+                if self.active_resize_grab.is_some() {
+                    let grab_info = self.active_resize_grab.take().unwrap();
+                     tracing::info!("Finalized interactive resize for window (domain_id: {:?}) at geometry {:?}. Pointer released.",
+                        grab_info.window.domain_id, grab_info.window.geometry());
+                    self.damage_all_outputs();
+                }
+            }
              tracing::debug!("Pointer button {:?} ({:?}) state {:?} with no focused surface. Serial: {:?}",
                           mouse_button, button_code, button_state, serial);
+
+            // If click is on no surface, dismiss any "active" ungrabbed popups.
+            // This is a simplified dismissal logic. A more robust system would track modal popups.
+            if button_state == ButtonState::Pressed {
+                let mut dismissed_a_popup = false;
+                for window in self.windows.values() {
+                    if let Some(popup) = window.xdg_surface.popup() {
+                        // Check if this popup is one that should be dismissed on outside click.
+                        // For now, assume all popups without an active client grab behave this way.
+                        // Smithay's pointer grab logic might handle some cases.
+                        // This is a fallback for popups that are transient but not explicitly grabbed by client.
+                        // A more robust check would involve seeing if the popup IS the current pointer grab.
+                        // If not, and click is outside, then dismiss.
+                        // For simplicity: if a click is on nothing, dismiss all "simple" popups.
+                        // This is a common behavior for context menus etc.
+
+                        // A very basic check: if the popup is not associated with any active grab on the seat.
+                        // This is hard to check directly without more context from Smithay's grab system.
+                        // Let's assume for now, if a click is truly on "nothing", we dismiss any popup.
+                        // This might be too aggressive if some popups are meant to survive clicks on the background.
+
+                        // A safer approach: Check if the seat has an active grab. If the grab is by a popup
+                        // and the click is outside that popup's geometry, Smithay's grab logic should handle it.
+                        // If the click is on the background and no grab is active, then dismiss non-modal popups.
+
+                        // For this iteration, let's make it simple: if a click is on the background,
+                        // find the topmost popup and dismiss it.
+                        // This is still not quite right. The XDG shell spec implies that an "ungrabbed" popup
+                        // (one for which the client has not called xdg_popup.grab) should be dismissed
+                        // by the compositor on an outside click.
+
+                        // Let's find all popups and if the click was not on any of them (which is true if surface_under is None),
+                        // then dismiss them. This might be too broad.
+                        // A better heuristic: dismiss popups that are not parents of the clicked surface (if any).
+                        // If surface_under is None, then all popups are candidates for dismissal.
+
+                        // Simplest for now: If a click is on nothing, dismiss all popups.
+                        // This is a common behavior for simple context menus.
+                        // A more advanced system would need to know which popup is "modal" or "active".
+                        if popup.alive() { // Ensure the popup resource itself is alive
+                             tracing::info!("Click on background, sending popup_done to popup on surface {:?}", window.wl_surface().unwrap().id());
+                            popup.send_popup_done(); // This will trigger popup_destroyed
+                            dismissed_a_popup = true;
+                            // Typically dismiss one at a time, from topmost.
+                            // For now, this might dismiss multiple if not careful.
+                            // Let's break after dismissing one, assuming a stack.
+                            // This requires ordering popups by some Z-index or creation time.
+                            // For now, this will dismiss ALL popups if one is clicked outside.
+                        }
+                    }
+                }
+                if dismissed_a_popup {
+                    self.damage_all_outputs();
+                }
+            }
         }
     }
 
