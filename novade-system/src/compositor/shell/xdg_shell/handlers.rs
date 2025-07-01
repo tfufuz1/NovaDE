@@ -45,25 +45,21 @@ impl XdgShellHandler for DesktopState {
 
     // ANCHOR: NewToplevelHandler
     fn new_toplevel(&mut self, toplevel_surface: ToplevelSurface) {
-        let xdg_surface = toplevel_surface.xdg_surface().clone(); // Clone to satisfy borrow checker for user_data access
-        let wl_surface = xdg_surface.wl_surface();
+        let xdg_surface_wrapper = toplevel_surface.xdg_surface().clone(); // Smithay's XdgSurface wrapper
+        let wl_surface = xdg_surface_wrapper.wl_surface();
         tracing::info!(surface_id = ?wl_surface.id(), "XDG New Toplevel requested");
 
-        // ANCHOR_REF: XdgSurfaceUserDataAccessToplevel
-        let user_data_arc = match xdg_surface.user_data().get::<Arc<XdgSurfaceUserData>>() {
+        let user_data_arc = match xdg_surface_wrapper.user_data().get::<Arc<XdgSurfaceUserData>>() {
             Some(data) => data.clone(),
             None => {
-                // This should not happen if new_xdg_surface in mod.rs correctly attached it.
-                tracing::error!(surface_id = ?wl_surface.id(), "XdgSurfaceUserData not found for new toplevel. This is a bug.");
-                // Post a protocol error to the client? Or just destroy the surface?
-                // For now, log and don't proceed with creating a ManagedWindow.
-                // Smithay might destroy the surface if it's in an inconsistent state.
-                toplevel_surface.xdg_surface().post_error(XdgSurfaceError::Defunct, "Internal compositor error: surface data missing");
+                tracing::error!(surface_id = ?wl_surface.id(), "XdgSurfaceUserData not found for new toplevel. This is a bug from new_xdg_surface handler.");
+                toplevel_surface.xdg_surface().post_error(XdgSurfaceError::Defunct, "Internal compositor error: UserData missing");
                 return;
             }
         };
 
-        { // Scope for MutexGuards
+        // Validate and set role
+        {
             let mut role_guard = user_data_arc.role.lock().unwrap();
             if *role_guard != XdgSurfaceRole::None {
                 tracing::warn!(surface_id = ?wl_surface.id(), current_role = ?*role_guard, "Client attempted to assign role 'toplevel' to an XDG surface that already has a role.");
@@ -75,44 +71,68 @@ impl XdgShellHandler for DesktopState {
             let mut state_guard = user_data_arc.state.lock().unwrap();
             if *state_guard == XdgSurfaceState::Destroyed {
                 tracing::warn!(surface_id = ?wl_surface.id(), "Client attempted to create toplevel for an already destroyed XDG surface.");
-                 toplevel_surface.xdg_surface().post_error(XdgSurfaceError::Defunct, "Surface is defunct.");
+                toplevel_surface.xdg_surface().post_error(XdgSurfaceError::Defunct, "Surface is defunct.");
                 return;
             }
-            // State remains PendingConfiguration until first configure/ack_configure cycle.
+            // Initial state is PendingConfiguration, will transition on first ack_configure
         }
-        tracing::info!(surface_id = ?wl_surface.id(), "XDG surface role set to Toplevel.");
-
+        tracing::info!(surface_id = ?wl_surface.id(), "XDG surface role set to Toplevel. State is PendingConfiguration.");
 
         let domain_window_id = DomainWindowIdentifier::new_v4();
         let mut managed_window = ManagedWindow::new_toplevel(toplevel_surface.clone(), domain_window_id);
-        
-        let initial_geometry = managed_window.current_geometry;
 
-        toplevel_surface.with_pending_state(|xdg_toplevel_state| {
-            xdg_toplevel_state.size = Some(initial_geometry.size);
+        // Initial configure: Send a size and state.
+        // Client is expected to ack_configure this serial.
+        // Use a default size or calculate based on output. For now, let's use ManagedWindow's default.
+        let initial_window_state = managed_window.state.read().unwrap();
+        let initial_content_size = if managed_window.manager_data.read().unwrap().decorations {
+            // If SSD, client gets content area size
+            Size::from((
+                (initial_window_state.size.w - 2 * types::DEFAULT_BORDER_SIZE).max(1),
+                (initial_window_state.size.h - types::DEFAULT_TITLE_BAR_HEIGHT - 2 * types::DEFAULT_BORDER_SIZE).max(1)
+            ))
+        } else {
+            initial_window_state.size
+        };
+
+        toplevel_surface.with_pending_state(|xdg_toplevel_pending_state| {
+            xdg_toplevel_pending_state.size = Some(initial_content_size);
+            // No states like maximized/fullscreen initially.
         });
         let configure_serial = toplevel_surface.send_configure();
+
+        // Store this serial in both ManagedWindow (for its own tracking) and XdgSurfaceUserData (for ack_configure validation)
         managed_window.last_configure_serial = Some(configure_serial);
+        *user_data_arc.last_compositor_configure_serial.lock().unwrap() = Some(configure_serial);
+        // XdgSurfaceUserData.state remains PendingConfiguration until client acks.
 
         let window_arc = Arc::new(managed_window);
         self.windows.insert(domain_window_id, window_arc.clone());
 
-        tracing::info!("New XDG Toplevel (domain_id: {:?}, compositor_id: {:?}) created and configured with serial {:?}. UserData role: {:?}, state: {:?}. Awaiting map.",
-                     domain_window_id, window_arc.id, configure_serial, user_data_arc.role.lock().unwrap(), user_data_arc.state.lock().unwrap());
+        tracing::info!(
+            "New XDG Toplevel (domain_id: {:?}, compositor_id: {:?}) created. Sent initial configure (serial: {:?}, content_size: {:?}). UserData role: {:?}, state: {:?}. Awaiting map and ack_configure.",
+            domain_window_id,
+            window_arc.id,
+            configure_serial,
+            initial_content_size,
+            user_data_arc.role.lock().unwrap(),
+            user_data_arc.state.lock().unwrap()
+        );
+    }
     }
     // ANCHOR_END: NewToplevelHandler
 
     // ANCHOR: NewPopupHandler
     fn new_popup(&mut self, popup_surface: PopupSurface, _client_data: &XdgWmBaseClientData) {
-        let xdg_surface = popup_surface.xdg_surface().clone();
-        let wl_surface = xdg_surface.wl_surface();
+        let xdg_surface_wrapper = popup_surface.xdg_surface().clone(); // Smithay's XdgSurface wrapper
+        let wl_surface = xdg_surface_wrapper.wl_surface();
         tracing::info!(popup_surface_id = ?wl_surface.id(), "XDG New Popup requested");
 
-        let user_data_arc = match xdg_surface.user_data().get::<Arc<XdgSurfaceUserData>>() {
+        let user_data_arc = match xdg_surface_wrapper.user_data().get::<Arc<XdgSurfaceUserData>>() {
             Some(data) => data.clone(),
             None => {
-                tracing::error!(surface_id = ?wl_surface.id(), "XdgSurfaceUserData not found for new popup. This is a bug.");
-                popup_surface.xdg_surface().post_error(XdgSurfaceError::Defunct, "Internal compositor error: surface data missing");
+                tracing::error!(surface_id = ?wl_surface.id(), "XdgSurfaceUserData not found for new popup. This is a bug from new_xdg_surface handler.");
+                popup_surface.xdg_surface().post_error(XdgSurfaceError::Defunct, "Internal compositor error: UserData missing");
                 return;
             }
         };
@@ -120,19 +140,18 @@ impl XdgShellHandler for DesktopState {
         let parent_wl_surface = match popup_surface.get_parent_surface() {
             Some(s) => s,
             None => {
-                tracing::error!("Popup {:?} created without a parent surface. Destroying popup.", wl_surface.id());
-                // As per protocol, if parent is null and xdg_surface has xdg_popup role, send xdg_surface.role error.
-                // Smithay might handle this check before new_popup is called.
-                // If we reach here and parent is None, it's likely an issue.
-                // The XdgSurfaceError::Role check below will catch if the role was already set.
-                // If the role was None, this is an invalid state.
-                popup_surface.xdg_surface().post_error(XdgSurfaceError::InvalidPopupParent, "Popup parent is missing.");
-                // No send_popup_done() here directly, error should lead to client destroying object or compositor cleaning up.
+                tracing::warn!(surface_id = ?wl_surface.id(), "Client attempted to create a popup without a parent surface.");
+                // Protocol: "if parent is not set, the xdg_wm_base.error.invalid_popup_parent protocol error is raised."
+                // Smithay's XdgShellState might handle this before calling new_popup.
+                // If we reach here, it implies Smithay allowed it, or the parent became invalid after XDG surface creation.
+                // For safety, post error on xdg_surface.
+                popup_surface.xdg_surface().post_error(XdgSurfaceError::InvalidPopupParent, "Popup parent is missing or invalid.");
                 return;
             }
         };
 
-        { // Scope for MutexGuards
+        // Validate and set role
+        {
             let mut role_guard = user_data_arc.role.lock().unwrap();
             if *role_guard != XdgSurfaceRole::None {
                 tracing::warn!(surface_id = ?wl_surface.id(), current_role = ?*role_guard, "Client attempted to assign role 'popup' to an XDG surface that already has a role.");
@@ -148,50 +167,63 @@ impl XdgShellHandler for DesktopState {
                 return;
             }
         }
-        tracing::info!(surface_id = ?wl_surface.id(), "XDG surface role set to Popup.");
+        tracing::info!(surface_id = ?wl_surface.id(), "XDG surface role set to Popup. State is PendingConfiguration.");
 
-
-        let parent_managed_window_arc = match self.find_managed_window_by_wl_surface(&parent_wl_surface) { // MODIFIED
-             Some(arc) => arc,
-             None => {
-                tracing::error!("Parent WlSurface {:?} for popup {:?} does not correspond to a known ManagedWindow. Destroying popup.", parent_wl_surface.id(), wl_surface.id());
-                // This is a compositor logic error or client misbehaviour not directly covered by xdg_surface.error.
-                // Smithay might have already invalidated the popup if parent was invalid.
-                // For now, just don't create the ManagedWindow for the popup.
-                // Client might get a send_popup_done() from Smithay's internal handling of invalid parent.
-                popup_surface.xdg_surface().post_error(XdgSurfaceError::InvalidPopupParent, "Popup parent is not a mapped NovaDE window.");
+        let parent_managed_window_arc = match self.find_managed_window_by_wl_surface(&parent_wl_surface) {
+            Some(arc) => arc,
+            None => {
+                tracing::warn!(surface_id = ?wl_surface.id(), parent_surface_id = ?parent_wl_surface.id(), "Parent WlSurface for popup does not correspond to a known ManagedWindow.");
+                popup_surface.xdg_surface().post_error(XdgSurfaceError::InvalidPopupParent, "Popup parent is not a recognized compositor window.");
                 return;
-             }
+            }
         };
         
-        tracing::info!(popup_surface_id = ?wl_surface.id(), parent_surface_id = ?parent_wl_surface.id(), "XDG New Popup parent lookup successful.");
+        tracing::info!(popup_surface_id = ?wl_surface.id(), parent_window_id = ?parent_managed_window_arc.id, "XDG New Popup parent lookup successful.");
 
-        let mut managed_popup = ManagedWindow::new_popup(popup_surface.clone(), parent_managed_window_arc.domain_id(), Some(parent_managed_window_arc.clone()));
+        let mut managed_popup = ManagedWindow::new_popup(
+            popup_surface.clone(),
+            parent_managed_window_arc.domain_id(), // Popups can share domain context, or have their own
+            Some(parent_managed_window_arc.clone())
+        );
 
-        let positioner_state = popup_surface.get_positioner();
-        let parent_geometry = parent_managed_window_arc.geometry();
+        let positioner_state = popup_surface.get_positioner(); // Positioner as defined by client
+        let parent_geometry = parent_managed_window_arc.geometry(); // Current geometry of parent ManagedWindow
 
-        // Use smithay's calculate_popup_geometry helper
         let popup_initial_geom = smithay::wayland::shell::xdg::calculate_popup_geometry(
             &positioner_state,
-            parent_geometry,
-            popup_surface.xdg_surface().wl_surface(), // Pass the WlSurface of the popup
+            parent_geometry, // Geometry of the parent ManagedWindow's content area or overall rect
+            wl_surface,      // The WlSurface of the popup itself
         );
-        managed_popup.current_geometry = popup_initial_geom;
+
+        // Update ManagedWindow's geometry. Note: current_geometry is Arc<RwLock<...>>
+        *managed_popup.current_geometry.write().unwrap() = popup_initial_geom;
+        // Also update the WindowState's position and size fields
+        managed_popup.state.write().unwrap().position = popup_initial_geom.loc;
+        managed_popup.state.write().unwrap().size = popup_initial_geom.size;
 
 
+        // Send initial configure for the popup
         let configure_serial = popup_surface.send_configure();
         managed_popup.last_configure_serial = Some(configure_serial);
+        *user_data_arc.last_compositor_configure_serial.lock().unwrap() = Some(configure_serial);
 
         let popup_arc = Arc::new(managed_popup);
         self.windows.insert(popup_arc.domain_id(), popup_arc.clone());
 
-        // Optional: Store Arc<ManagedWindow> in PopupSurface's XDG surface user data, if needed for direct access later.
-        // This is different from XdgSurfaceUserData which is already there.
-        // popup_surface.xdg_surface().user_data().insert_if_missing_threadsafe(|| popup_arc.clone());
-
-        tracing::info!("New XDG Popup (domain_id: {:?}, compositor_id: {:?}) created, configured with serial {:?}. Parent: {:?}. UserData role: {:?}, state: {:?}. Geom: {:?}",
-                     popup_arc.domain_id(), popup_arc.id, configure_serial, parent_managed_window_arc.id, user_data_arc.role.lock().unwrap(), user_data_arc.state.lock().unwrap(), popup_initial_geom);
+        tracing::info!(
+            "New XDG Popup (domain_id: {:?}, compositor_id: {:?}) created. Sent initial configure (serial: {:?}). Calculated geom: {:?}. Parent: {:?}. UserData role: {:?}, state: {:?}.",
+            popup_arc.domain_id(),
+            popup_arc.id,
+            configure_serial,
+            popup_initial_geom,
+            parent_managed_window_arc.id,
+            user_data_arc.role.lock().unwrap(),
+            user_data_arc.state.lock().unwrap()
+        );
+        // Note: Popups are typically mapped implicitly by the client after receiving configure and committing content.
+        // There isn't a separate `map_popup` handler in XdgShellHandler.
+        // Visibility and stacking are handled by the compositor during rendering.
+        self.space.damage_all_outputs(); // Damage because a new surface (popup) might appear.
     }
     // ANCHOR_END: NewPopupHandler
 
@@ -1748,6 +1780,198 @@ mod tests {
         assert_eq!(*mw2.current_geometry.read().unwrap(), output_geom, "Remaining window mw2 should now take full workspace area.");
     }
     // ANCHOR_END: WorkspaceAssignmentAndTilingInteractionTests
+
+
+    // --- Additional Tests for XdgShellHandler logic ---
+
+    #[test]
+    fn test_new_toplevel_error_role_already_set() {
+        let mut state = create_minimal_test_state();
+        let client = create_test_client(&mut state);
+        let toplevel_surface = mock_toplevel_surface(&mut state, &client);
+        let xdg_surface_wrapper = toplevel_surface.xdg_surface();
+
+        // First call to new_toplevel should succeed and set the role
+        state.new_toplevel(toplevel_surface.clone());
+        assert_eq!(*xdg_surface_wrapper.user_data().get::<Arc<XdgSurfaceUserData>>().unwrap().role.lock().unwrap(), XdgSurfaceRole::Toplevel);
+
+        // Second call to new_toplevel for the same surface should fail due to role already set
+        // We can't directly check for posted_error without a client mock, but we ensure it doesn't panic
+        // and the number of managed windows doesn't increase.
+        let initial_window_count = state.windows.len();
+        state.new_toplevel(toplevel_surface.clone()); // Attempt to assign role again
+        assert_eq!(state.windows.len(), initial_window_count, "Window count should not increase on role error.");
+        // Protocol error XdgSurfaceError::Role should have been posted.
+    }
+
+    #[test]
+    fn test_new_toplevel_error_surface_destroyed() {
+        let mut state = create_minimal_test_state();
+        let client = create_test_client(&mut state);
+        let toplevel_surface = mock_toplevel_surface(&mut state, &client);
+        let xdg_surface_wrapper = toplevel_surface.xdg_surface();
+        let user_data_arc = xdg_surface_wrapper.user_data().get::<Arc<XdgSurfaceUserData>>().unwrap().clone();
+
+        // Mark XdgSurfaceUserData as destroyed
+        *user_data_arc.state.lock().unwrap() = XdgSurfaceState::Destroyed;
+
+        let initial_window_count = state.windows.len();
+        state.new_toplevel(toplevel_surface.clone());
+        assert_eq!(state.windows.len(), initial_window_count, "Window count should not increase if XDG surface is already destroyed.");
+        // Protocol error XdgSurfaceError::Defunct should have been posted.
+    }
+
+    #[test]
+    fn test_new_popup_error_parent_not_managed() {
+        let mut state = create_minimal_test_state();
+        let client = create_test_client(&mut state);
+
+        // Create a parent surface that won't be a ManagedWindow in our state
+        let unmanaged_parent_toplevel = mock_toplevel_surface(&mut state, &client);
+        // Do NOT call state.new_toplevel for unmanaged_parent_toplevel
+
+        let popup_surface = mock_popup_surface(&mut state, &client, &unmanaged_parent_toplevel);
+
+        let initial_window_count = state.windows.len();
+        let client_data = XdgWmBaseClientData::new(XDG_WM_BASE_VERSION);
+        state.new_popup(popup_surface.clone(), &client_data);
+        assert_eq!(state.windows.len(), initial_window_count, "Popup count should not increase if parent is not a managed window.");
+        // Protocol error XdgSurfaceError::InvalidPopupParent should have been posted.
+    }
+
+    #[test]
+    fn test_map_toplevel_error_no_user_data() {
+        // This tests a compositor bug scenario: if new_xdg_surface failed to attach XdgSurfaceUserData.
+        let mut state = create_minimal_test_state();
+        let client = create_test_client(&mut state);
+        let toplevel_surface = mock_toplevel_surface(&mut state, &client);
+
+        // Intentionally *don't* let new_xdg_surface run for its SmithayXdgSurface,
+        // or somehow remove the XdgSurfaceUserData from the SmithayXdgSurface.
+        // This is tricky to set up perfectly as new_toplevel itself relies on it.
+        // Instead, we can test the check inside map_toplevel by creating a toplevel_surface
+        // whose underlying xdg_surface_wrapper does not have our UserData.
+        // The current mock_toplevel_surface *does* add it.
+        // A more direct test would be to ensure the check `xdg_surface_obj.user_data().get::<Arc<XdgSurfaceUserData>>()` exists.
+        // For now, we assume that if this path is hit, an error is posted.
+        // The existing `map_toplevel` has this check.
+
+        // Simulate a scenario where the XdgSurfaceUserData is missing (e.g., by removing it after it was added by mock_toplevel_surface)
+        // This is somewhat artificial for a unit test as mock_toplevel_surface ensures it's there.
+        let xdg_surface_wrapper = toplevel_surface.xdg_surface();
+        xdg_surface_wrapper.user_data().remove::<Arc<XdgSurfaceUserData>>(); // Try to remove it
+
+        // We also need a ManagedWindow for map_toplevel to proceed to the check
+        let domain_id = DomainWindowIdentifier::new_v4();
+        let managed_window = ManagedWindow::new_toplevel(toplevel_surface.clone(), domain_id);
+        state.windows.insert(domain_id, Arc::new(managed_window));
+
+        state.map_toplevel(&toplevel_surface); // Should log error and post XdgSurfaceError::Defunct
+        // Assert that the window did not actually get mapped in our state
+        let win_arc = state.find_managed_window_by_wl_surface(toplevel_surface.wl_surface()).unwrap();
+        assert!(!win_arc.state.read().unwrap().is_mapped, "Window should not be mapped if XdgSurfaceUserData was missing.");
+    }
+
+
+    #[test]
+    fn test_toplevel_destroyed_updates_user_data_and_removes_from_state() {
+        let mut state = create_minimal_test_state();
+        let client = create_test_client(&mut state);
+        let toplevel_surface = mock_toplevel_surface(&mut state, &client);
+        let xdg_surface_wrapper = toplevel_surface.xdg_surface();
+        let user_data_arc = xdg_surface_wrapper.user_data().get::<Arc<XdgSurfaceUserData>>().unwrap().clone();
+
+        state.new_toplevel(toplevel_surface.clone()); // Adds to state.windows
+        let window_arc = state.find_managed_window_by_wl_surface(toplevel_surface.wl_surface()).unwrap();
+        let domain_id = window_arc.domain_id;
+
+        // Map it to an output and workspace to test full cleanup
+        let primary_output_name = state.primary_output_name.read().unwrap().clone().unwrap();
+        let active_ws_id = *state.active_workspaces.read().unwrap().get(&primary_output_name).unwrap();
+        *window_arc.output_name.write().unwrap() = Some(primary_output_name.clone());
+        *window_arc.workspace_id.write().unwrap() = Some(active_ws_id);
+        state.output_workspaces.get(&primary_output_name).unwrap().iter()
+            .find(|ws| ws.read().unwrap().id == active_ws_id).unwrap()
+            .read().unwrap().add_window(domain_id);
+        state.map_toplevel(&toplevel_surface);
+
+
+        assert!(state.windows.contains_key(&domain_id));
+        assert_eq!(*user_data_arc.state.lock().unwrap(), XdgSurfaceState::PendingConfiguration); // Or Configured if map implies ack
+
+        state.toplevel_destroyed(toplevel_surface.clone());
+
+        assert_eq!(*user_data_arc.state.lock().unwrap(), XdgSurfaceState::Destroyed);
+        assert!(!state.windows.contains_key(&domain_id), "Window should be removed from DesktopState.windows");
+        assert!(state.space.element_for_surface(toplevel_surface.wl_surface()).is_none(), "Window should be unmapped from space");
+
+        let ws_arc = state.output_workspaces.get(&primary_output_name).unwrap().iter()
+            .find(|ws| ws.read().unwrap().id == active_ws_id).unwrap();
+        assert!(!ws_arc.read().unwrap().contains_window(&domain_id), "Window should be removed from its workspace");
+    }
+
+    #[test]
+    fn test_popup_destroyed_updates_user_data_and_removes_from_state() {
+        let mut state = create_minimal_test_state();
+        let client = create_test_client(&mut state);
+        let parent_toplevel_surface = mock_toplevel_surface(&mut state, &client);
+        state.new_toplevel(parent_toplevel_surface.clone()); // Parent needs to be a managed window
+
+        let popup_surface = mock_popup_surface(&mut state, &client, parent_toplevel_surface.wl_surface());
+        let xdg_surface_wrapper = popup_surface.xdg_surface();
+        let user_data_arc = xdg_surface_wrapper.user_data().get::<Arc<XdgSurfaceUserData>>().unwrap().clone();
+
+        let client_data = XdgWmBaseClientData::new(XDG_WM_BASE_VERSION);
+        state.new_popup(popup_surface.clone(), &client_data); // Adds to state.windows
+
+        let popup_arc = state.find_managed_window_by_wl_surface(popup_surface.wl_surface()).unwrap();
+        let popup_domain_id = popup_arc.domain_id;
+
+        assert!(state.windows.contains_key(&popup_domain_id));
+        assert_ne!(*user_data_arc.state.lock().unwrap(), XdgSurfaceState::Destroyed);
+
+        state.popup_destroyed(popup_surface.clone());
+
+        assert_eq!(*user_data_arc.state.lock().unwrap(), XdgSurfaceState::Destroyed);
+        assert!(!state.windows.contains_key(&popup_domain_id), "Popup window should be removed from DesktopState.windows");
+        // Popups are not directly mapped to space in the same way as toplevels in these tests,
+        // but if they were, we'd check space.element_for_surface(...).is_none()
+    }
+
+    #[test]
+    fn test_state_changes_update_serials() {
+        let mut state = create_minimal_test_state();
+        let client = create_test_client(&mut state);
+        let toplevel_surface = mock_toplevel_surface(&mut state, &client);
+        let xdg_surface_wrapper = toplevel_surface.xdg_surface();
+
+        state.new_toplevel(toplevel_surface.clone());
+        let window_arc = state.find_managed_window_by_wl_surface(toplevel_surface.wl_surface()).unwrap();
+        let user_data_arc = xdg_surface_wrapper.user_data().get::<Arc<XdgSurfaceUserData>>().unwrap().clone();
+
+        let initial_serial = user_data_arc.last_compositor_configure_serial.lock().unwrap().unwrap();
+
+        state.toplevel_request_set_maximized(&toplevel_surface);
+        let maximized_serial = user_data_arc.last_compositor_configure_serial.lock().unwrap().unwrap();
+        assert_ne!(initial_serial, maximized_serial, "Serial should update after maximize");
+
+        state.toplevel_request_unset_maximized(&toplevel_surface);
+        let unmaximized_serial = user_data_arc.last_compositor_configure_serial.lock().unwrap().unwrap();
+        assert_ne!(maximized_serial, unmaximized_serial, "Serial should update after unmaximize");
+
+        state.toplevel_request_set_fullscreen(&toplevel_surface, None);
+        let fullscreen_serial = user_data_arc.last_compositor_configure_serial.lock().unwrap().unwrap();
+        assert_ne!(unmaximized_serial, fullscreen_serial, "Serial should update after fullscreen");
+
+        state.toplevel_request_unset_fullscreen(&toplevel_surface);
+        let unfullscreen_serial = user_data_arc.last_compositor_configure_serial.lock().unwrap().unwrap();
+        assert_ne!(fullscreen_serial, unfullscreen_serial, "Serial should update after unfullscreen");
+
+        state.toplevel_request_set_minimized(&toplevel_surface);
+        let minimized_serial = user_data_arc.last_compositor_configure_serial.lock().unwrap().unwrap();
+        assert_ne!(unfullscreen_serial, minimized_serial, "Serial should update after minimize");
+    }
+
 }
 
 #[cfg(test)]
