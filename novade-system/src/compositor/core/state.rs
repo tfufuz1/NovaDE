@@ -60,7 +60,7 @@ use crate::input::keyboard_layout::KeyboardLayoutManager;
 // use crate::compositor::renderer_interface::abstraction::FrameRenderer; // Removed
 use crate::display_management::WaylandDisplayManager;
 
-mod input_handlers; // Added module declaration
+// mod input_handlers; // Removed as SeatHandler is now fully in state.rs
 mod output_handlers; // Added module declaration for output handlers
 mod screencopy_handlers; // Added module declaration for screencopy handlers
 
@@ -651,47 +651,123 @@ impl DesktopState {
         renderer_guard.begin_frame(begin_frame_rect)
             .map_err(|e| format!("Renderer begin_frame failed for output {}: {:?}", output_obj.name(), e))?;
 
-        let mut surfaces_to_render: Vec<(&WlSurface, Rectangle<i32, Physical>)> = Vec::new();
-        let space_elements = self.space.elements().cloned().collect::<Vec<_>>();
+        // Use RenderElement from render::renderer
+        let mut render_elements: Vec<crate::compositor::render::renderer::RenderElement<'_, Gles2Texture>> = Vec::new();
 
-        for element_window in &space_elements {
-            // ANCHOR: SSDPreRenderCheck
-            // TODO SSD: Server-Side Decoration Rendering Logic
-            // 1. Check if this element_window (which is an Arc<ManagedWindow>) has SSD enabled:
-            //    `let is_ssd = element_window.manager_data.read().unwrap().decorations;`
-            // 2. If `is_ssd`:
-            //    a. Get `overall_geometry = *element_window.current_geometry.read().unwrap();` (physical, screen-relative)
-            //    b. Calculate title bar rect, border rects based on `overall_geometry` and SSD constants
-            //       (e.g., `crate::compositor::shell::xdg_shell::types::{DEFAULT_TITLE_BAR_HEIGHT, DEFAULT_BORDER_SIZE}`).
-            //    c. The renderer (`renderer_guard`) would need methods like `draw_rectangle` and `draw_text`.
-            //    d. Call renderer to draw borders and title bar.
-            //    e. Get title: `let title = element_window.state.read().unwrap().title.clone().unwrap_or_default();`
-            //    f. Call renderer to draw `title` on the title bar.
-            //    g. Calculate `content_area_geometry` by subtracting decoration sizes from `overall_geometry`.
-            //       The `physical_geo` for the client surface below should then be this `content_area_geometry`.
-            // ANCHOR_END: SSDPreRenderCheck
+        // Iterate over windows and popups, ensuring popups are rendered on top.
+        // Smithay's `Space::elements_for_output` should provide elements in a generally correct rendering order
+        // (bottom to top). Popups associated with toplevels should be handled correctly if they are
+        // part of the space or if we render them in a second pass.
+        // For now, let's iterate once and rely on Space's ordering.
+        // We might need a separate list for popups if complex stacking is required beyond Space's capabilities.
 
-            if let Some(wl_surface) = element_window.wl_surface() {
-                if !wl_surface.is_alive() {
-                    tracing::trace!("Surface not alive: {:?} on output {}", wl_surface.id(), output_obj.name());
+        let space_elements_on_output = self.space.elements_for_output(output_obj).cloned().collect::<Vec<_>>();
+
+        for window_arc in &space_elements_on_output { // window_arc is Arc<ManagedWindow>
+            if !window_arc.is_mapped() { // Skip unmapped windows
+                continue;
+            }
+
+            let wl_surface = match window_arc.wl_surface() {
+                Some(s) => s,
+                None => continue, // Should not happen for a mapped ManagedWindow
+            };
+
+            if !wl_surface.alive() {
+                tracing::trace!("Surface not alive: {:?} on output {}", wl_surface.id(), output_obj.name());
+                continue;
+            }
+
+            // Get overall window geometry (logical, screen-relative from Space)
+            let logical_overall_geo = match self.space.element_geometry(window_arc) {
+                Some(geo) => geo,
+                None => {
+                    tracing::trace!("No geometry for window (domain_id: {:?}) on output {}", window_arc.domain_id, output_obj.name());
                     continue;
                 }
+            };
 
-                if let Some(logical_geo) = self.space.element_geometry(element_window) {
-                    // TODO: Check if the surface is on the current output_obj before adding.
-                    // This requires knowing the output for each surface or window.
-                    // For now, we render all space elements on every output.
-                    let physical_geo = Rectangle::from_loc_and_size(
-                        logical_geo.loc.to_physical_precise_round(output_scale) + output_geometry_logical.loc.to_physical_precise_round(output_scale), // Ensure surface position is relative to output
-                        logical_geo.size.to_physical_precise_round(output_scale)
-                    );
-                    surfaces_to_render.push((wl_surface, physical_geo));
-                    tracing::trace!("Added surface {:?} with logical_geo {:?}, physical_geo {:?} to render list for output {}", wl_surface.id(), logical_geo, physical_geo, output_obj.name());
+            // Convert overall geometry to physical, output-relative
+            // The geometry from space is already output-local if space.elements_for_output is used correctly.
+            // However, space.element_geometry returns global coordinates.
+            // We need to make it relative to the current output's logical position if not already.
+            // And then scale.
+            // Let's assume logical_overall_geo from space.element_geometry is global.
+            // We need to subtract output_geometry_logical.loc to make it output-local before scaling.
+            let output_local_logical_loc = logical_overall_geo.loc - output_geometry_logical.loc;
+            let physical_overall_loc_on_output = output_local_logical_loc.to_physical_precise_round(output_scale);
+            let physical_overall_size = logical_overall_geo.size.to_physical_precise_round(output_scale);
+            let physical_overall_geo_on_output = Rectangle::from_loc_and_size(physical_overall_loc_on_output, physical_overall_size);
+
+
+            let manager_data = window_arc.manager_data.read().unwrap();
+            let is_ssd = manager_data.decorations;
+            let window_state_data = window_arc.state.read().unwrap(); // For title, activation state
+
+            let client_surface_physical_geo: Rectangle<i32, Physical>;
+
+            if is_ssd {
+                // TODO SSD: Draw actual decorations (borders, title bar)
+                // For now, we'll just calculate the content area for the client surface.
+                // These would be RenderElement::SolidColor or similar.
+                // Example: Border thickness and title bar height in logical pixels
+                let border_px = (types::DEFAULT_BORDER_SIZE as f64 * output_scale).round() as i32;
+                let title_bar_px = (types::DEFAULT_TITLE_BAR_HEIGHT as f64 * output_scale).round() as i32;
+
+                // Define decoration rectangles based on physical_overall_geo_on_output
+                // Example: Top border
+                // let top_border_rect = Rectangle::from_loc_and_size(
+                //     physical_overall_geo_on_output.loc,
+                //     Size::from((physical_overall_geo_on_output.size.w, border_px))
+                // );
+                // render_elements.push(crate::compositor::render::renderer::RenderElement::SolidColor {
+                //     color: [0.2, 0.2, 0.2, 1.0], // Example color
+                //     geometry: top_border_rect,
+                //     damage: &[top_border_rect], // For simplicity, damage whole element
+                // });
+                // Similar for other borders and title bar background.
+                // Text rendering for title is more complex and would be a TODO for the renderer.
+
+                client_surface_physical_geo = Rectangle::from_loc_and_size(
+                    Point::from((
+                        physical_overall_geo_on_output.loc.x + border_px,
+                        physical_overall_geo_on_output.loc.y + title_bar_px + border_px,
+                    )),
+                    Size::from((
+                        (physical_overall_geo_on_output.size.w - 2 * border_px).max(0),
+                        (physical_overall_geo_on_output.size.h - title_bar_px - 2 * border_px).max(0),
+                    ))
+                );
+            } else {
+                client_surface_physical_geo = physical_overall_geo_on_output;
+            }
+
+            // Add client surface content to render elements
+            if let Some(surface_data_mutex) = wl_surface.data_map().get::<StdMutex<SurfaceData>>() {
+                let surface_data = surface_data_mutex.lock().unwrap();
+                if let Some(texture_arc) = surface_data.texture_handle.clone() {
+                     // The texture_arc is Arc<dyn RenderableTexture>. We need to downcast or ensure it's the correct type.
+                     // Assuming self.renderer uses Gles2Texture as its Self::Texture.
+                    if let Some(gles_texture_arc) = texture_arc.as_any().downcast_ref::<Arc<Gles2Texture>>() {
+                        render_elements.push(crate::compositor::render::renderer::RenderElement::Surface {
+                            texture: gles_texture_arc.clone(),
+                            geometry: client_surface_physical_geo,
+                            damage: &[], // TODO: Pass actual damage from SurfaceData or Space
+                            alpha: manager_data.opacity as f32, // Use window opacity
+                            transform: surface_data.current_buffer_info.as_ref().map_or(Transform::Normal, |info| info.transform),
+                        });
+                        tracing::trace!("Added client surface {:?} content (texture: {:?}) with physical_geo {:?} to render list for output {}", wl_surface.id(), gles_texture_arc.unique_id(), client_surface_physical_geo, output_obj.name());
+                    } else {
+                        tracing::warn!("Could not downcast RenderableTexture to Arc<Gles2Texture> for surface {:?}", wl_surface.id());
+                    }
                 } else {
-                    tracing::trace!("No geometry for surface {:?} on output {}", wl_surface.id(), output_obj.name());
+                     tracing::trace!("No texture handle for surface {:?} on output {}", wl_surface.id(), output_obj.name());
                 }
+            } else {
+                tracing::warn!("SurfaceData not found for surface {:?} during rendering.", wl_surface.id());
             }
         }
+
 
         let dmabuf_importer = self.dmabuf_importer.as_ref().ok_or_else(|| {
             let err_msg = "DmabufImporter not initialized during render_frame.";
@@ -699,32 +775,39 @@ impl DesktopState {
             err_msg.to_string()
         })?;
 
-        renderer_guard.render_frame(
-            output_obj,
-            &surfaces_to_render,
-            dmabuf_importer,
-            self
-        ).map_err(|e| format!("Renderer render_frame failed for output {}: {:?}", output_obj.name(), e))?;
+        // The render_frame in CompositorRenderer trait takes `elements: Vec<RenderElement<'a, Self::Texture>>`
+        // We are constructing this `render_elements` vector.
+        // The damage parameter for `render_frame` refers to output_damage.
+        // For individual elements, damage is passed within RenderElement::Surface.
+        // TODO: Get actual output damage from DamageTrackerState.
+        let output_damage: &[Rectangle<i32, Physical>] = &[]; // Placeholder for actual output damage
+
+        renderer_guard.render_elements(render_elements, output_damage)
+            .map_err(|e| format!("Renderer render_elements failed for output {}: {:?}", output_obj.name(), e))?;
+
+        // TODO: Cursor Rendering
+        // if let Some(cursor_texture_arc) = &self.active_cursor_texture {
+        //     if let Some(gles_cursor_texture_arc) = cursor_texture_arc.as_any().downcast_ref::<Arc<Gles2Texture>>() {
+        //          let cursor_render_element = crate::compositor::render::renderer::RenderElement::Cursor {
+        //              texture: gles_cursor_texture_arc.clone(),
+        //              position: self.pointer_location.to_physical_precise_round(output_scale) + output_geometry_logical.loc.to_physical_precise_round(output_scale), // Ensure cursor pos is output-local
+        //              hotspot: self.cursor_hotspot.to_physical_precise_round(output_scale), // Scale hotspot too
+        //              damage: &[], // TODO: Cursor damage
+        //          };
+        //          renderer_guard.render_elements(vec![cursor_render_element], &[]).map_err(|e| format!("Cursor rendering failed: {:?}", e))?;
+        //      }
+        // }
+
 
         renderer_guard.finish_frame()
             .map_err(|e| format!("Renderer finish_frame failed for output {}: {:?}", output_obj.name(), e))?;
 
-        // Call present_frame on the renderer
-        // This requires Gles2Renderer (or any impl of CompositorRenderer) to have present_frame.
-        // The old FrameRenderer trait had it. The new CompositorRenderer does not.
-        // This is a critical point: presentation needs to be handled.
-        // For now, let's assume the main loop or backend will call a present method
-        // on the renderer instance directly after this DesktopState::render_frame call.
-        // Or, we need to add present_frame() to CompositorRenderer trait.
-        // The Gles2Renderer has a present_frame() method from its old FrameRenderer impl.
-        // We need a way to call it.
-        // Simplest for now: if the renderer_guard can be downcast or if present_frame is added to the trait.
-        // Let's assume the backend will handle presentation by calling renderer_guard.present_frame() if needed.
-
         let time_ms = self.clock.now().try_into().unwrap_or_default();
-        for (surface_wl, _) in &surfaces_to_render {
-            if surface_wl.is_alive() {
-                smithay::wayland::compositor::with_states(surface_wl, |states| {
+        // Send frame callbacks for all rendered surfaces (elements in space_elements_on_output)
+        for window_arc in &space_elements_on_output {
+            if let Some(surface_wl) = window_arc.wl_surface() {
+                if surface_wl.is_alive() {
+                    smithay::wayland::compositor::with_states(&surface_wl, |states| {
                     if let Some(surface_user_data) = states.data_map.get::<std::cell::RefCell<smithay::wayland::compositor::SurfaceData>>() {
                         let mut surface_data_inner = surface_user_data.borrow_mut();
                         if !surface_data_inner.frame_callbacks.is_empty() {
@@ -1115,204 +1198,82 @@ delegate_screencopy!(DesktopState);
 delegate_damage_tracker!(DesktopState);
 
 impl SeatHandler for DesktopState {
-    type KeyboardFocus = WlSurface;
-    type PointerFocus = WlSurface;
-    type TouchFocus = WlSurface;
+    type KeyboardFocus = WlSurface; // Keep as WlSurface for broad compatibility
+    type PointerFocus = WlSurface;  // Keep as WlSurface
+    type TouchFocus = WlSurface;    // Keep as WlSurface
 
     fn seat_state(&mut self) -> &mut SeatState<Self> {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&Self::KeyboardFocus>) {
-        // ANCHOR: SSDInputFocusChangeNote
-        // TODO SSD: When focus changes, if the new window has SSD, the input regions for SSD
-        // (title bar, borders) might need to be registered with the input system if they
-        // should intercept events when the window is active but not necessarily when pointer is over them.
-        // However, typical SSD input handling is based on pointer location at time of click/motion.
-        // ANCHOR_END: SSDInputFocusChangeNote
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let old_focus_wl_surface = self.active_input_surface.as_ref().and_then(Weak::upgrade);
 
-        let client_name = focused
-            .and_then(|s| s.client())
-            .map(|c| format!("{:?}", c.id()))
-            .unwrap_or_else(|| "<none>".to_string());
+        if old_focus_wl_surface.as_ref().map(|s| s.id()) == focused.map(|s| s.id()) {
+            // Focus hasn't meaningfully changed.
+            // Ensure the currently focused window (if any) is marked active.
+            if let Some(focused_surf) = focused {
+                if let Some(window_arc) = self.find_managed_window_by_wl_surface(focused_surf) {
+                    let mut win_state = window_arc.state.write().unwrap();
+                    if !win_state.activated {
+                        win_state.activated = true;
+                        // Also update XDG toplevel state if it's a toplevel
+                        if let Some(toplevel) = window_arc.xdg_surface.toplevel() {
+                            toplevel.with_pending_state(|xdg_state| {
+                                xdg_state.states.set(smithay::wayland::shell::xdg::ToplevelState::Activated, true);
+                            });
+                            toplevel.send_configure();
+                             tracing::info!("(Re)activated XDG Toplevel (domain_id: {:?}) on focus_changed (no actual focus change).", window_arc.domain_id);
+                        }
+                    }
+                }
+            }
+            return;
+        }
 
-        tracing::debug!(
-            seat = %seat.name(),
-            focused_surface_id = ?focused.map(|s| s.id()),
-            client = %client_name,
-            "Seat focus changed"
-        );
+        tracing::debug!(seat = %seat.name(), new_focus = ?focused.map(|s| s.id()), old_focus = ?old_focus_wl_surface.as_ref().map(|s|s.id()), "Keyboard focus changed (DesktopState::SeatHandler)");
 
         self.active_input_surface = focused.map(|s| s.downgrade());
 
-        // ANCHOR: UpdateActivationOnFocusChangeInStateRs
-        // Get the old focus from the seat's current keyboard focus.
-        let old_focus_wl_surface = seat.get_keyboard().and_then(|k| k.current_focus());
-
-        if let Some(old_surf) = old_focus_wl_surface {
-            // Check if the old focused surface is different from the new one
-            if focused.map_or(true, |new_s| new_s.id() != old_surf.id()) {
-                if let Some(managed_window) = self.find_managed_window_by_wl_surface(&old_surf) {
-                    // It's important that ManagedWindow.state is Arc<RwLock<WindowState>>
-                    // The current definition is Arc<RwLock<WindowState>> so this should work.
-                    managed_window.state.write().unwrap().activated = false;
-                    tracing::info!(
-                        "ManagedWindow (domain_id: {:?}, surface_id: {:?}) deactivated due to focus loss.",
-                        managed_window.domain_id, old_surf.id()
-                    );
+        // Deactivate old XDG Toplevel window
+        if let Some(old_surface) = old_focus_wl_surface {
+            if old_surface.alive() {
+                if let Some(window_arc) = self.find_managed_window_by_wl_surface(&old_surface) {
+                    window_arc.state.write().unwrap().activated = false;
+                    if let Some(toplevel) = window_arc.xdg_surface.toplevel() {
+                        toplevel.with_pending_state(|xdg_state| {
+                            xdg_state.states.unset(smithay::wayland::shell::xdg::ToplevelState::Activated);
+                        });
+                        toplevel.send_configure();
+                        tracing::info!("Deactivated XDG Toplevel (domain_id: {:?}, surface {:?}) due to focus loss.", window_arc.domain_id, old_surface.id());
+                    }
                 }
             }
         }
 
-        if let Some(new_surf) = focused {
-            if let Some(managed_window) = self.find_managed_window_by_wl_surface(new_surf) {
-                // Check if it was already activated (e.g. focus moved from this window to itself, which can happen if not handled carefully)
-                // Only activate if it wasn't already.
-                let mut mw_state_guard = managed_window.state.write().unwrap();
-                if !mw_state_guard.activated {
-                    mw_state_guard.activated = true;
-                    tracing::info!(
-                        "ManagedWindow (domain_id: {:?}, surface_id: {:?}) activated due to gaining focus.",
-                        managed_window.domain_id, new_surf.id()
-                    );
+        // Activate new XDG Toplevel window
+        if let Some(new_surface) = focused {
+            if new_surface.alive() {
+                if let Some(window_arc) = self.find_managed_window_by_wl_surface(new_surface) {
+                    window_arc.state.write().unwrap().activated = true;
+                    if let Some(toplevel) = window_arc.xdg_surface.toplevel() {
+                        toplevel.with_pending_state(|xdg_state| {
+                            xdg_state.states.set(smithay::wayland::shell::xdg::ToplevelState::Activated, true);
+                        });
+                        toplevel.send_configure();
+                        tracing::info!("Activated XDG Toplevel (domain_id: {:?}, surface {:?}) due to focus gain.", window_arc.domain_id, new_surface.id());
+                    }
+                    if window_arc.xdg_surface.toplevel().is_some() { // Only raise toplevels
+                        self.space.raise_window(&window_arc, true);
+                        tracing::debug!("Raised window (domain_id: {:?}) to top due to focus gain.", window_arc.domain_id);
+                    }
                 }
             }
         }
-        // ANCHOR_END: UpdateActivationOnFocusChangeInStateRs
-
-        // Original logging for domain layer notification
-        // ANCHOR: UpdateActivationOnFocusChangeInStateRsCorrectedInPlace
-        // Get the old focus from the seat's current keyboard focus.
-        let old_focus_wl_surface = seat.get_keyboard().and_then(|k| k.current_focus());
-
-        if let Some(old_surf) = old_focus_wl_surface {
-            if focused.map_or(true, |new_s| new_s.id() != old_surf.id()) { // If focus changed to a different surface or lost
-                if let Some(managed_window) = self.find_managed_window_by_wl_surface(&old_surf) {
-                    managed_window.state.write().unwrap().activated = false;
-                    tracing::info!(
-                        "ManagedWindow (domain_id: {:?}, surface_id: {:?}) deactivated due to focus loss (in focus_changed).",
-                        managed_window.domain_id, old_surf.id()
-                    );
-                }
-            }
-        }
-
-        if let Some(new_surf) = focused {
-            if let Some(managed_window) = self.find_managed_window_by_wl_surface(new_surf) {
-                let mut mw_state_guard = managed_window.state.write().unwrap();
-                if !mw_state_guard.activated {
-                    mw_state_guard.activated = true;
-                    tracing::info!(
-                        "ManagedWindow (domain_id: {:?}, surface_id: {:?}) activated due to gaining focus (in focus_changed).",
-                        managed_window.domain_id, new_surf.id()
-                    );
-                }
-            }
-        }
-        // ANCHOR_END: UpdateActivationOnFocusChangeInStateRsCorrectedInPlace
-
-        // Original logging for domain layer notification
-        if let Some(surface) = focused {
-            let surface_id_for_log = surface.id();
-            tracing::info!(
-                "Domain layer would be notified: Keyboard focus changed to surface_id: {:?}",
-                surface_id_for_log
-            );
-        } else {
-            tracing::info!("Domain layer would be notified: Keyboard focus lost (cleared)");
-        }
-        // IMPORTANT: Do NOT call keyboard_handle.set_focus() here.
-        // This method is the *result* of set_focus having been called.
-
-        // ANCHOR: UpdateActivationOnFocusChangeInStateRsCorrected
-        // Get the old focus from the seat's current keyboard focus.
-        let old_focus_wl_surface = seat.get_keyboard().and_then(|k| k.current_focus());
-
-        if let Some(old_surf) = old_focus_wl_surface {
-            if focused.map_or(true, |new_s| new_s.id() != old_surf.id()) {
-                if let Some(managed_window) = self.find_managed_window_by_wl_surface(&old_surf) {
-                    managed_window.state.write().unwrap().activated = false;
-                    tracing::info!(
-                        "ManagedWindow (domain_id: {:?}, surface_id: {:?}) deactivated due to focus loss.",
-                        managed_window.domain_id, old_surf.id()
-                    );
-                }
-            }
-        }
-
-        if let Some(new_surf) = focused {
-            if let Some(managed_window) = self.find_managed_window_by_wl_surface(new_surf) {
-                let mut mw_state_guard = managed_window.state.write().unwrap();
-                if !mw_state_guard.activated { // Only activate if not already active
-                    mw_state_guard.activated = true;
-                    tracing::info!(
-                        "ManagedWindow (domain_id: {:?}, surface_id: {:?}) activated due to gaining focus (in focus_changed).",
-                        managed_window.domain_id, new_surf.id()
-                    );
-                }
-            }
-        }
-        // ANCHOR_END: UpdateActivationOnFocusChangeInStateRsCorrected
-
-    // Original logging for domain layer notification
-    if let Some(surface) = focused {
-        // ANCHOR_REF: FocusChangedWindowActivationUpdate
-        // This is where we updated window.state.activated = true for the new focus
-        if let Some(managed_window) = self.find_managed_window_by_wl_surface(surface) {
-             if !managed_window.state.read().unwrap().activated { // Check to avoid redundant writes/logs if already active
-                managed_window.state.write().unwrap().activated = true;
-                tracing::info!(
-                    "ManagedWindow (domain_id: {:?}, surface_id: {:?}) activated due to gaining focus (verified in focus_changed).",
-                    managed_window.domain_id, surface.id()
-                );
-            }
-        }
-        // ANCHOR_END: FocusChangedWindowActivationUpdate
-        let surface_id_for_log = surface.id();
-        tracing::info!(
-            "Domain layer would be notified: Keyboard focus changed to surface_id: {:?}",
-            surface_id_for_log
-        );
-    } else {
-        tracing::info!("Domain layer would be notified: Keyboard focus lost (cleared)");
-    }
-    // IMPORTANT: Do NOT call keyboard_handle.set_focus() here.
-    // This method is the *result* of set_focus having been called.
     }
 
-    // ANCHOR: SSDPointerButtonComment
-    // TODO SSD: Pointer Button Input Handling for SSD
-    // In SeatHandler methods like `pointer_button`, `pointer_motion`:
-    // 1. When an input event occurs on a surface that has a ManagedWindow:
-    //    `if let Some(window_under_pointer) = self.space.element_under(self.pointer_location).cloned() {`
-    //    `  if window_under_pointer.wl_surface().as_ref() == Some(surface_that_received_event) {`
-    //    `    let is_ssd = window_under_pointer.manager_data.read().unwrap().decorations;`
-    //    `    if is_ssd {`
-    // 2. Determine if the pointer coordinates (transformed to window-local) fall on SSD regions:
-    //    `  let window_geometry = *window_under_pointer.current_geometry.read().unwrap();`
-    //    `  let pointer_window_local = self.pointer_location - window_geometry.loc.to_f64();`
-    //    `  let title_bar_rect = Rectangle::from_loc_and_size((BORDER_SIZE, BORDER_SIZE), (window_geometry.size.w - 2*BORDER_SIZE, TITLE_BAR_HEIGHT));`
-    //    `  // Similar rects for borders.`
-    //    `  if title_bar_rect.to_f64().contains(pointer_window_local) {`
-    // 3. If on SSD region (e.g., title bar for move, borders for resize):
-    //    `    // Initiate compositor-driven move or resize operation.`
-    //    `    // Event is consumed by compositor, not sent to client surface.`
-    //    `    // For example, on button down on title bar: interactive_ops::start_move(self, window_under_pointer, seat, serial);`
-    //    `    return; // Event handled by SSD`
-    //    `  }`
-    // 4. Else (event on client content area):
-    //    `    // Transform coordinates to be relative to client content area.`
-    //    `    // let client_content_origin_in_window = Point::from((BORDER_SIZE, TITLE_BAR_HEIGHT + BORDER_SIZE));`
-    //    `    // let client_local_coords = pointer_event_coords - client_content_origin_in_window;`
-    //    `    // Forward event with client_local_coords to the client surface as usual.`
-    //    `  }`
-    //    `}`
-    //    `}`
-    // `}`
-    // Similar logic for touch events.
-    // ANCHOR_END: SSDPointerButtonComment
     fn cursor_image(&mut self, seat: &Seat<Self>, image: CursorImageStatus) {
-        tracing::debug!(seat_name = %seat.name(), cursor_status = ?image, "SeatHandler: cursor_image updated");
+        tracing::debug!(seat_name = %seat.name(), cursor_status = ?image, "DesktopState::SeatHandler: cursor_image updated");
 
         let mut current_status_gaurd = self.current_cursor_status.lock().unwrap();
         *current_status_gaurd = image.clone(); // Update the generic cursor status for other parts of the system
@@ -1378,6 +1339,172 @@ impl SeatHandler for DesktopState {
                 self.active_cursor_texture = None;
             }
         }
+    }
+
+    fn pointer_motion_event(
+        &mut self,
+        seat: &Seat<Self>,
+        event: &smithay::input::pointer::MotionEvent,
+    ) {
+        self.pointer_location = event.location;
+        let serial = SERIAL_COUNTER.next_serial();
+        let time = event.time;
+
+        // Determine the surface currently under the pointer
+        let new_pointer_focus_details = self.space.surface_under(self.pointer_location, true);
+
+        let pointer_handle = seat.get_pointer().expect("Pointer capability missing on seat for motion event.");
+
+        // Manage enter/leave events
+        let old_pointer_focus = pointer_handle.current_focus();
+        let new_pointer_focus_surface = new_pointer_focus_details.as_ref().map(|(s, _)| s);
+
+        if old_pointer_focus.as_ref().map(|s| s.id()) != new_pointer_focus_surface.map(|s|s.id()) {
+            if let Some(old_focus_strong) = old_pointer_focus {
+                if old_focus_strong.alive() {
+                    pointer_handle.leave(&old_focus_strong, serial, time);
+                    tracing::trace!("Pointer left surface {:?}", old_focus_strong.id());
+                }
+            }
+            if let Some(new_focus_strong) = new_pointer_focus_surface {
+                if new_focus_strong.alive() {
+                    pointer_handle.enter(new_focus_strong, serial, time, new_pointer_focus_details.as_ref().unwrap().1);
+                    tracing::trace!("Pointer entered surface {:?} at {:?}", new_focus_strong.id(), new_pointer_focus_details.as_ref().unwrap().1);
+                }
+            }
+        }
+
+        // Send motion event to the surface currently under the pointer
+        if let Some((focused_surface, mut local_coords)) = new_pointer_focus_details {
+            if focused_surface.alive() {
+                let mut event_consumed_by_ssd = false;
+                if let Some(window) = self.find_managed_window_by_wl_surface(&focused_surface) {
+                    if window.manager_data.read().unwrap().decorations {
+                        let overall_geo = window.geometry();
+                        let window_local_pointer_coords_f64 = self.pointer_location - overall_geo.loc.to_f64();
+
+                        let border_f = types::DEFAULT_BORDER_SIZE as f64;
+                        let titlebar_f = types::DEFAULT_TITLE_BAR_HEIGHT as f64;
+
+                        let title_bar_rect_local = Rectangle::from_loc_and_size(
+                            Point::from((border_f, border_f)),
+                            Size::from((overall_geo.size.w as f64 - 2.0 * border_f, titlebar_f))
+                        );
+
+                        if title_bar_rect_local.contains(window_local_pointer_coords_f64) {
+                            tracing::trace!("Pointer on title bar of SSD window (domain_id: {:?})", window.domain_id);
+                            // TODO: Change cursor to move cursor, prepare for move grab on button press.
+                            event_consumed_by_ssd = true;
+                        }
+                        // TODO: Add similar checks for border regions for resize cursors/actions.
+                    }
+                }
+                if !event_consumed_by_ssd {
+                    pointer_handle.motion(&focused_surface, serial, time, local_coords);
+                }
+            }
+        }
+    }
+
+    fn pointer_button_event(
+        &mut self,
+        seat: &Seat<Self>,
+        event: &smithay::input::pointer::ButtonEvent,
+    ) {
+        let pointer_handle = seat.get_pointer().expect("Pointer capability missing on seat for button event.");
+        let serial = event.serial;
+        let time = event.time;
+        let button_code = event.button;
+        let button_state = event.state;
+
+        let mouse_button = smithay::backend::input::MouseButton::from_code(button_code).unwrap_or(MouseButton::Other(button_code as u16));
+
+        if let Some((surface_under, surface_local_coords)) = self.space.surface_under(self.pointer_location, true) {
+            if surface_under.alive() {
+                let mut event_consumed_by_ssd = false;
+                if let Some(window) = self.find_managed_window_by_wl_surface(&surface_under) {
+                    if window.manager_data.read().unwrap().decorations {
+                        let overall_geo = window.geometry();
+                        let window_local_pointer_coords_f64 = self.pointer_location - overall_geo.loc.to_f64();
+                        let border_f = types::DEFAULT_BORDER_SIZE as f64;
+                        let titlebar_f = types::DEFAULT_TITLE_BAR_HEIGHT as f64;
+
+                        let title_bar_rect_local = Rectangle::from_loc_and_size(
+                            Point::from((border_f, border_f)),
+                            Size::from((overall_geo.size.w as f64 - 2.0 * border_f, titlebar_f))
+                        );
+
+                        if title_bar_rect_local.contains(window_local_pointer_coords_f64) {
+                            tracing::debug!("Button {:?} on title bar of SSD window (domain_id: {:?}). Compositor should handle.", mouse_button, window.domain_id);
+                            if mouse_button == MouseButton::Left && button_state == ButtonState::Pressed {
+                                // TODO: Initiate interactive move operation.
+                                tracing::info!("TODO: Initiate interactive move for window {:?}", window.id);
+                            }
+                            event_consumed_by_ssd = true;
+                        }
+                        // TODO: Add similar checks for border clicks to initiate resize.
+                    }
+
+                    // Click-to-focus and raise, happens regardless of SSD if event not consumed
+                    if !event_consumed_by_ssd && mouse_button == MouseButton::Left && button_state == ButtonState::Pressed {
+                        let keyboard = seat.get_keyboard().expect("Keyboard capability missing for click-to-focus.");
+                        if keyboard.current_focus().as_ref() != Some(&surface_under) {
+                            keyboard.set_focus(self, Some(surface_under.clone()), serial);
+                        }
+                        if window.xdg_surface.toplevel().is_some() {
+                             self.space.raise_window(&window, true);
+                        }
+                    }
+                }
+
+                if !event_consumed_by_ssd {
+                    pointer_handle.button(&surface_under, serial, time, mouse_button, button_state);
+                    tracing::debug!("Pointer button {:?} ({:?}) state {:?} on surface {:?} (local_coords: {:?}). Serial: {:?}",
+                                  mouse_button, button_code, button_state, surface_under.id(), surface_local_coords, serial);
+                }
+            }
+        } else {
+             tracing::debug!("Pointer button {:?} ({:?}) state {:?} with no focused surface. Serial: {:?}",
+                          mouse_button, button_code, button_state, serial);
+        }
+    }
+
+    fn pointer_axis_event(
+        &mut self,
+        seat: &Seat<Self>,
+        event: &smithay::input::pointer::AxisEvent,
+    ) {
+        let pointer_handle = seat.get_pointer().expect("Pointer capability missing on seat for axis event.");
+        if let Some((surface_under, _surface_local_coords)) = self.space.surface_under(self.pointer_location, true) {
+            if surface_under.alive() {
+                let mut axis_frame = smithay::input::pointer::AxisFrame::new(event.time).source(event.source);
+                if let Some(h_abs) = event.absolute.get(smithay::input::pointer::Axis::Horizontal) {
+                    axis_frame = axis_frame.value(smithay::input::pointer::Axis::Horizontal, h_abs);
+                }
+                if let Some(v_abs) = event.absolute.get(smithay::input::pointer::Axis::Vertical) {
+                     axis_frame = axis_frame.value(smithay::input::pointer::Axis::Vertical, v_abs);
+                }
+                if let Some(h_disc) = event.discrete.get(smithay::input::pointer::Axis::Horizontal) {
+                    axis_frame = axis_frame.discrete(smithay::input::pointer::Axis::Horizontal, h_disc);
+                }
+                if let Some(v_disc) = event.discrete.get(smithay::input::pointer::Axis::Vertical) {
+                     axis_frame = axis_frame.discrete(smithay::input::pointer::Axis::Vertical, v_disc);
+                }
+                if event.stop.get(&smithay::input::pointer::Axis::Horizontal) == Some(&true) {
+                    axis_frame = axis_frame.stop(smithay::input::pointer::Axis::Horizontal);
+                }
+                if event.stop.get(&smithay::input::pointer::Axis::Vertical) == Some(&true) {
+                    axis_frame = axis_frame.stop(smithay::input::pointer::Axis::Vertical);
+                }
+                pointer_handle.axis(&surface_under, axis_frame);
+            }
+        }
+    }
+
+    fn touch_focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&WlSurface>, _old_focus: Option<&WlSurface>) {
+        // TODO: Implement if touch interaction is part of the requirements beyond MVP.
+        // Similar logic to keyboard focus_changed regarding activation.
+        tracing::trace!("Touch focus changed (DesktopState::SeatHandler) - STUB");
     }
 }
 
