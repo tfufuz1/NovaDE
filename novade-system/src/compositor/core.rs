@@ -112,71 +112,210 @@ pub fn run_compositor() -> Result<(), CompositorError> {
     env::set_var("WAYLAND_DISPLAY", socket_name.to_string_lossy().as_ref());
 
 
-    // TODO: Initialize rendering backend (OpenGL ES 2.0 / Vulkan)
-    // This will involve selecting a backend (e.g., DRM, Winit for testing)
-    // and initializing the chosen MainRenderer (GLES or Vulkan).
-    // desktop_state.main_renderer = Some(MainRenderer::new_gles()?); // Or Vulkan
+    // --- Backend Initialization (Winit for now) ---
+    info!("Attempting Winit backend initialization...");
+    let (winit_event_loop, mut winit_data, winit_gles_renderer) =
+        crate::compositor::backend::winit_backend::init_winit_backend(display.handle(), desktop_state.clock.id())?;
 
-    // TODO: Initialize input backend (e.g., libinput via udev)
-    // initialize_input_system(&mut desktop_state, &display.handle(), &event_loop.handle())?;
+    // Store the GLES renderer from Winit into DesktopState's MainNovaRenderer
+    let gles_nova_renderer = GlesNovaRenderer::new(winit_gles_renderer);
+    desktop_state.main_renderer = Some(MainNovaRenderer::Gles(Box::new(gles_nova_renderer)));
+    info!("GLES Renderer (from Winit) stored in DesktopState.");
 
-    // TODO: Initialize XWayland if enabled
-    // if desktop_state.config.enable_xwayland {
-    //    initialize_xwayland(&mut desktop_state, &display.handle(), &event_loop.handle())?;
-    // }
+    // Add the Winit output to DesktopState's output management
+    desktop_state.output_manager_state.add_output(&winit_data.smithay_output);
+    desktop_state.space.lock().unwrap().map_output(&winit_data.smithay_output, (0,0).into(), winit_data.smithay_output.current_mode().unwrap());
+    info!("Winit output '{}' added to compositor state and space.", winit_data.smithay_output.name());
 
-    // Tokio runtime for async tasks within Calloop
+    // Store Winit event loop proxy for requesting redraws from other parts of the system
+    desktop_state.winit_event_loop_proxy = Some(winit_data.event_loop_proxy.clone());
+
+
+    // We need to move winit_graphics_backend into the Calloop closure,
+    // or store it in DesktopState if it can be made 'static or if DesktopState is generic.
+    // For now, Winit's event loop will be run directly, and Calloop dispatching will be manual within it.
+    // This simplifies ownership for now but is not the ideal Smithay Calloop integration pattern.
+    // The ideal pattern uses WinitEventLoop as a Calloop source.
+
+    // TODO: Refactor to use WinitEventLoop as a Calloop source for cleaner integration.
+    // This would require WinitGraphicsBackend to be Send or managed differently.
+    // For this iteration, we run Winit's loop and manually pump Calloop.
+
+    let mut winit_graphics_backend = match smithay_winit::init_renderer_window_from_raw_display_handle(
+        winit_data.window.clone(), // Arc<WinitWindow>
+        winit_data.window.raw_display_handle(), // Added this line
+        winit_data.window.raw_window_handle()  // Added this line
+    ) {
+        Ok((backend, _renderer)) => backend, // We already have renderer, just need backend
+        Err(e) => return Err(CompositorError::BackendCreation(format!("Failed to re-init Winit GL backend for event loop: {}", e))),
+    };
+
+
+    // TODO: Initialize input backend (e.g., libinput via udev) - Winit provides input for now.
+
+    // Initialize XWayland if enabled
+    // The actual check for whether it's enabled would ideally come from a config.
+    // For now, spawn_xwayland_if_enabled has a hardcoded true for testing.
+    if let Err(e) = crate::compositor::xwayland::spawn_xwayland_if_enabled(&mut desktop_state, &event_loop.handle(), &display.handle()) {
+        error!("Failed to spawn XWayland: {}", e);
+        // Depending on policy, compositor might continue or exit. For now, continue.
+    }
+
+    // Tokio runtime for async tasks (if any are dispatched to it by Calloop)
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| CompositorError::Internal(format!("Failed to create Tokio runtime: {}", e)))?;
 
-    let mut signal = event_loop.get_signal();
+    info!("NovaDE Compositor starting Winit event loop...");
 
-    info!("NovaDE Compositor event loop starting...");
-    while *desktop_state.running.read().unwrap() {
-        // Dispatch pending Wayland events
+    winit_event_loop.run(move |event, _, control_flow| {
+        // Dispatch Calloop events first, non-blockingly
+        let mut calloop_dispatcher = Dispatcher::new(&mut desktop_state, |_, _, _| PostAction::Continue);
+        if let Err(e) = event_loop.dispatch(Some(Duration::ZERO), &mut calloop_dispatcher) {
+            error!("Error during Calloop event loop dispatch: {}", e);
+            *desktop_state.running.write().unwrap() = false;
+        }
+
+        if !*desktop_state.running.read().unwrap() {
+            *control_flow = ControlFlow::Exit;
+            return;
+        }
+
+        crate::compositor::backend::winit_backend::handle_winit_event(
+            event,
+            &mut desktop_state,
+            &winit_data,
+            &mut winit_graphics_backend,
+            control_flow,
+        );
+
+        // After handling Winit event, dispatch Wayland clients and flush
         if let Err(e) = display.dispatch_clients(&mut desktop_state) {
             warn!("Error dispatching Wayland client events: {}", e);
-            // Handle error, potentially disconnecting problematic client
+        }
+        if let Err(e) = display.flush_clients() {
+            warn!("Error flushing Wayland clients: {}", e);
         }
 
-        // Process events from Calloop sources (input, XWayland, timers, etc.)
-        // The timeout can be adjusted, e.g., to match display refresh rate or animation needs.
-        let mut calloop_dispatcher = Dispatcher::new(&mut desktop_state, |event_source_id, event, data_source| {
-            // This is where specific event source handlers would be invoked by calloop
-            // For example, input events, XWayland events, timers, etc.
-            // For now, we rely on the direct `event_loop.dispatch` call.
-            PostAction::Continue // Or other actions based on event processing
-        });
+        // Perform rendering if needed (e.g., if damage occurred or redraw requested)
+        // This is a simplified render call. A real compositor would track damage.
+        if control_flow != &ControlFlow::Exit && desktop_state.running.read().unwrap().clone() { // Check running again
+            // Check if a redraw was requested by winit_backend::handle_winit_event via request_redraw
+            // For now, assume redraw is needed if not exiting.
+            // This is a placeholder for proper damage tracking and redraw scheduling.
 
-        // Run Tokio tasks scheduled onto Calloop's executor
-        // runtime.block_on(event_loop.get_task_executor().step());
+            // Actual rendering logic:
+            // 1. Access MainNovaRenderer from desktop_state.
+            // 2. Get output details (size, scale, transform) from winit_data.smithay_output.
+            // 3. Get elements from desktop_state.space for this output.
+            // 4. Call renderer.render_output_frame(...).
+            // 5. Call winit_graphics_backend.submit(None) to present.
+            // This is complex and will be built out in the rendering step.
+            // For now, just a log message.
+            // debug!("Winit loop: Placeholder for rendering call.");
 
-        if let Err(e) = event_loop.dispatch(Some(Duration::from_millis(16)), &mut calloop_dispatcher) {
-             error!("Error during event loop dispatch: {}", e);
-             *desktop_state.running.write().unwrap() = false; // Stop on critical error
+            // Actual rendering logic for Winit backend
+            if let smithay::reexports::winit::event::Event::RedrawRequested(_) = event {
+                if let Some(main_renderer) = desktop_state.main_renderer.as_mut() {
+                    if let MainNovaRenderer::Gles(gles_renderer_wrapper) = main_renderer {
+                        let output = &winit_data.smithay_output;
+                        let renderer_node = &winit_data.renderer_node; // This is the Winit window's node
+
+                        let mut space_lock = desktop_state.space.lock().unwrap();
+                        let mut damage_tracker = smithay::backend::renderer::damage::OutputDamageTracker::new_for_output(output); // Recreate for now, should be stored
+
+                        // Gather render elements
+                        let mut render_elements: Vec<smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<Gles2Renderer>> = Vec::new();
+                        let mut surfaces_for_callback: Vec<wl_surface::WlSurface> = Vec::new();
+
+                        // Iterate over windows in space, filter for current output
+                        for window_element in space_lock.elements_for_output(output).unwrap_or_default() {
+                            if !window_element.is_mapped() { continue; } // Skip unmapped
+
+                            if let Some(surface) = window_element.wl_surface() {
+                                if let Some(surface_attributes) = surface.data::<smithay::wayland::compositor::SurfaceAttributes>() {
+                                    if let Some(buffer) = surface_attributes.buffer.as_ref() {
+                                        // Texture caching logic would go here. For now, always import.
+                                        match gles_renderer_wrapper.import_shm_buffer(buffer, Some(surface_attributes), &[]) {
+                                            Ok(texture) => {
+                                                // Attempt to create the render element
+                                                match smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement::from_space_view(
+                                                    &mut gles_renderer_wrapper.inner,
+                                                    window_element,
+                                                    surface_attributes,
+                                                    &texture,
+                                                    output,
+                                                    &space_lock,
+                                                ) {
+                                                    Ok(element) => {
+                                                        render_elements.push(element);
+                                                        surfaces_for_callback.push(surface.clone()); // Clone WlSurface for callback
+                                                    },
+                                                    Err(e) => {
+                                                        warn!("Failed to create render element for surface {:?}: {}", surface.id(), e);
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to import SHM buffer for surface {:?}: {}", surface.id(), e);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        drop(space_lock); // Release lock before rendering
+
+                        // Bind the graphics backend for rendering
+                        if let Err(e) = winit_graphics_backend.bind() {
+                            error!("Failed to bind Winit graphics backend: {}", e);
+                            *control_flow = ControlFlow::Exit;
+                            return;
+                        }
+
+                        let render_result = damage_tracker.render_output(
+                            &mut gles_renderer_wrapper.inner,
+                            renderer_node,
+                            0, // age
+                            output.current_mode().unwrap().size,
+                            output.current_scale(),
+                            output.current_transform(),
+                            &render_elements[..], // Pass as slice
+                            [0.1, 0.1, 0.3, 1.0], // Clear color: dark blue
+                        );
+
+                        match render_result {
+                            Ok(render_damage) => {
+                                if let Err(e) = winit_graphics_backend.submit(render_damage.as_ref().map(|v| &v[..])) {
+                                    error!("Winit graphics backend submit failed: {}", e);
+                                } else {
+                                    debug!("Winit frame submitted with damage: {:?}", render_damage);
+                                    // Send frame callbacks
+                                    let time = desktop_state.clock.now();
+                                    for elem in render_elements {
+                                        if let Some(surface) = elem.wl_surface() {
+                                            surface.send_frame_done(time);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("GLES rendering failed: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        // Flush display to send pending events to clients
-        display.flush_clients().map_err(|e| CompositorError::DisplayError(e.to_string()))?;
 
-        // TODO: Implement rendering logic here
-        // - Iterate through outputs
-        // - For each output, gather render elements (windows, layers, cursor) from Space
-        // - Call the active renderer's render_frame method
-        // - Submit frame to output (e.g., swap buffers)
-        // - Send frame callbacks
+        if !*desktop_state.running.read().unwrap() {
+            *control_flow = ControlFlow::Exit;
+        }
+    }); // winit_event_loop.run consumes the loop and blocks until exit.
 
-        // Example placeholder for rendering call:
-        // if let Some(renderer) = desktop_state.main_renderer.as_mut() {
-        //     if let Err(e) = renderer.render_frame_for_all_outputs(&mut desktop_state.space, &desktop_state.output_layout) {
-        //         error!("Rendering failed: {}", e);
-        //     }
-        // }
-    }
-
-    info!("NovaDE Compositor shutting down.");
+    info!("NovaDE Compositor Winit event loop finished.");
     // TODO: Cleanup resources (XWayland, backend resources, etc.)
     Ok(())
 }
