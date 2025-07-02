@@ -113,7 +113,7 @@ pub enum RenderElement<'a, T: RenderableTexture> {
         /// The geometry (position and size) where the surface should be rendered, in physical pixels.
         geometry: Rectangle<i32, Physical>,
         /// Regions of the surface that have been damaged (updated) and need repainting. Given in surface-local coordinates.
-        damage: &'a [Rectangle<i32, Physical>],
+        damage: Vec<Rectangle<i32, Physical>>, // Changed to owned Vec
         /// The opacity of the surface, ranging from `0.0` (fully transparent) to `1.0` (fully opaque).
         alpha: f32,
         /// The transformation to be applied to the surface (e.g., rotation, flip).
@@ -128,7 +128,7 @@ pub enum RenderElement<'a, T: RenderableTexture> {
         /// The hotspot of the cursor, relative to the top-left corner of its texture.
         hotspot: Point<i32, Physical>,
         /// Regions of the output that were previously obscured by the cursor and need repainting.
-        damage: &'a [Rectangle<i32, Physical>],
+        damage: Vec<Rectangle<i32, Physical>>, // Changed to owned Vec
     },
     /// A solid color block, typically used for backgrounds or debug rendering.
     SolidColor {
@@ -137,7 +137,7 @@ pub enum RenderElement<'a, T: RenderableTexture> {
         /// The geometry (position and size) of the solid color block, in physical pixels.
         geometry: Rectangle<i32, Physical>,
         /// Regions of the output that need to be filled with this color.
-        damage: &'a [Rectangle<i32, Physical>],
+        damage: Vec<Rectangle<i32, Physical>>, // Changed to owned Vec
     },
     /// UI elements rendered by the compositor itself (e.g., a status bar, window decorations if server-side).
     CompositorUi {
@@ -146,7 +146,7 @@ pub enum RenderElement<'a, T: RenderableTexture> {
         /// The geometry (position and size) where the UI element should be rendered, in physical pixels.
         geometry: Rectangle<i32, Physical>,
         /// Regions of the UI element that have been damaged and need repainting.
-        damage: &'a [Rectangle<i32, Physical>],
+        damage: Vec<Rectangle<i32, Physical>>, // Changed to owned Vec
     }
 }
 
@@ -194,12 +194,18 @@ pub trait CompositorRenderer: Send + 'static {
     ///
     /// # Parameters
     /// - `elements`: A vector of `RenderElement`s describing what to draw.
+    /// - `clear_color`: If `Some(color)`, the background is cleared with this color before rendering elements. If `None`, no clear is performed.
     /// - `output_damage`: An array of rectangles representing the regions of the output that need repainting.
-    ///   The renderer can use this for optimization, only redrawing damaged areas.
+    ///   The renderer can use this for optimization, only redrawing damaged areas. Used by `finish_frame` typically.
     ///
     /// # Errors
     /// Returns a `RenderError` if any rendering operation fails.
-    fn render_elements<'a>(&mut self, elements: Vec<RenderElement<'a, Self::Texture>>, output_damage: &[Rectangle<i32, Physical>]) -> Result<(), RenderError>;
+    fn render_elements( // Removed 'a lifetime as RenderElement now owns its damage
+        &mut self,
+        elements: Vec<RenderElement<Self::Texture>>, // No 'a here
+        clear_color: Option<[f32; 4]>,
+        output_damage: &[Rectangle<i32, Physical>], // This is for overall frame damage, not element damage
+    ) -> Result<(), RenderError>;
 
     /// Called after all elements for the current frame have been submitted.
     ///

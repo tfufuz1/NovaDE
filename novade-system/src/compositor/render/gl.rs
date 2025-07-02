@@ -317,16 +317,19 @@ impl CompositorRenderer for OpenGLRenderer {
     /// It first clears the background, then iterates through each element,
     /// setting appropriate OpenGL blend modes and dispatching draw calls via
     /// Smithay's `Gles2Renderer`.
-    fn render_elements<'a>(
+    fn render_elements( // Removed 'a lifetime
         &mut self,
-        elements: Vec<RenderElement<'a, Self::Texture>>,
-        _output_damage: &[Rectangle<i32, Physical>] // Not used directly, but could be for optimizations
+        elements: Vec<RenderElement<Self::Texture>>, // No 'a here
+        clear_color: Option<[f32; 4]>,
+        _output_damage: &[Rectangle<i32, Physical>]
     ) -> Result<(), RenderError> {
-        // 1. Clear the background
-        let clear_damage = [Rectangle::from_loc_and_size(Point::from((0,0)), self.current_output_physical_size)];
-        if let Err(e) = self.smithay_renderer.clear([0.1, 0.1, 0.1, 1.0], &clear_damage) { // Dark gray
-            error!("Failed to clear background: {:?}", e);
-            return Err(RenderError::OpenGL(format!("Failed to clear background: {}", e)));
+        // 1. Clear the background if a clear_color is provided
+        if let Some(color) = clear_color {
+            let clear_damage = [Rectangle::from_loc_and_size(Point::from((0,0)), self.current_output_physical_size)];
+            if let Err(e) = self.smithay_renderer.clear(color, &clear_damage) {
+                error!("Failed to clear background: {:?}", e);
+                return Err(RenderError::OpenGL(format!("Failed to clear background: {}", e)));
+            }
         }
 
         let mut last_element_was_transparent = false;
@@ -363,7 +366,7 @@ impl CompositorRenderer for OpenGLRenderer {
                         geometry,
                         1, // texture_scale (physical pixels)
                         self.current_output_transform,
-                        damage,
+                        &damage, // Pass as slice
                         alpha,
                     ) {
                         error!("Failed to render surface texture ID {}: {}. Error: {:?}", opengl_texture.id, geometry, e);
@@ -394,7 +397,7 @@ impl CompositorRenderer for OpenGLRenderer {
                         cursor_rect,
                         1, // texture_scale
                         self.current_output_transform,
-                        damage,
+                        &damage, // Pass as slice
                         1.0, // Alpha (cursor alpha is usually baked into its texture)
                     ) {
                         error!("Failed to render cursor texture ID {}: {}. Error: {:?}", opengl_texture.id, cursor_rect, e);
@@ -403,7 +406,7 @@ impl CompositorRenderer for OpenGLRenderer {
                 }
                 RenderElement::SolidColor { color, geometry: _, damage } => { // geometry might be used if damage is relative
                     // Smithay's clear function clears the specified damaged regions to the given color.
-                    if let Err(e) = self.smithay_renderer.clear(color, damage) {
+                    if let Err(e) = self.smithay_renderer.clear(color, &damage) { // Pass as slice
                        error!("Failed to render solid color block for damage {:?}: {:?}", damage, e);
                        // return Err(RenderError::OpenGL(format!("Failed to render solid color: {}", e)));
                     }
@@ -433,7 +436,7 @@ impl CompositorRenderer for OpenGLRenderer {
                         geometry,
                         1, // texture_scale
                         self.current_output_transform,
-                        damage,
+                        &damage, // Pass as slice
                         1.0, // Alpha for UI, assuming it's pre-multiplied or handled by texture
                     ) {
                         error!("Failed to render CompositorUi texture ID {}: {}. Error: {:?}", opengl_texture.id, geometry, e);

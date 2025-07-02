@@ -585,7 +585,7 @@ impl DesktopState {
             debug!("Render timer expired, triggering render (placeholder)");
             // In a full setup, this would call the main rendering logic of the compositor.
             // For example, if novade-system/src/compositor/display_loop.rs has a render function:
-            // state.trigger_render_cycle(); (hypothetical method)
+            state.trigger_render_cycle();
         }) {
             warn!("Failed to arm render timer: {}", e);
         } else {
@@ -593,6 +593,235 @@ impl DesktopState {
             debug!("Render requested, timer armed.");
         }
     }
+
+    /// Triggers the rendering process for all outputs.
+    /// This is typically called from the event loop when a render is scheduled.
+    pub fn trigger_render_cycle(&mut self) {
+        // This function will iterate over all outputs and call render_output_frame for each.
+        // It needs access to the renderer, which is in self.backend_data.
+        // We need to handle potential errors from rendering.
+        debug!("Triggering render cycle for all outputs.");
+
+        let mut backend_data = self.backend_data.lock().unwrap();
+        let renderer = &mut backend_data.renderer;
+
+        // Collect output names first to avoid borrowing issues if new outputs are added/removed during iteration.
+        // However, self.outputs() borrows self, and renderer also needs &mut self indirectly.
+        // This implies render_output_frame needs to be structured carefully or renderer access passed down.
+        // For now, let's clone SmithayOutput to pass to render_output_frame.
+        let outputs_to_render: Vec<SmithayOutput> = self.outputs().cloned().collect();
+        let dh = self.display.handle(); // DisplayHandle needed for some Smithay functions
+
+        for output in outputs_to_render {
+            info!("Rendering frame for output: {}", output.name());
+            if let Err(err) = self.render_output_frame(&dh, renderer, &output) {
+                error!("Error rendering output {}: {:?}", output.name(), err);
+                // Decide on error handling: stop rendering for this output, mark as damaged, etc.
+            }
+        }
+    }
+
+    /// Renders a single frame for a specific output.
+    fn render_output_frame(
+        &mut self,
+        dh: &DisplayHandle,
+        renderer: &mut OpenGLRenderer,
+        output: &SmithayOutput,
+    ) -> Result<(), crate::compositor::render::renderer::RenderError> {
+        let output_geometry = self.space.output_geometry(output).ok_or_else(|| {
+            warn!("Output {} has no geometry in space, skipping render.", output.name());
+            crate::compositor::render::renderer::RenderError::InvalidRenderState(format!(
+                "Output {} not mapped or no geometry",
+                output.name()
+            ))
+        })?;
+        let output_transform = output.current_transform(); // SmithayOutput provides this
+        let output_scale = output.current_scale().fractional_scale(); // SmithayOutput provides this
+
+        renderer.set_output_scale(output_scale)?; // Inform renderer of scale
+        renderer.begin_frame(output_transform, output_geometry.size)?;
+
+        let mut all_render_elements: Vec<crate::compositor::render::renderer::RenderElement<'_, OpenGLRendererTexture>> = Vec::new();
+        // output_damage is used by renderer.submit() for partial presentation, not directly by render_elements.
+        // We need to collect individual surface damage for RenderElement.
+        // For overall output damage, Smithay's space.damage_output can be used.
+        let mut collected_output_damage : Vec<Rectangle<i32, Physical>> = Vec::new();
+
+
+        // Clear with a background color for the first pass
+        let clear_color = Some(self.workspace_manager.lock().unwrap().get_active_workspace_background_color_or_default());
+
+
+        // --- Helper to create RenderElement from a WlSurface ---
+        // This is a simplified helper. Robust texture caching and damage handling are complex.
+        // We'll use a closure to capture necessary variables like `renderer` and `self` (for shm_state).
+        // This closure needs to be defined carefully due to borrowing rules if it's a method of DesktopState.
+        // For now, inline the logic.
+
+        // --- 1. Background Layers ---
+        let mut background_elements = Vec::new();
+        for ls_data in self.layer_surfaces.iter().filter(|ls|
+            ls.assigned_output_name.as_ref() == Some(&output.name()) &&
+            ls.layer_surface.current_state().layer == Layer::Background &&
+            ls.layer_surface.is_mapped()
+        ) {
+            if let Ok(texture) = self.import_surface_texture(renderer, ls_data.wl_surface()) {
+                let surface_damage = smithay::wayland::compositor::surface_damage_bounding_box(ls_data.wl_surface())
+                    .unwrap_or_else(|| Rectangle::from_loc_and_size(Point::default(), ls_data.geometry.size)); // Full damage if not specified
+                background_elements.push(crate::compositor::render::renderer::RenderElement::Surface {
+                    texture,
+                    geometry: ls_data.geometry,
+                    damage: vec![surface_damage],
+                    alpha: 1.0, // TODO: Support layer surface alpha
+                    transform: output_transform, // Layer surfaces are usually not transformed beyond output
+                });
+                collected_output_damage.push(ls_data.geometry); // Damage the whole area for now
+            }
+        }
+        // Render background elements first, with clear
+        renderer.render_elements(background_elements, clear_color, &collected_output_damage)?;
+        let mut subsequent_elements = Vec::new(); // For elements after the initial clear
+
+        // --- 2. Bottom Layers ---
+        for ls_data in self.layer_surfaces.iter().filter(|ls|
+            ls.assigned_output_name.as_ref() == Some(&output.name()) &&
+            ls.layer_surface.current_state().layer == Layer::Bottom &&
+            ls.layer_surface.is_mapped()
+        ) {
+            if let Ok(texture) = self.import_surface_texture(renderer, ls_data.wl_surface()) {
+                 let surface_damage = smithay::wayland::compositor::surface_damage_bounding_box(ls_data.wl_surface())
+                    .unwrap_or_else(|| Rectangle::from_loc_and_size(Point::default(), ls_data.geometry.size));
+                subsequent_elements.push(crate::compositor::render::renderer::RenderElement::Surface {
+                    texture,
+                    geometry: ls_data.geometry,
+                    damage: vec![surface_damage],
+                    alpha: 1.0,
+                    transform: output_transform,
+                });
+                collected_output_damage.push(ls_data.geometry);
+            }
+        }
+
+        // --- 3. XDG Windows (Space elements) + their Popups ---
+        // This is the complex part. Smithay's `render_elements_output_with_renderer`
+        // or `draw_window_surface_tree_raw` can be used.
+        // For now, a simplified loop.
+        let space_elements = self.space.elements_for_output(output).cloned().collect::<Vec<_>>();
+        for window in space_elements.iter().filter(|w| w.is_mapped()) {
+            if let Some(surface) = window.wl_surface() {
+                 // Get window geometry from space
+                let window_geometry = self.space.element_geometry(window).unwrap_or_default();
+                if let Ok(texture) = self.import_surface_texture(renderer, surface) {
+                    let surface_damage = smithay::wayland::compositor::surface_damage_bounding_box(surface)
+                        .unwrap_or_else(|| Rectangle::from_loc_and_size(Point::default(), window_geometry.size));
+                    subsequent_elements.push(crate::compositor::render::renderer::RenderElement::Surface {
+                        texture,
+                        geometry: window_geometry,
+                        damage: vec![surface_damage],
+                        alpha: 1.0, // TODO: Support window alpha
+                        transform: output_transform, // Window transform might differ
+                    });
+                    collected_output_damage.push(window_geometry);
+                }
+                // TODO: Render XDG Popups for this window using self.popups.
+                // smithay::desktop::space::draw_popups_surface_tree_raw(...)
+            }
+        }
+
+        // --- 4. Top Layers ---
+        for ls_data in self.layer_surfaces.iter().filter(|ls|
+            ls.assigned_output_name.as_ref() == Some(&output.name()) &&
+            ls.layer_surface.current_state().layer == Layer::Top &&
+            ls.layer_surface.is_mapped()
+        ) {
+             if let Ok(texture) = self.import_surface_texture(renderer, ls_data.wl_surface()) {
+                let surface_damage = smithay::wayland::compositor::surface_damage_bounding_box(ls_data.wl_surface())
+                    .unwrap_or_else(|| Rectangle::from_loc_and_size(Point::default(), ls_data.geometry.size));
+                subsequent_elements.push(crate::compositor::render::renderer::RenderElement::Surface {
+                    texture,
+                    geometry: ls_data.geometry,
+                    damage: vec![surface_damage],
+                    alpha: 1.0,
+                    transform: output_transform,
+                });
+                collected_output_damage.push(ls_data.geometry);
+            }
+        }
+
+        // --- 5. Overlay Layers ---
+        for ls_data in self.layer_surfaces.iter().filter(|ls|
+            ls.assigned_output_name.as_ref() == Some(&output.name()) &&
+            ls.layer_surface.current_state().layer == Layer::Overlay &&
+            ls.layer_surface.is_mapped()
+        ) {
+            if let Ok(texture) = self.import_surface_texture(renderer, ls_data.wl_surface()) {
+                let surface_damage = smithay::wayland::compositor::surface_damage_bounding_box(ls_data.wl_surface())
+                    .unwrap_or_else(|| Rectangle::from_loc_and_size(Point::default(), ls_data.geometry.size));
+                subsequent_elements.push(crate::compositor::render::renderer::RenderElement::Surface {
+                    texture,
+                    geometry: ls_data.geometry,
+                    damage: vec![surface_damage],
+                    alpha: 1.0,
+                    transform: output_transform,
+                });
+                collected_output_damage.push(ls_data.geometry);
+            }
+        }
+
+        // Render all subsequent elements without clearing
+        if !subsequent_elements.is_empty() {
+            renderer.render_elements(subsequent_elements, None, &collected_output_damage)?;
+        }
+
+        // --- 6. Cursor ---
+        // TODO: Render cursor using renderer.render_elements with RenderElement::Cursor
+        // let cursor_pos = self.input_state.pointer_location_on_output(output); // Needs method
+        // if self.seat.get_pointer().unwrap().has_grab() == false { ... }
+        // renderer.render_elements(vec![RenderElement::Cursor { ... }], None, ...)?;
+
+
+        renderer.finish_frame()?;
+
+        // Send frame events to wl_surface clients, needs surface list from render pass
+        // smithay::wayland::compositor::send_frames_surface_tree(&[&surface1, &surface2], self.start_time.elapsed(), Some(dh));
+        // This needs to be done carefully after rendering and buffer swaps.
+        // For now, this is a placeholder. The actual list of surfaces rendered on this output needs to be collected.
+        // smithay::wayland::compositor::send_frames_for_surface_tree(&rendered_wl_surfaces_on_this_output, self.start_time.elapsed(), Some(dh), |_,_| true);
+        // This requires collecting all WlSurface that had their buffer drawn.
+
+        Ok(())
+    }
+
+    /// Helper function to import a WlSurface's buffer into an OpenGLTexture.
+    /// This is a simplified version; robust caching and error handling would be more complex.
+    fn import_surface_texture(
+        &self, // Needs &self for shm_state access if renderer.import_shm_buffer takes it
+        renderer: &mut OpenGLRenderer,
+        surface: &WlSurface,
+    ) -> Result<Arc<OpenGLRendererTexture>, crate::compositor::render::renderer::RenderError> {
+        if let Some(buffer) = smithay::wayland::compositor::get_buffer(surface) {
+            // Check buffer type. Smithay's `buffer_type` or direct wl_buffer methods can be used.
+            // `wl_buffer_is_shm` is a C function, need to use Smithay's SHM state.
+            let is_shm = buffer.data_map().get::<smithay::shm::ShmBuffer>().is_some();
+
+            if is_shm {
+                renderer.import_shm_buffer(&buffer, Some(surface), self) // Pass `self` for DesktopState context
+            } else if let Some(dmabuf) = smithay::backend::renderer::get_dmabuf(&buffer).ok() {
+                renderer.import_dmabuf(&dmabuf, Some(surface))
+            } else {
+                warn!("Surface {:?} has buffer of unknown type", surface.id());
+                Err(crate::compositor::render::renderer::RenderError::InvalidBuffer(
+                    "Unknown buffer type for surface".to_string(),
+                ))
+            }
+        } else {
+            // debug!("Surface {:?} has no attached buffer, skipping texture import.", surface.id());
+            Err(crate::compositor::render::renderer::RenderError::InvalidBuffer(
+                format!("Surface {:?} has no attached buffer", surface.id()),
+            ))
+        }
+    }
+
 
     // This function was already present, just ensuring it fits with the new ask_for_render
     pub fn apply_layout_for_workspace(&self, workspace_id: novade_domain::workspaces::manager::WorkspaceId) {
@@ -977,6 +1206,10 @@ smithay::delegate_xdg_shell!(DesktopState);
 smithay::delegate_output!(DesktopState);
 smithay::delegate_input!(DesktopState);
 smithay::delegate_layer_shell!(DesktopState); // Added delegate for layer_shell
+
+// Type alias for convenience
+type OpenGLRendererTexture = crate::compositor::render::gl::OpenGLTexture;
+
 
 // ... (rest of the file: NovadeCompositorState, etc. - Copied from previous read_files output)
 // Ensure these smithay imports are appropriate for DesktopState, not NovadeCompositorState context
