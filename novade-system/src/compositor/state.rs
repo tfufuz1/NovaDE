@@ -11,7 +11,7 @@ use smithay::{
     input::{Seat, SeatState, pointer::{CursorImageStatus, GrabStartData}, keyboard::{ModifiersState, XkbConfig}, InputHandler, InputState as InputStateSmithay},
     output::{Output as SmithayOutput, OutputHandler, OutputState as OutputStateSmithay}, // Renamed Smithay's Output
     reexports::{
-        calloop::{EventLoop, LoopHandle},
+        calloop::{EventLoop, LoopHandle, timer::Timer}, // Added Timer for ask_for_render
         wayland_server::{
             backend::{ClientId, DisconnectReason},
             protocol::{wl_output, wl_surface::WlSurface, wl_seat},
@@ -46,6 +46,9 @@ use tracing::{debug, error, info, warn};
 use std::sync::Mutex as StdMutex; // Standard library Mutex for our data
 use wayland_server::backend::ClientData;
 use crate::compositor::render::gl::OpenGLRenderer;
+use crate::compositor::layer_shell::state::LayerSurfaceData; // Added for layer_shell
+use smithay::wayland::shell::wlr_layer::{Layer, Anchor}; // Added for layer_shell method signatures
+use smithay::desktop::WindowSurfaceType; // For apply_layout_for_workspace
 
 
 // Dummy structs
@@ -71,6 +74,8 @@ pub struct DesktopState {
     pub display_manager: Arc<StdMutex<DisplayManager>>,
     pub backend_data: Arc<StdMutex<BackendData>>,
     pub space: Space<Window>,
+    pub layer_surfaces: Vec<LayerSurfaceData>, // Added for layer_shell
+    pub render_timer: calloop::timer::Timer, // Added for ask_for_render
 }
 
 impl DesktopState {
@@ -90,6 +95,12 @@ impl DesktopState {
             1,
             crate::compositor::shell::xdg_decoration::XdgDecorationManagerGlobalData::default(),
         );
+
+        // Initialize Layer Shell global
+        smithay::wayland::shell::wlr_layer::WlrLayerShellState::new_global::<DesktopState>(
+            &display_handle,
+        );
+
 
         let seat_name = "seat0";
         let mut seat = Seat::new(&display_handle, seat_name.to_string());
@@ -112,22 +123,19 @@ impl DesktopState {
         let nova_window_manager = Arc::new(NovaWindowManager::new(self_arc_for_nwm.clone()).expect("Failed to create NovaWindowManager"));
         let workspace_manager = Arc::new(StdMutex::new(WorkspaceManager::new(nova_window_manager as Arc<dyn DomainWindowManagerTrait>)));
 
-        // ANCHOR: Defer initial layout application to after DesktopState is fully created.
-        // The main setup function that calls DesktopState::new should call something like:
-        // if let Some(initial_ws_id) = state_arc.lock().unwrap().workspace_manager.lock().unwrap().get_active_workspace_id() {
-        //    state_arc.lock().unwrap().apply_layout_for_workspace(initial_ws_id);
-        // }
-        // after this `new` function returns and the state is fully wrapped in its Arc<StdMutex<DesktopState>>.
-
         let opengl_renderer = OpenGLRenderer::new(display_handle.clone()).expect("Failed to create OpenGLRenderer");
         info!("OpenGLRenderer initialized successfully for DesktopState.");
         let backend_data = Arc::new(StdMutex::new(BackendData { renderer: opengl_renderer }));
+
+        let render_timer = Timer::new().unwrap();
 
         info!("NovaDE DesktopState initialized successfully");
         Self {
             display, event_loop_handle: event_loop.handle(), compositor_state, xdg_shell_state,
             xdg_decoration_state, shm_state, data_device_state, output_state, input_state, seat,
             popups, workspace_manager, display_manager: display_manager_arc, backend_data, space,
+            layer_surfaces: Vec::new(), // Initialize layer_surfaces
+            render_timer, // Initialize render_timer
         }
     }
 
@@ -355,50 +363,328 @@ impl DesktopState {
         let smithay_window = self.find_smithay_window_by_domain_id(window_id)
             .ok_or_else(|| format!("Failed to find SmithayWindow for domain ID {:?}", window_id))?;
 
-        // Update Smithay Space representation and inform client
-        // ANCHOR: This part needs careful handling of window's current output vs target output
-        // and ensuring correct wl_surface.enter/leave events are emitted by Smithay.
-        // This might involve `smithay_window.unmap_output()` and `smithay_window.map_output(new_smithay_output)`.
-        // For now, we'll map it to the new space at a default position on the new monitor.
+        let target_smithay_output = self.outputs().find(|o| o.name() == target_monitor_id).cloned();
 
-        let target_output_work_area = {
-            let display_manager_guard = self.display_manager.lock().map_err(|e| format!("Failed to lock DisplayManager: {:?}", e))?;
-            display_manager_guard.get_output_by_id(&target_monitor_id)
-                .map(|mo| mo.work_area) // This is physical
-                .ok_or_else(|| format!("Target monitor {} not found in DisplayManager", target_monitor_id))?
+        if let Some(target_output) = target_smithay_output {
+            // Unmap from old output (optional, map_element might handle this implicitly by remapping)
+            // smithay_window.unmap_output(); // This API might not exist directly on Window, but on Space or Output.
+            // Smithay's Space::map_element handles output assignment based on global coordinates.
+            // We need to ensure the window's position is within the target output's area.
+
+            let target_output_geometry = self.space.output_geometry(&target_output)
+                .ok_or_else(|| format!("Could not get geometry for target output {}", target_monitor_id))?;
+
+            // Calculate a new position on the target monitor (e.g., center or a default spot)
+            let new_pos_global = target_output_geometry.loc; // Top-left for now
+
+            self.space.map_element(smithay_window.clone(), new_pos_global, false); // Don't activate automatically
+            info!("Mapped SmithayWindow {:?} to new position {:?} on target monitor {}", window_id, new_pos_global, target_monitor_id);
+
+            // Re-apply layout for the source workspace (if it was different and active)
+            if let Some(sws_id) = source_workspace_id_opt {
+                if sws_id != target_workspace_id {
+                    self.apply_layout_for_workspace(sws_id);
+                }
+            }
+
+            // Apply layout for the target workspace.
+            self.apply_layout_for_workspace(target_workspace_id);
+
+            // Focus the moved window
+            let window_manager_interface = self.workspace_manager.lock().unwrap().window_manager.clone();
+            if let Err(e) = window_manager_interface.focus_window(window_id).await {
+                warn!("Failed to focus moved window {:?}: {}", window_id, e);
+            }
+             self.ask_for_render(); // Content changed
+            Ok(())
+        } else {
+            Err(format!("Target monitor {} (SmithayOutput) not found.", target_monitor_id))
+        }
+    }
+
+    // Placeholder methods for layer shell integration
+    // These would need actual logic based on how outputs and usable areas are managed.
+
+    /// Returns an iterator over all managed outputs.
+    /// This needs to be adapted to how DisplayManager or Space provides outputs.
+    pub fn outputs<'a>(&'a self) -> impl Iterator<Item = &'a SmithayOutput> {
+        // Assuming DisplayManager holds SmithayOutput instances or can provide them.
+        // This is a common pattern but needs DisplayManager to expose this.
+        // For now, using space.outputs() as a direct source from Smithay.
+        self.space.outputs()
+    }
+
+
+    /// Recalculates the usable area of a given output, considering exclusive zones from layer shells.
+    pub fn recalculate_output_usable_area(&mut self, output: SmithayOutput, dh: &DisplayHandle) {
+        debug!(output_name = %output.name(), "Recalculating usable area for output (placeholder)");
+        // 1. Get the full geometry of the output.
+        //    ManagedOutput in DisplayManager should store this.
+        //    Or, self.space.output_geometry(&output)
+        let output_geometry = match self.space.output_geometry(&output) {
+            Some(geom) => geom,
+            None => {
+                warn!("Cannot recalculate usable area for output {}: not mapped in space.", output.name());
+                return;
+            }
         };
 
-        // Calculate a new position on the target monitor (e.g., center or a default spot)
-        // This position is in the global compositor space.
-        let new_pos_logical = (target_output_work_area.position.x, target_output_work_area.position.y); // Top-left for now
+        let mut exclusive_top = 0;
+        let mut exclusive_bottom = 0;
+        let mut exclusive_left = 0;
+        let mut exclusive_right = 0;
 
-        // map_element will handle making it appear on the correct output based on global coordinates.
-        // Smithay should then send wl_surface.enter for the new output and wl_surface.leave for the old.
-        self.space.map_element(smithay_window.clone(), new_pos_logical, false); // Don't activate automatically
-        info!("Mapped SmithayWindow {:?} to new position {:?} on target monitor {}", window_id, new_pos_logical, target_monitor_id);
-
-        // Re-apply layout for the source workspace (if it was different and active)
-        if let Some(sws_id) = source_workspace_id_opt {
-            if sws_id != target_workspace_id {
-                // Check if source workspace is still active (it shouldn't be if target is on different monitor and becomes active)
-                // Or, more simply, apply layout if it's tiling.
-                // This needs a way to apply layout for a *specific*, potentially non-active, workspace.
-                // ANCHOR: Add apply_layout_for_workspace(ws_id) if needed. (This is now available)
-                // Re-apply layout for the source workspace.
-                self.apply_layout_for_workspace(sws_id);
+        // 2. Iterate over all layer_surfaces that are on this output.
+        for ls_data in self.layer_surfaces.iter().filter(|ls| ls.assigned_output_name.as_ref() == Some(&output.name())) {
+            if ls_data.has_exclusive_zone() {
+                // This is a simplified model. A more accurate one would check the actual
+                // geometry of the layer surface and how it cuts into the output.
+                // For example, a panel only anchored to top with exclusive zone X means top X pixels are reserved.
+                let state = ls_data.layer_surface.current_state(); // get current state
+                if state.anchor.contains(Anchor::TOP) && state.exclusive_zone > 0 {
+                    exclusive_top = exclusive_top.max(state.exclusive_zone);
+                }
+                if state.anchor.contains(Anchor::BOTTOM) && state.exclusive_zone > 0 {
+                    exclusive_bottom = exclusive_bottom.max(state.exclusive_zone);
+                }
+                if state.anchor.contains(Anchor::LEFT) && state.exclusive_zone > 0 {
+                    exclusive_left = exclusive_left.max(state.exclusive_zone);
+                }
+                if state.anchor.contains(Anchor::RIGHT) && state.exclusive_zone > 0 {
+                    exclusive_right = exclusive_right.max(state.exclusive_zone);
+                }
             }
         }
 
-        // Apply layout for the target workspace.
-        self.apply_layout_for_workspace(target_workspace_id);
+        // 3. Calculate the new usable_area.
+        let usable_x = output_geometry.loc.x + exclusive_left;
+        let usable_y = output_geometry.loc.y + exclusive_top;
+        let usable_w = (output_geometry.size.w - (exclusive_left + exclusive_right)).max(0);
+        let usable_h = (output_geometry.size.h - (exclusive_top + exclusive_bottom)).max(0);
+        let new_usable_area = Rectangle::from_loc_and_size((usable_x, usable_y), (usable_w, usable_h));
 
-        // Focus the moved window
-        let window_manager_interface = self.workspace_manager.lock().unwrap().window_manager.clone();
-        if let Err(e) = window_manager_interface.focus_window(window_id).await {
-            warn!("Failed to focus moved window {:?}: {}", window_id, e);
+        // 4. Store this new_usable_area in your DisplayManager's ManagedOutput state.
+        let mut dm = self.display_manager.lock().unwrap();
+        if let Some(managed_output) = dm.get_output_mut(&output.name()) {
+            let old_usable_area = managed_output.work_area;
+            managed_output.work_area = NovaRect::new(
+                NovaPoint::new(new_usable_area.loc.x, new_usable_area.loc.y),
+                NovaSize::new(new_usable_area.size.w, new_usable_area.size.h)
+            );
+            info!(output_name = %output.name(), ?old_usable_area, new_work_area = ?managed_output.work_area, "Updated output usable area.");
+
+            // 5. If the usable area changed, XDG Shell clients (windows) on this output
+            //    might need to be reconfigured/re-arranged.
+            if old_usable_area != managed_output.work_area {
+                // This could trigger re-tiling or re-placement of windows.
+                self.arrange_windows_on_output(output.clone(), dh);
+            }
+        } else {
+            warn!("Output {} not found in DisplayManager during usable area update.", output.name());
+        }
+        self.ask_for_render(); // Usable area might affect rendering
+    }
+
+    /// Arranges layer shell surfaces on a given output according to their layer type, z_index, anchors, etc.
+    pub fn arrange_layers_on_output(&mut self, output: SmithayOutput, dh: &DisplayHandle) {
+        debug!(output_name = %output.name(), "Arranging layer shells on output (placeholder)");
+
+        let output_geometry = match self.space.output_geometry(&output) {
+            Some(geom) => geom,
+            None => {
+                warn!("Cannot arrange layers for output {}: not mapped in space.", output.name());
+                return;
+            }
+        };
+        // The usable_area for layers themselves is typically the full output_geometry,
+        // unless a layer explicitly requests to be constrained by other layers' exclusive zones,
+        // which is not standard for zwlr-layer-shell-v1 (they define zones, not react to them).
+        let output_usable_area_for_layers = output_geometry;
+
+
+        // 1. Filter layer_surfaces for the current output.
+        // 2. Sort them by Layer enum, then by z_index (if we were to implement custom z_index).
+        //    Smithay's LayerSurface doesn't have z_index, so sorting is by Layer enum only.
+        //    Layer enum has a natural order.
+        self.layer_surfaces.sort_by_key(|ls_data| ls_data.layer_surface.current_state().layer);
+
+        // 3. For each layer surface, calculate its position and size.
+        for ls_data in self.layer_surfaces.iter_mut() {
+            if ls_data.assigned_output_name.as_ref() == Some(&output.name()) {
+                // update_from_pending should have been called in layer_shell_committed
+                // ls_data.update_from_pending(); // Ensure latest state from client is considered
+
+                ls_data.position_and_size_for_output(&output_geometry, &output_usable_area_for_layers);
+
+                // 4. Send configure to the client with the new geometry if it changed.
+                //    LayerSurface::send_configure() handles this.
+                //    It needs the new size. The position is handled by compositor.
+                let new_size_for_client = ls_data.geometry.size;
+                // LayerSurface configure takes the size it should be.
+                // If the client set size to (0,0) (fill), our calculated size is what it gets.
+                // If client set a specific size, that's what we used (unless anchored on both axes).
+                // Smithay's LayerSurface.send_configure() will use its current_state.size typically.
+                // Our LayerSurfaceData.geometry is the *actual* geometry in compositor space.
+                // The client is configured with a size, and it positions itself at (0,0) in its buffer.
+                // The compositor then positions this buffer.
+                // If our calculated size differs from what client expects, we must send configure.
+                // Smithay's `LayerSurface::send_configure` should be called after any state change
+                // that requires client acknowledgement or buffer resize. This is usually done
+                // in `layer_shell_committed` after our `LayerSurfaceData` is updated and geometry calculated.
+                // Here, we are just ensuring the geometry field in LayerSurfaceData is correct.
+                // The actual send_configure is expected to be handled by the main LayerShellHandler logic.
+                debug!(surface = ?ls_data.wl_surface(), new_geom = ?ls_data.geometry, "Calculated new geometry for layer surface");
+            }
+        }
+        self.ask_for_render(); // Layer positions might have changed
+    }
+
+    /// Arranges (e.g., tiles or cascades) XDG shell windows on the given output, respecting usable area.
+    pub fn arrange_windows_on_output(&mut self, output: SmithayOutput, dh: &DisplayHandle) {
+        debug!(output_name = %output.name(), "Arranging XDG windows on output (placeholder)");
+        // This would typically involve:
+        // 1. Getting the current usable_area for this output from DisplayManager.
+        // 2. Getting all XDG windows (from self.space.elements()) that are mapped to this output.
+        // 3. Applying the active workspace's layout algorithm (e.g., tiling) to these windows within the usable_area.
+        //    - This is where `apply_layout_for_workspace` would be relevant if the active workspace is on this output.
+        // 4. For each window, if its size or position changes, send configure events.
+
+        // Example: if the active workspace is on this output, re-apply its layout.
+        let active_ws_id_opt;
+        let active_ws_monitor_id_opt;
+        {
+            let wm_guard = self.workspace_manager.lock().unwrap();
+            active_ws_id_opt = wm_guard.get_active_workspace_id();
+            active_ws_monitor_id_opt = active_ws_id_opt.and_then(|id| {
+                wm_guard.get_workspace_by_id(id).and_then(|ws| ws.monitor_id.clone())
+            });
         }
 
-        Ok(())
+        if let (Some(active_ws_id), Some(active_ws_monitor_id)) = (active_ws_id_opt, active_ws_monitor_id_opt) {
+            if active_ws_monitor_id == output.name() {
+                info!("Output {} hosts the active workspace {:?}, re-applying layout.", output.name(), active_ws_id);
+                self.apply_layout_for_workspace(active_ws_id);
+            }
+        }
+        self.ask_for_render(); // Window positions might have changed
+    }
+
+
+    /// Signals that a render pass is needed.
+    /// In a real compositor, this would schedule a repaint/redraw, often by signaling the event loop.
+    pub fn ask_for_render(&self) {
+        // This is a simplified way. A real compositor might use a more complex mechanism,
+        // e.g., waking up a rendering thread or scheduling a calloop event source.
+        // Using a calloop timer to trigger a redraw after a short delay (e.g., next event loop tick or few ms)
+        // can help coalesce multiple render requests.
+        if let Err(e) = self.event_loop_handle.insert_source(self.render_timer.clone(), |_, _, state: &mut DesktopState| {
+            // This callback will be executed when the timer expires.
+            // Here, you would call your actual rendering function.
+            // For example: state.render_manager.render_frame();
+            // Or if rendering is part of the main loop: state.needs_render = true; state.event_loop_handle.wakeup();
+            debug!("Render timer expired, triggering render (placeholder)");
+            // In a full setup, this would call the main rendering logic of the compositor.
+            // For example, if novade-system/src/compositor/display_loop.rs has a render function:
+            // state.trigger_render_cycle(); (hypothetical method)
+        }) {
+            warn!("Failed to arm render timer: {}", e);
+        } else {
+            self.render_timer.set_duration(std::time::Duration::from_millis(1)); //ほぼ即時
+            debug!("Render requested, timer armed.");
+        }
+    }
+
+    // This function was already present, just ensuring it fits with the new ask_for_render
+    pub fn apply_layout_for_workspace(&self, workspace_id: novade_domain::workspaces::manager::WorkspaceId) {
+        info!("Applying layout for workspace ID: {:?}", workspace_id);
+        let workspace_manager_guard = self.workspace_manager.lock().unwrap();
+        let target_workspace_opt = workspace_manager_guard.get_workspace_by_id(workspace_id);
+
+        let (target_monitor_id_opt, windows_in_ws, layout_config_opt) =
+            if let Some(ws) = target_workspace_opt {
+                if matches!(ws.layout, novade_domain::workspaces::manager::WorkspaceLayout::Tiling(_)) {
+                    (ws.monitor_id.clone(), ws.windows.clone(), Some(ws.layout.clone()))
+                } else {
+                    debug!("Workspace {:?} is not tiling, skipping layout application.", ws.id);
+                    return;
+                }
+            } else {
+                warn!("apply_layout_for_workspace: Workspace {:?} not found.", workspace_id);
+                return;
+            };
+
+        let window_manager_interface = workspace_manager_guard.window_manager.clone();
+        drop(workspace_manager_guard); // Release lock
+
+        let screen_area_nova_rect: NovaRect = if let Some(monitor_id) = target_monitor_id_opt.as_ref() {
+            // Use DisplayManager to get work_area, which should respect exclusive zones
+            let dm = self.display_manager.lock().unwrap();
+            if let Some(managed_output) = dm.get_output_by_id(monitor_id) {
+                managed_output.work_area // This is already a NovaRect
+            } else {
+                warn!("Failed to get work area for monitor {} from DisplayManager. Falling back.", monitor_id);
+                // Fallback logic (e.g. primary or default)
+                dm.get_primary_output().map(|mo| mo.work_area).unwrap_or_else(|| {
+                    warn!("No primary output found for screen_area, using default 1920x1080.");
+                    NovaRect::new(NovaPoint::new(0,0), NovaSize::new(1920,1080))
+                })
+            }
+        } else {
+            // Workspace has no monitor_id, try primary output
+            let dm = self.display_manager.lock().unwrap();
+            dm.get_primary_output().map(|mo| mo.work_area).unwrap_or_else(|| {
+                 warn!("No primary output (workspace has no monitor_id), using default 1920x1080 for layout.");
+                 NovaRect::new(NovaPoint::new(0,0), NovaSize::new(1920,1080))
+            })
+        };
+
+
+        if let Some(novade_domain::workspaces::manager::WorkspaceLayout::Tiling(tiling_options)) = layout_config_opt {
+            info!("Applying tiling layout ({:?}) for workspace {:?} on monitor {:?} with usable area {:?}", tiling_options, workspace_id, target_monitor_id_opt, screen_area_nova_rect);
+            let algorithm = tiling_options.as_algorithm();
+            let new_geometries = algorithm.arrange(&windows_in_ws, screen_area_nova_rect);
+
+            for (domain_window_id, new_geom) in new_geometries {
+                if let Some(smithay_window) = self.find_smithay_window_by_domain_id(domain_window_id) {
+                    info!("Applying geometry {:?} to window {:?}", new_geom, domain_window_id);
+                    // map_element takes global coordinates. new_geom should be in global coordinates.
+                    // The tiling algorithm should produce global coordinates based on screen_area_nova_rect.
+                    self.space.map_element(smithay_window.clone(), (new_geom.position.x, new_geom.position.y), false);
+
+                    if let Some(toplevel) = smithay_window.toplevel() {
+                        match toplevel {
+                            WindowSurfaceType::Xdg(xdg_toplevel_surface) => {
+                                let xdg_toplevel = xdg_toplevel_surface.xdg_toplevel();
+                                xdg_toplevel.send_configure_bounds(smithay::utils::Size::from((new_geom.size.width, new_geom.size.height)));
+                                xdg_toplevel.set_maximized(false);
+                                xdg_toplevel.set_fullscreen(false);
+                                xdg_toplevel.set_resizing(false);
+                                xdg_toplevel.send_pending_configure(); // This sends a serial
+
+                                // Update our internal XdgSurfaceData as well
+                                if let Some(surface) = smithay_window.wl_surface(){
+                                    if let Some(data_mutex) = surface.data::<StdMutex<crate::compositor::shell::xdg::XdgSurfaceData>>() {
+                                        if let Ok(mut surface_data) = data_mutex.lock() {
+                                            if let crate::compositor::shell::xdg::XdgRoleSpecificData::Toplevel(toplevel_data) = &mut surface_data.role_data {
+                                                toplevel_data.current_state.maximized = false;
+                                                toplevel_data.current_state.fullscreen = false;
+                                                toplevel_data.current_state.resizing = false;
+                                                // size is tricky, xdg_toplevel.configure() sends the actual size
+                                                // toplevel_data.current_state.size = Some((new_geom.size.width, new_geom.size.height));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                           // _ => {} // Could be XWayland toplevel
+                        }
+                    }
+                } else {
+                    warn!("Could not find SmithayWindow for domain_id {:?} during layout application.", domain_window_id);
+                }
+            }
+        }
+        self.ask_for_render(); // Layout changed
     }
 }
 
@@ -690,30 +976,20 @@ smithay::delegate_shm!(DesktopState);
 smithay::delegate_xdg_shell!(DesktopState);
 smithay::delegate_output!(DesktopState);
 smithay::delegate_input!(DesktopState);
+smithay::delegate_layer_shell!(DesktopState); // Added delegate for layer_shell
 
 // ... (rest of the file: NovadeCompositorState, etc. - Copied from previous read_files output)
+// Ensure these smithay imports are appropriate for DesktopState, not NovadeCompositorState context
 use smithay::{
-    backend::egl::Egl,
-    // backend::renderer::gles2::Gles2Renderer, // Already imported
-    // desktop::{Space, Window}, // Already imported
-    // reexports::calloop::LoopHandle, // Already imported
-    // reexports::wayland_server::{Display, protocol::wl_surface::WlSurface}, // Already imported
+    backend::egl::Egl, // EGL might be backend-specific, less likely in DesktopState directly
     wayland::{
-        // compositor::CompositorState, // Already imported
-        // output::OutputManagerState, // Already imported
-        // shell::xdg::XdgShellState, // Already imported
-        // shm::ShmState, // Already imported
-        seat::{SeatState, /*Seat, CursorImageStatus*/}, // Seat, CursorImageStatus already imported
-        dmabuf::DmabufState,
+        seat::{/*SeatState, Seat, CursorImageStatus*/}, // Already imported or part of DesktopState fields
+        dmabuf::DmabufState, // If DesktopState manages DMABUF directly
     },
     backend::{
-        // drm::{DrmDevice, DrmDisplay, DrmNode, DrmSurface}, // TODO: Integrate with generic FrameRenderer for DRM
-        drm::{DrmNode as DrmNodeSmithay}, // Renamed to avoid conflict if another DrmNode is in scope
-        // renderer::gles::{GlesRenderer, GlesTexture}, // GLES specific, removed
-        session::Session,
+        drm::{DrmNode as DrmNodeSmithay}, // DRM node likely backend-specific
+        session::Session, // Session likely backend-specific
     },
-    // reexports::drm::control::crtc, // Related to DrmDevice/Display
-    // utils::{Rectangle, Physical, Point, Logical, Transform}, // Already imported
 };
 use std::{cell::RefCell, collections::HashMap, time::SystemTime, /*sync::{Arc, Mutex}*/}; // Arc, Mutex already imported
 use smithay::wayland::compositor as smithay_compositor;
