@@ -170,6 +170,20 @@ pub struct DesktopState {
     // pub config: Arc<SettingsManager<CompositorConfig>>,
     // pub nova_workspace_manager: Arc<StdMutex<NovaWorkspaceManager>>, // NovaDE's workspace logic
 
+    // Winit backend specific data (if Winit backend is active)
+    // These fields would be populated by init_winit_backend()
+    // For now, they are not generic over WinitWindow type to avoid making DesktopState generic yet.
+    // Consider a BackendState enum later if supporting multiple backends dynamically.
+    #[cfg(feature = "backend_winit")]
+    pub winit_event_loop_proxy: Option<smithay::reexports::winit::event_loop::EventLoopProxy<()>>, // To request redraws etc.
+    // pub winit_window: Option<Arc<smithay::reexports::winit::window::Window>>, // Window needs to be Arc for some WinitGraphicsBackend
+    // pub winit_graphics_backend: Option<Box<dyn smithay::backend::winit::WinitGraphicsBackend<Renderer = smithay::backend::renderer::gles2::Gles2Renderer>>>,
+    // pub winit_renderer_node: Option<smithay::backend::renderer::RendererNode>,
+
+    // XWayland related state
+    pub xwayland_guard: Option<XWayland<DesktopState>>, // Guard to keep XWayland alive
+
+
     // Globals that have been created
     pub compositor_global: Option<GlobalId>,
     pub subcompositor_global: Option<GlobalId>,

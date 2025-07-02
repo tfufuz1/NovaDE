@@ -363,14 +363,74 @@ pub fn initialize_xwayland(
 }
 
 // Helper struct for XWayland initialization, if needed by core.rs
-pub struct XWaylandManager {
-    // pub source: XWaylandSource<DesktopState>,
-    // pub guard: XWayland<DesktopState>, // The guard object from XWayland::new
-}
+// pub struct XWaylandManager {
+//     pub source: XWaylandSource<DesktopState>,
+//     pub guard: XWayland<DesktopState>, // The guard object from XWayland::new
+// }
 
 // This function is now primarily for the XWM implementation.
 // The actual startup logic (XWayland::new, inserting source) will be in core.rs.
 // We can add a helper here if core.rs needs it for XWayland event dispatch.
+
+/// Spawns XWayland if enabled in configuration and integrates its event source with Calloop.
+pub fn spawn_xwayland_if_enabled(
+    desktop_state: &mut DesktopState, // To store XWayland guard and connection
+    event_loop_handle: &LoopHandle<'static, DesktopState>,
+    display_handle: &DisplayHandle,
+) -> Result<(), CompositorError> {
+    // TODO: Check a config flag like desktop_state.config.enable_xwayland
+    // For now, assume it's enabled for testing.
+    let enable_xwayland = true;
+
+    if enable_xwayland {
+        info!("XWayland is enabled. Spawning XWayland server...");
+        match XWayland::new(event_loop_handle.clone(), display_handle.clone()) {
+            Ok((xwayland_guard, xwayland_source)) => {
+                desktop_state.xwayland_guard = Some(xwayland_guard);
+
+                letעלות_token = event_loop_handle.insert_source(xwayland_source, |event, _, d_state| {
+                    match event {
+                        XWaylandEvent::Ready { connection, client } => {
+                            info!("XWayland server is ready. DISPLAY={}", connection.display_name());
+                            d_state.xwayland_connection = Some(connection.clone());
+                            env::set_var("DISPLAY", connection.display_name());
+                            // Set the primary seat for XWayland interaction
+                            connection.set_seat(&d_state.primary_seat);
+                            // TODO: Consider unsetting XCURSOR_PATH/THEME if XWayland should use server-side cursors
+                        }
+                        XWaylandEvent::NewClient(client_data) => {
+                            info!("New XWayland client connected (ID: {:?})", client_data.id());
+                            // client_data can be stored if needed, e.g., in a Vec in DesktopState
+                        }
+                        XWaylandEvent::ClientGone(client_id) => {
+                            info!("XWayland client disconnected (ID: {:?})", client_id);
+                            // TODO: Clean up resources associated with this X11 client if any were stored
+                        }
+                    }
+                    // After handling the event, dispatch events from the XWayland connection
+                    // This processes X11 client requests and calls Xwm trait methods on DesktopState
+                    if let Some(conn) = d_state.xwayland_connection.as_ref() {
+                        if let Err(e) = conn.dispatch_events(d_state) {
+                            error!("Error dispatching XWayland client events: {}", e);
+                        }
+                    }
+                }).map_err(|e| CompositorError::XWaylandStartup(format!("Failed to insert XWayland source: {}", e)))?;
+
+                // desktop_state.xwayland_source_token = Some(עלות_token); // If you need to remove it later
+                info!("XWayland event source inserted into Calloop.");
+            }
+            Err(e) => {
+                error!("Failed to initialize XWayland: {}. XWayland support will be disabled.", e);
+                // Not returning an error here, as XWayland might be optional.
+                // If it's critical, return Err(CompositorError::XWaylandStartup(e.to_string()));
+            }
+        }
+    } else {
+        info!("XWayland is disabled by configuration.");
+    }
+    Ok(())
+}
+
 pub fn dispatch_xwayland_events(desktop_state: &mut DesktopState) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(conn) = desktop_state.xwayland_connection.as_ref() {
         conn.dispatch_events(desktop_state)?;
