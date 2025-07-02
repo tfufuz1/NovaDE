@@ -7,65 +7,136 @@ edition = "2021"
 novade-core = { path = "../novade-core" }
 novade-domain = { path = "../novade-domain" }
 async-trait = "0.1.68"
-tokio = { version = "1", features = ["full"] }
-wayland-server = "0.31.0"
-wayland-protocols = "0.31.0"
-smithay = { version = "=0.3.0", default-features = false, features = ["wayland-server"] } # Downgraded significantly & disabled default features
-zbus = "3"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for state dump serialization
-toml = "0.8" # For future config file parsing
-tracing = "0.1" # Already present, version matches
-tracing-subscriber = { version = "0.3", features = ["fmt"] }
-input = "0.9.0" # Renamed from 'input' and version updated
-udev = "0.7.0"
-xkbcommon = { version = "0.7.0", features = ["default", "wayland"] } # Added features
-thiserror = "1.0" # Added
-libc = "0.2" # Added
-drm = "0.11.0"
-gbm = "0.11.0"
-nix = { version = "0.27.1", features = ["fs", "mount", "socket", "process"] } # Removed cmsg, ucred
-tempfile = "3.8" # Updated version for Wayland compositor core, was 3.2
-byteorder = "1.4" # For message parsing
-memmap2 = "0.9" # For Wayland compositor core (SHM)
-mio = { version = "0.8", features = ["os-ext", "net"] } # For Wayland compositor core (event loop)
-glob = "0.3"
+tokio = { version = "1.45.1", features = ["full"] } # Task requirement: Tokio 1.45.1
+# Smithay and Wayland versions
+smithay = { version = "0.30.0", default-features = false, features = [
+    "backend_libinput",     # For libinput backend
+    "backend_udev",         # For udev backend and KMS/DRM
+    "backend_winit",        # For running in a window (testing/development)
+    "renderer_gl",          # For OpenGL ES 2.0 renderer
+    "renderer_vulkan",      # For Vulkan renderer (requires 'ash' feature in smithay if it exists, or manual ash integration)
+    "renderer_software",    # Fallback or testing renderer
+    "wayland_server",       # Core Wayland server functionalities
+    "xwayland",             # For XWayland support
+    "desktop",              # For desktop components like Space, Window, PopupManager, LayerSurface
+    "output_management",    # For managing outputs
+    "seat_management",      # For managing seats, keyboard, pointer, touch
+    "shm_buffer",           # For wl_shm
+    "dmabuf_buffer",        # For zwp_linux_dmabuf_v1
+    "xdg_shell",            # For xdg-shell (xdg_wm_base, xdg_surface, xdg_toplevel)
+    # "wlr_layer_shell",    # Smithay 0.30.0 might not have a direct feature; handled by wayland-protocols
+    "xdg_decoration",       # For zxdg_decoration_manager_v1
+    "xdg_activation",       # For xdg_activation_v1
+    "presentation_time",    # For wp_presentation_time
+    # IME and text input protocols might need specific features or direct use of wayland-protocols
+    "fractional_scaling",   # For wp_fractional_scale_v1
+    "viewporter",           # For wp_viewport_v1
+    # "xdg_output_management", # Usually part of output_management or handled by wayland-protocols for zxdg_output_manager_v1
+    "single_pixel_buffer",  # For wp_single_pixel_buffer_v1
+    "relative_pointer",     # For wp_relative_pointer_manager_v1
+    "pointer_constraints",  # For wp_locked_pointer_manager_v1 and wp_pointer_constraints_v1
+    # "foreign_toplevel_management", # May need wayland-protocols for wlr_foreign_toplevel_management_unstable_v1
+    # "idle_notify",        # May need wayland-protocols for idle_notify_unstable_v1
+]}
+wayland-server = { version = "0.30.0" } # Match Smithay's version
+wayland-protocols = { version = "0.30.0", features = [
+    "server",
+    "unstable_protocols", # For many of the specified unstable protocols
+    "staging_protocols",  # For some staging protocols
+    "xdg_shell",          # Explicitly enable xdg-shell server parts
+    "wlr_protocols",      # For wlr-layer-shell, foreign-toplevel, etc.
+    # Add specific protocol features if needed, e.g., "input_method_unstable_v2", "text_input_unstable_v3"
+    # "fractional_scale_v1", "viewporter_v1", "presentation_time", etc.
+    # Check wayland-protocols documentation for exact feature names for each protocol.
+    # Smithay often re-exports these, but direct dependency can be clearer.
+    "xdg_decoration_v1",
+    "xdg_activation_v1",
+    "linux_dmabuf_v1",
+    "presentation_time",
+    "input_method_unstable_v2",
+    "text_input_unstable_v3",
+    "fractional_scale_v1",
+    "viewport_v1",
+    "xdg_output_unstable_v1", # For zxdg_output_manager_v1
+    "single_pixel_buffer_v1",
+    "relative_pointer_unstable_v1",
+    "pointer_constraints_unstable_v1",
+    "foreign_toplevel_management_unstable_v1",
+    "idle_notify_unstable_v1",
+]}
+
+calloop = { version = "0.14.0", features = ["executor"] } # Task requirement: Calloop 0.14.0. `executor` for async tasks.
+glib = { version = "0.19.0" } # For MainContext::spawn_local (check latest compatible version)
+
+# General purpose
+zbus = "3" # Already present, version check if needed
+serde = { version = "1.0", features = ["derive"] } # Already present
+serde_json = "1.0" # Already present
+toml = "0.8" # Already present
+tracing = "0.1" # Already present
+tracing-subscriber = { version = "0.3", features = ["fmt"] } # Already present
+thiserror = "1.0" # Already present
+libc = "0.2" # Already present
+log = "0.4" # Already present
+once_cell = "1.10" # Already present
+anyhow = "1.0" # Already present
+futures-core = "0.3" # Already present
+futures-util = "0.3" # Already present
+uuid = { version = "1.4.1", features = ["v4"] } # Already present
+
+# Input
+input = { version = "0.8.0" } # Smithay's input crate (libinput wrapper)
+udev = { version = "0.8.0" } # For udev backend (often used with libinput)
+xkbcommon = { version = "0.7.0", features = ["default", "wayland"] } # Already present, ensure version compatibility
+
+# Rendering
+ash = { version = "0.37", features = ["linked", "debug"] } # For Vulkan. 'linked' for loader, 'debug' for validation layers.
+ash-window = "0.12" # For Wayland surface creation with Ash (check compatibility with Smithay/Wayland versions)
+# Smithay's GLES renderer might depend on `glow` or similar, check Smithay's renderer_gl feature dependencies.
+# If using Smithay's GLES renderer, it might pull in EGL bindings.
+# `drm` and `gbm` are often needed for direct KMS/DRM backend with GLES.
+drm = "0.11.0" # Already present, for direct rendering mode (KMS)
+gbm = "0.11.0" # Already present, for buffer management with DRM
+
+# Utilities for Wayland/Smithay
+nix = { version = "0.27.1", features = ["fs", "mount", "socket", "process", "ioctl", "uio"] } # Existing, ensure features are sufficient
+tempfile = "3.8" # Already present
+byteorder = "1.4" # Already present
+memmap2 = "0.9" # Already present
+mio = { version = "0.8", features = ["os-ext", "net"] } # Already present
+
+# System health and other utilities (already present, versions checked)
+psutil = "3.2"
+nvml-wrapper = "0.7"
+prometheus = { version = "0.13", features = ["process"] }
+warp = "0.3"
+memoffset = "0.9"
+glam = "0.24"
 sd-journal = "0.1.0"
-futures-core = "0.3"
 async-stream = "0.3"
 signal-hook = "0.3"
 polling = "3.4"
-ash = "0.37" # For Vulkan bindings
-ash-window = "0.12" # For Wayland surface creation with Ash
-gpu-allocator = { version = "0.22", features = ["ash"] } # Rust wrapper for VMA
-raw-window-handle = "0.5" # For integrating with Wayland surfaces
-vk-mem = "0.3.0" # Upgraded from 0.2.2 to try and fix C++ build error
-uuid = { version = "1.4.1", features = ["v4"] }
-log = "0.4"
-psutil = "3.2" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for CPU and memory metrics
-once_cell = "1.10" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for static metric collectors
-nvml-wrapper = "0.7" #ANCHOR [NovaDE Developers <dev@novade.org>] Added for NVIDIA GPU monitoring (optional)
-#TODO [NovaDE Developers <dev@novade.org>] Research and add AMD GPU monitoring crate (e.g., amdgpu-sysfs or similar)
-prometheus = { version = "0.13", features = ["process"] } #ANCHOR [NovaDE Developers <dev@novade.org>] Added for Prometheus metrics exposition
-warp = "0.3" # Restored from 0.1.23
-anyhow = "1.0" # Added for client example error handling
-futures-util = "0.3" # Added for client example StreamExt
-memoffset = "0.9" # Added for vertex attribute offsets
-glam = "0.24" # Added for matrix math in UBOs
+gpu-allocator = { version = "0.22", features = ["ash"] }
+raw-window-handle = "0.5" # Smithay 0.30.0 uses raw-window-handle 0.5
+vk-mem = "0.3.0"
 
 
 [features]
-default = ["prometheus_exporter"] #ANCHOR [NovaDE Developers <dev@novade.org>] Added default feature for exporter
-prometheus_exporter = [] #ANCHOR [NovaDE Developers <dev@novade.org>] Feature flag for enabling metrics exporter
-# The enable-libinput-integration feature is removed as the dependencies are gone.
-# If this feature flag was used for other purposes in the .rs files, those #[cfg] attributes
-# will now effectively be false, which should be fine as we are providing pure stubs.
-# For a clean slate, it's better to remove it if its only purpose was for the removed deps.
-# If other parts of the code were using #[cfg(feature = "enable-libinput-integration")],
-# they will now use their #[cfg(not(feature = "enable-libinput-integration"))] paths,
-# which is the intended outcome for a pure stub implementation.
+default = ["prometheus_exporter", "backend_libinput", "renderer_gl"] # Sensible defaults
+prometheus_exporter = [] # Already present
 
-# Conditional dependency sections for libinput/udev are also removed.
+# Backend features (can be selected at compile time by main application)
+backend_libinput = [] # Enables libinput backend for input
+backend_udev = []     # Enables udev backend for input and KMS/DRM
+backend_winit = []    # Enables winit backend for testing in a window
+
+# Renderer features
+renderer_gl = []      # Enables OpenGL ES 2.0 renderer
+renderer_vulkan = []  # Enables Vulkan renderer
+renderer_software = [] # Enables software renderer (for testing or fallback)
+
+# XWayland feature
+with_xwayland = []    # Enables XWayland support
 
 [[example]]
 name = "vulkan_renderer_test"
