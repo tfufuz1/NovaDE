@@ -1,416 +1,412 @@
 // This is novade-system/src/compositor/xdg_shell.rs
 // Specific logic for xdg-shell clients (xdg_wm_base, xdg_surface, xdg_toplevel).
 
+//! Implements the handling logic for `xdg_shell` protocol requests.
+//!
+//! This module contains functions that are called by the `XdgShellHandler`
+//! implementation on `DesktopState` (found in `handlers.rs`). These functions
+//! manage the lifecycle and state changes of XDG surfaces, toplevels, and popups,
+//! interacting with Smithay's window management primitives like `Space` and `PopupManager`.
+
 use smithay::{
-    desktop::{Window, Space, PopupManager, WindowSurfaceType},
+    desktop::{Window, Space, PopupManager, WindowSurfaceType, space::SpaceElement},
     input::Seat,
     reexports::wayland_server::{
         protocol::{wl_surface::WlSurface, wl_seat::WlSeat},
         DisplayHandle, Client, Resource,
     },
-    utils::{Point, Logical, Serial},
+    utils::{Point, Logical, Serial, Rectangle, SERIAL_COUNTER},
     wayland::shell::xdg::{
-        XdgShellHandler, XdgShellState, XdgToplevelSurfaceData, XdgPopupSurfaceData,
+        // XdgShellHandler, // Trait is implemented on DesktopState
+        XdgShellState, XdgToplevelSurfaceData, XdgPopupSurfaceData,
         ToplevelState as SmithayToplevelState, Configure, XdgRequest, XdgWmBaseClientData,
         XdgPositionerUserData, XdgSurfaceUserData, XdgToplevelUserData, XdgPopupUserData,
-        xdg_toplevel::{State as XdgToplevelState, XdgToplevel},
+        xdg_toplevel::{State as XdgToplevelStateRead, XdgToplevel}, // Renamed State to XdgToplevelStateRead
         xdg_popup::XdgPopup,
         xdg_surface::XdgSurface,
-        XdgShellUserData, // Smithay 0.30 might have a general user data struct for the global
+        XdgShellUserData,
     },
-    // Smithay 0.30 might use delegate_xdg_shell! macro for much of this.
-    // If implementing manually, you'll need RequestHandler for each interface.
-    delegate_xdg_shell, // For the macro
+    delegate_xdg_shell,
 };
-
 use tracing::{info, warn, debug};
+use crate::compositor::state::DesktopState;
 
-use crate::compositor::state::DesktopState; // Assuming DesktopState is the main state struct
-
-// User data structs that might be attached to Wayland objects
-// Smithay 0.30.0 often uses specific UserData structs for its handlers.
-// For example, XdgSurface might have XdgSurfaceUserData.
-
-// This file will primarily contain the logic called by the XdgShellHandler methods
-// implemented in handlers.rs (or via the delegate_xdg_shell! macro if DesktopState implements it).
-
+/// Handles the creation of a new XDG surface.
+/// Called when a client creates an `xdg_surface` from `xdg_wm_base`.
 pub fn handle_new_xdg_surface(
-    state: &mut DesktopState,
+    _state: &mut DesktopState, // State might be used for policies or logging in future
     surface: WlSurface,
     xdg_surface: XdgSurface,
 ) {
     info!(surface = ?surface.id(), xdg_surface = ?xdg_surface.id(), "New XDG surface created");
-    // Associate XdgSurfaceUserData if not already done by Smithay's internals
-    // xdg_surface.data_map().insert_if_missing(|| XdgSurfaceUserData::default());
-
-    // Initial configuration might be sent here or upon role assignment
+    // Smithay's XdgShellState typically handles associating XdgSurfaceUserData.
+    // Initial configuration is usually sent when a role (toplevel, popup) is assigned.
 }
 
+/// Handles the creation of a new XDG toplevel window.
+/// Called when an `xdg_surface` gets the `xdg_toplevel` role.
 pub fn handle_new_xdg_toplevel(
-    state: &mut DesktopState,
-    surface: WlSurface, // The underlying WlSurface
-    xdg_toplevel: XdgToplevel, // The XdgToplevel object
+    _state: &mut DesktopState, // DesktopState itself will manage the Window via XdgShellHandler trait
+    surface: WlSurface,
+    xdg_toplevel: XdgToplevel,
 ) {
-    let xdg_surface = xdg_toplevel.xdg_surface().clone(); // Get the parent XdgSurface
-    info!(surface = ?surface.id(), xdg_toplevel = ?xdg_toplevel.id(), "New XDG Toplevel created");
+    let xdg_surface_handle = xdg_toplevel.xdg_surface().clone();
+    info!(surface = ?surface.id(), xdg_toplevel = ?xdg_toplevel.id(), "New XDG Toplevel role assigned");
 
-    // Create a Smithay Window for this toplevel
-    // Smithay 0.30.0 might create the Window inside its XdgShellHandler logic.
-    // If you need to create it manually or augment it:
-    let window = Window::new_xdg_toplevel(xdg_toplevel.clone()); // Smithay 0.30 `Window::new` might take XdgToplevel directly.
+    // Note: The actual creation of smithay::desktop::Window and mapping to Space
+    // is handled by the XdgShellHandler::map_toplevel method on DesktopState,
+    // which is called by Smithay when the toplevel is ready to be mapped.
+    // This function's primary role now is to send the initial configure.
 
-    // Store the window in DesktopState's Space or manage it as needed.
-    // The DesktopState::new_toplevel handler (called via delegate) would typically do this.
-    // state.space.map_element(window.clone(), (0, 0), true); // Example: map at (0,0) and activate
-
-    // Attach user data for the toplevel if needed (e.g., for tracking NovaDE-specific state)
-    // xdg_toplevel.data_map().insert_if_missing(|| MyXdgToplevelSpecificData::new(window));
-
-    // Initial configure sequence
     let initial_configure_serial = SERIAL_COUNTER.next_serial();
     let mut configure_state = SmithayToplevelState::default();
-    // Set initial size, maximized, activated, etc. as per policy
-    configure_state.size = Some((800, 600).into()); // Example initial size
-    configure_state.activated = true; // Typically new windows are activated
+    // TODO: Initial size and activation state should come from NovaDE window policy/config.
+    configure_state.size = Some((800, 600).into());
+    configure_state.activated = true; // New windows are typically activated by default.
 
     let configure = Configure {
-        surface: xdg_surface.clone(), // The XdgSurface associated with the toplevel
+        surface: xdg_surface_handle,
         state: configure_state,
         serial: initial_configure_serial,
     };
-    xdg_toplevel.send_configure(configure); // Smithay 0.30.0 `XdgToplevel` has `send_configure`
-                                          // or this might be part of a `Configure` struct passed to `send_configure`.
-                                          // Check Smithay 0.30.0 `xdg_toplevel.rs` examples.
+    xdg_toplevel.send_configure(configure);
     info!(surface = ?surface.id(), "Sent initial configure for new XDG Toplevel");
 }
 
+/// Handles the creation of a new XDG popup.
+/// Called when an `xdg_surface` gets the `xdg_popup` role.
 pub fn handle_new_xdg_popup(
     state: &mut DesktopState,
-    surface: WlSurface, // The underlying WlSurface
-    xdg_popup: XdgPopup, // The XdgPopup object
+    surface: WlSurface,
+    xdg_popup: XdgPopup,
 ) {
-    let xdg_surface = xdg_popup.xdg_surface().clone(); // Get the parent XdgSurface
-    info!(surface = ?surface.id(), xdg_popup = ?xdg_popup.id(), "New XDG Popup created");
+    info!(surface = ?surface.id(), xdg_popup = ?xdg_popup.id(), "New XDG Popup role assigned");
 
-    // Track the popup using PopupManager
-    // The DesktopState::new_popup handler (called via delegate) would typically do this.
-    if let Err(err) = state.popups.track_popup(xdg_popup.clone()) { // Smithay 0.30 PopupManager takes XdgPopup
-        warn!(surface = ?surface.id(), "Failed to track popup: {}", err);
-        // Consider destroying the popup or sending a configure_bounds_done if appropriate
+    // The XdgShellHandler::new_popup on DesktopState (delegated to XdgShellState)
+    // will call PopupManager::track_popup.
+    if let Err(err) = state.popups.lock().unwrap().track_popup(xdg_popup.clone()) {
+        warn!(surface = ?surface.id(), "Failed to track popup via PopupManager: {}", err);
+        // If tracking fails, the popup might not behave correctly.
+        // Consider sending a protocol error or closing the popup surface.
         return;
     }
-
-    // Initial configure for the popup
-    // Popups are typically configured based on their positioner logic.
-    // Smithay's PopupManager often handles sending the initial configure after the popup is committed.
-    // xdg_popup.send_configure(...); // This is usually handled by PopupManager
-    // xdg_popup.send_popup_done(); // After successful configuration and mapping
+    // Smithay's PopupManager handles sending the initial configure for the popup
+    // after it's committed and its position is determined.
 }
 
+/// Handles commit operations for generic XDG surfaces.
+/// This is a general hook; role-specific commit logic is often more critical.
 pub fn handle_xdg_surface_commit(
-    state: &mut DesktopState,
+    _state: &mut DesktopState, // May be used for accessing space or popups if needed
     surface: &WlSurface,
-    xdg_surface: &XdgSurface, // The XdgSurface that was committed
+    xdg_surface: &XdgSurface,
 ) {
-    debug!(surface = ?surface.id(), "Commit received for XDG surface");
-
-    // Handle surface commit, which might involve:
-    // - Damage tracking
-    // - Texture uploading
-    // - If it's the first commit with a role, mapping the window/popup
-
-    // For Toplevels:
-    if let Some(toplevel) = xdg_surface.toplevel() {
-        // Check if it's the first commit that makes the window ready to be mapped
-        let is_mapped = state.space.elements().any(|w| w.wl_surface().as_ref() == Some(surface)); // Check if window is in space
-        if !is_mapped && xdg_surface.has_buffer() {
-            // This logic is often in XdgShellHandler::ack_configure or a similar place
-            // where the window is mapped after the client acknowledges the first configure.
-            // For now, we assume mapping happens after ack_configure.
-            info!(surface = ?surface.id(), "XDG Toplevel ready to be mapped (has buffer). Waiting for ack_configure.");
-        }
-    }
-
-    // For Popups:
-    if let Some(popup) = xdg_surface.popup() {
-        // PopupManager usually handles the logic for mapping popups after their first commit
-        // and configure.
-        // It might involve calling `popup.send_configure_bounds_done()` or similar.
-        // The `PopupManager::commit_popup_surface` or similar internal Smithay logic handles this.
-        // state.popups.commit_popup_surface(surface); // This is an internal Smithay call pattern
-    }
-
-    // Generic surface damage handling related to XDG roles would be managed by Smithay's
-    // XdgShellState and the main wl_surface commit handler.
-    // No direct call to a generic handle_surface_commit here, as that's too broad.
-    // Role-specific commit logic is usually triggered from the main commit_handler in handlers.rs
-    // or by Smithay's internal mechanisms when roles are processed.
+    debug!(surface = ?surface.id(), "Commit received for XDG surface role: {:?}", xdg_surface.role());
+    // Smithay's XdgShellState and the main wl_surface commit_handler (CompositorHandler::commit)
+    // manage applying pending state and damage. Role-specific logic (like re-arranging
+    // popups via PopupManager) is often triggered from there or within role-specific handlers.
 }
 
 
-// --- Handlers for XDG Toplevel/Popup Requests ---
-// These functions would be called by the actual RequestHandler implementations
-// (often managed by the delegate_xdg_shell! macro).
-
+/// Handles an `ack_configure` request from an XDG toplevel client.
 pub fn handle_xdg_toplevel_ack_configure(
     state: &mut DesktopState,
     toplevel: &XdgToplevel,
-    configure_data: smithay::wayland::shell::xdg::AcknowledgeConfigure, // Smithay 0.30.0 specific type
+    _configure_data: smithay::wayland::shell::xdg::AcknowledgeConfigure,
 ) {
     let surface = toplevel.xdg_surface().wl_surface();
     info!(surface = ?surface.id(), "XDG Toplevel acked configure");
 
-    // If this is the ack for the first configure, and the surface has a buffer, map it.
-    // This logic is crucial for making windows appear.
-    if let Some(window) = state.space.elements().find(|w| w.wl_surface().as_ref() == Some(surface)).cloned() {
-        if !window.is_mapped() && toplevel.xdg_surface().has_buffer() {
-            info!(surface = ?surface.id(), "Mapping XDG Toplevel after ack_configure.");
-            // state.space.map_element(window, window.geometry().loc, false); // Or use window.map() if available
-            // Smithay 0.30.0 `Window` has a `Window::map()` method.
-            // The window should already be in the space from `new_toplevel`.
-            // The `map()` call makes it visible.
-            // The XdgShellHandler in Smithay usually calls window.map() internally after this.
-            // If you are using the delegate, this is likely handled.
-            // If implementing manually, you call `window.map()`.
+    // Smithay's XdgShellHandler::ack_configure (on DesktopState) is called by the delegate.
+    // That handler is responsible for processing AcknowledgeConfigure::new_state
+    // and potentially reconfiguring the window or mapping it if it's the first ack.
+
+    // We ensure foreign toplevels are notified of potential state changes or initial mapping.
+    let space_guard = state.space.lock().unwrap();
+    if let Some(window) = space_guard.elements().find(|w| w.wl_surface().as_ref() == Some(surface)).cloned() {
+        // It's possible the window was just mapped by XdgShellState in response to this ack.
+        if window.is_mapped() {
+            // Ensure foreign_toplevel_manager knows it's mapped.
+            // `window_mapped` is idempotent if called multiple times for the same window/manager.
+            drop(space_guard); // Release lock before calling other state
+            state.foreign_toplevel_manager_state.lock().unwrap().window_mapped(&window, &state.display_handle);
+        } else {
+            drop(space_guard);
         }
+        state.foreign_toplevel_manager_state.lock().unwrap().window_state_changed(&window);
     }
-    // Process a_c.new_state for geometry changes, etc.
-    // If a_c.new_state is Some, it means the client suggests a new size/state.
-    // The compositor can choose to accept, ignore, or modify this.
-    // This is part of the interactive resize/move feedback loop.
 }
 
-
-pub fn handle_xdg_toplevel_set_parent(state: &mut DesktopState, toplevel: &XdgToplevel, parent: Option<&XdgToplevel>) {
+/// Handles an `set_parent` request from an XDG toplevel client.
+pub fn handle_xdg_toplevel_set_parent(_state: &mut DesktopState, toplevel: &XdgToplevel, parent: Option<&XdgToplevel>) {
     info!(surface = ?toplevel.xdg_surface().wl_surface().id(), parent = ?parent.map(|p| p.xdg_surface().wl_surface().id()), "XDG Toplevel set_parent request");
-    // Update window hierarchy if your compositor supports it.
+    // NovaDE currently does not implement specific logic for transient window relationships here.
+    // Smithay's XdgShellState might store this parentage internally.
 }
 
+/// Handles a `set_title` request from an XDG toplevel client.
 pub fn handle_xdg_toplevel_set_title(state: &mut DesktopState, toplevel: &XdgToplevel, title: String) {
     info!(surface = ?toplevel.xdg_surface().wl_surface().id(), title = %title, "XDG Toplevel set_title request");
-    // Store the title, perhaps in user data associated with the window/toplevel.
-    // This could be used by a taskbar or window switcher.
-    if let Some(window) = state.space.elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())) {
-        // window.set_title(title); // If Window struct has such a method
-        // Or store in XdgToplevelUserData
+    // Smithay's XdgShellState (via delegate) handles storing the title in XdgToplevelUserData.
+    if let Some(window) = state.space.lock().unwrap().elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() {
+        state.foreign_toplevel_manager_state.lock().unwrap().window_title_changed(&window, title);
     }
 }
 
+/// Handles a `set_app_id` request from an XDG toplevel client.
 pub fn handle_xdg_toplevel_set_app_id(state: &mut DesktopState, toplevel: &XdgToplevel, app_id: String) {
     info!(surface = ?toplevel.xdg_surface().wl_surface().id(), app_id = %app_id, "XDG Toplevel set_app_id request");
-    // Store the app_id. Used for identifying the application (theming, grouping, desktop files).
-    if let Some(window) = state.space.elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())) {
-        // window.set_app_id(app_id); // If Window struct has such a method
-        // Or store in XdgToplevelUserData
+    // Smithay's XdgShellState (via delegate) handles storing the app_id.
+    if let Some(window) = state.space.lock().unwrap().elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() {
+        state.foreign_toplevel_manager_state.lock().unwrap().window_appid_changed(&window, app_id);
     }
 }
 
+/// Handles a `set_fullscreen` request from an XDG toplevel client.
 pub fn handle_xdg_toplevel_set_fullscreen(
     state: &mut DesktopState,
     toplevel: &XdgToplevel,
     fullscreen: bool,
-    output: Option<&smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
+    output_resource: Option<&smithay::reexports::wayland_server::protocol::wl_output::WlOutput>, // wl_output resource
 ) {
-    info!(surface = ?toplevel.xdg_surface().wl_surface().id(), fullscreen, output = ?output.as_ref().map(|o| o.id()), "XDG Toplevel set_fullscreen request");
+    let surface_id = toplevel.xdg_surface().wl_surface().id();
+    info!(surface = ?surface_id, fullscreen, output = ?output_resource.as_ref().map(|o| o.id()), "XDG Toplevel set_fullscreen request");
 
-    if let Some(window) = state.space.elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() {
-        let mut current_state = window.toplevel().unwrap().current_state(); // Assuming XdgToplevel is accessible from Window
-        current_state.fullscreen = fullscreen;
-        // If fullscreen is true, and output is Some, try to make it fullscreen on that output.
-        // If output is None, compositor chooses an output.
-        // If fullscreen is false, revert to previous state.
+    let Some(window) = state.space.lock().unwrap().elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() else {
+        warn!(surface = ?surface_id, "Failed to find window in space for set_fullscreen request.");
+        return;
+    };
 
-        // This involves:
-        // 1. Updating the window's state (e.g., in its UserData or a field in your Window wrapper).
-        // 2. Resizing the window to occupy the output's dimensions (if fullscreening).
-        // 3. Sending a new configure to the client.
-        // 4. Re-arranging other windows if necessary (e.g., unmaximizing others).
+    let mut new_configure_state = window.toplevel().unwrap().current_state();
 
-        // Example:
-        // window.set_fullscreen(fullscreen); // Update your internal state
-        // let target_geo = if fullscreen { /* calculate fullscreen geometry */ } else { /* calculate normal geometry */ };
-        // state.space.map_element(window, target_geo.loc, false); // This also sets size via configure
-        // toplevel.send_configure(...) // Send the new state to the client
+    if fullscreen {
+        let space_guard = state.space.lock().unwrap(); // Lock space once for output iteration
+        let target_output = output_resource
+            .and_then(|o_res| space_guard.outputs().find(|s_out| s_out.owns(o_res)).cloned())
+            .or_else(|| space_guard.outputs_for_element(&window).first().cloned())
+            .or_else(|| space_guard.outputs().next().cloned());
 
-        // Smithay's XdgToplevel might have methods to directly set these states,
-        // which then handle sending the configure.
-        // e.g., toplevel.set_fullscreen(fullscreen);
-        // toplevel.send_pending_configure(); // Or similar if changes are batched.
-        // Check Smithay 0.30.0 XdgToplevel API.
-        let configure = Configure {
-            surface: toplevel.xdg_surface().clone(),
-            state: current_state,
-            serial: SERIAL_COUNTER.next_serial(),
-        };
-        toplevel.send_configure(configure);
+        if let Some(output_handle) = target_output {
+            let output_geometry = space_guard.output_geometry(&output_handle).unwrap_or_else(|| {
+                warn!("Could not get geometry for output {:?}, using fallback fullscreen size.", output_handle.name());
+                Rectangle::from_loc_and_size((0,0), (1920, 1080))
+            });
+            drop(space_guard); // Release lock before further space modifications
+
+            // TODO: Store pre-fullscreen state (size, location) in Window UserData for proper restoration.
+            new_configure_state.size = Some(output_geometry.size);
+            new_configure_state.fullscreen = true;
+            new_configure_state.maximized = false; // Fullscreen usually overrides maximized
+
+            let mut space_modify_guard = state.space.lock().unwrap();
+            space_modify_guard.map_element(window.clone(), output_geometry.loc, false); // map_element also configures size
+            window.set_activated(true);
+            space_modify_guard.raise_element(&window, true);
+            drop(space_modify_guard);
+
+            info!(surface = ?surface_id, "Configuring fullscreen on output {:?} with geometry {:?}", output_handle.name(), output_geometry);
+        } else {
+            drop(space_guard);
+            warn!(surface = ?surface_id, "No output found to make window fullscreen. Ignoring request.");
+            new_configure_state.fullscreen = false;
+        }
+    } else {
+        // Un-fullscreen
+        new_configure_state.fullscreen = false;
+        // TODO: Restore pre-fullscreen size and position from Window UserData.
+        // For now, if not maximized, it might keep its current size or client might suggest one.
+        if !new_configure_state.maximized {
+             new_configure_state.size = Some(window.geometry().size); // Example: keep current size
+        }
+        info!(surface = ?surface_id, "Disabling fullscreen.");
     }
+
+    let configure = Configure {
+        surface: toplevel.xdg_surface().clone(),
+        state: new_configure_state.clone(),
+        serial: SERIAL_COUNTER.next_serial(),
+    };
+    toplevel.send_configure(configure);
+    state.foreign_toplevel_manager_state.lock().unwrap().window_state_changed(&window);
 }
 
+/// Handles a `set_maximized` request from an XDG toplevel client.
 pub fn handle_xdg_toplevel_set_maximized(state: &mut DesktopState, toplevel: &XdgToplevel, maximized: bool) {
-    info!(surface = ?toplevel.xdg_surface().wl_surface().id(), maximized, "XDG Toplevel set_maximized request");
-    // Similar logic to set_fullscreen:
-    // Update internal state, calculate new geometry, send configure.
-    if let Some(window) = state.space.elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() {
-        let mut current_state = window.toplevel().unwrap().current_state();
-        current_state.maximized = maximized;
+    let surface_id = toplevel.xdg_surface().wl_surface().id();
+    info!(surface = ?surface_id, maximized, "XDG Toplevel set_maximized request");
 
-        // window.set_maximized(maximized);
-        // toplevel.set_maximized(maximized); // If Smithay API supports this directly
-        // toplevel.send_pending_configure();
-        let configure = Configure {
-            surface: toplevel.xdg_surface().clone(),
-            state: current_state,
-            serial: SERIAL_COUNTER.next_serial(),
-        };
-        toplevel.send_configure(configure);
+    let Some(window) = state.space.lock().unwrap().elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() else {
+        warn!(surface = ?surface_id, "Failed to find window in space for set_maximized request.");
+        return;
+    };
+
+    let mut new_configure_state = window.toplevel().unwrap().current_state();
+
+    if maximized {
+        let space_guard = state.space.lock().unwrap();
+        let target_output = space_guard.outputs_for_element(&window).first().cloned()
+            .or_else(|| space_guard.outputs().next().cloned());
+
+        if let Some(output_handle) = target_output {
+            // TODO: Get available workspace area for the output, respecting panels and other layer shell surfaces.
+            let output_geometry = space_guard.output_geometry(&output_handle).unwrap_or_else(|| {
+                warn!("Could not get geometry for output {:?}, using fallback maximized size.", output_handle.name());
+                Rectangle::from_loc_and_size((0,0), (1280, 720))
+            });
+            drop(space_guard);
+
+            // TODO: Store pre-maximized state.
+            new_configure_state.size = Some(output_geometry.size); // Maximize to full output/workspace area
+            new_configure_state.maximized = true;
+            new_configure_state.fullscreen = false;
+
+            state.space.lock().unwrap().map_element(window.clone(), output_geometry.loc, false);
+            info!(surface = ?surface_id, "Configuring maximized on output {:?} with geometry {:?}", output_handle.name(), output_geometry);
+        } else {
+            drop(space_guard);
+            warn!(surface = ?surface_id, "No output found to maximize window on. Ignoring request.");
+            new_configure_state.maximized = false;
+        }
+    } else {
+        // Un-maximize
+        new_configure_state.maximized = false;
+        // TODO: Restore pre-maximized size and position.
+        info!(surface = ?surface_id, "Disabling maximized.");
     }
+
+    let configure = Configure {
+        surface: toplevel.xdg_surface().clone(),
+        state: new_configure_state.clone(),
+        serial: SERIAL_COUNTER.next_serial(),
+    };
+    toplevel.send_configure(configure);
+    state.foreign_toplevel_manager_state.lock().unwrap().window_state_changed(&window);
 }
 
+/// Handles a `set_minimized` request from an XDG toplevel client.
 pub fn handle_xdg_toplevel_set_minimized(state: &mut DesktopState, toplevel: &XdgToplevel) {
-    info!(surface = ?toplevel.xdg_surface().wl_surface().id(), "XDG Toplevel set_minimized request");
-    // Minimizing typically involves:
-    // 1. Unmapping the window from the screen (state.space.unmap_elem(&window)).
-    // 2. Storing its state so it can be restored.
-    // 3. Notifying the client (though xdg_toplevel doesn't have a "minimized" state to send in configure).
-    //    Minimization is mostly a compositor-side concept reflected by the window not being visible.
-    if let Some(window) = state.space.elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() {
-        // window.set_minimized(true); // Update your internal state
-        state.space.unmap_elem(&window);
-        info!(surface = ?toplevel.xdg_surface().wl_surface().id(), "Window minimized and unmapped.");
-        // Optionally, send a configure with activated = false if it was active
-        let mut current_state = window.toplevel().unwrap().current_state();
-        current_state.activated = false; // Deactivate on minimize
-        let configure = Configure {
-            surface: toplevel.xdg_surface().clone(),
-            state: current_state,
-            serial: SERIAL_COUNTER.next_serial(),
-        };
-        toplevel.send_configure(configure);
+    let surface_id = toplevel.xdg_surface().wl_surface().id();
+    info!(surface = ?surface_id, "XDG Toplevel set_minimized request");
+
+    let Some(window) = state.space.lock().unwrap().elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() else {
+        warn!(surface = ?surface_id, "Failed to find window in space for set_minimized request.");
+        return;
+    };
+
+    // Unmap the element from the space.
+    state.space.lock().unwrap().unmap_elem(&window);
+    info!(surface = ?surface_id, "Window minimized and unmapped.");
+    // Notify foreign toplevels that the window is unmapped (effectively closed from their view or minimized).
+    state.foreign_toplevel_manager_state.lock().unwrap().window_unmapped(&window);
+
+    let mut current_xdg_state = window.toplevel().unwrap().current_state();
+    current_xdg_state.activated = false; // Deactivate on minimize
+
+    let configure = Configure {
+        surface: toplevel.xdg_surface().clone(),
+        state: current_xdg_state.clone(),
+        serial: SERIAL_COUNTER.next_serial(),
+    };
+    toplevel.send_configure(configure);
+    // Also notify state change (e.g. !activated)
+    state.foreign_toplevel_manager_state.lock().unwrap().window_state_changed(&window);
+}
+
+/// Handles an interactive move request for an XDG toplevel.
+pub fn handle_xdg_toplevel_move(state: &mut DesktopState, toplevel: &XdgToplevel, seat_resource: &WlSeat, _serial: Serial) {
+    let surface_id = toplevel.xdg_surface().wl_surface().id();
+    info!(surface = ?surface_id, "XDG Toplevel move request");
+
+    let _smithay_seat = match Seat::from_resource(seat_resource) {
+        Ok(s) => s,
+        Err(_) => {
+            warn!("Invalid seat resource in move request for toplevel {:?}", surface_id);
+            return;
+        }
+    };
+    if let Some(_window) = state.space.lock().unwrap().elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() {
+        // TODO: Implement interactive move logic using Seat::start_pointer_grab
+        // This involves creating a custom grab handler.
+        warn!("Interactive move for toplevel {:?} not yet fully implemented.", surface_id);
     }
 }
 
-pub fn handle_xdg_toplevel_move(state: &mut DesktopState, toplevel: &XdgToplevel, seat: &WlSeat, serial: Serial) {
-    info!(surface = ?toplevel.xdg_surface().wl_surface().id(), "XDG Toplevel move request");
-    // Initiate an interactive move operation.
-    // This usually involves:
-    // 1. Getting the Smithay Seat from WlSeat.
-    // 2. Starting a pointer grab if not already active (e.g., implicit grab from button press).
-    // 3. Storing the window being moved and the initial pointer position.
-    // 4. On subsequent pointer motion events, updating the window's position.
-    // 5. On pointer button release, finalizing the move.
-    // Smithay's Seat::start_grab might be used, and the grab handler updates window position.
-    // DesktopState would need to store which window is currently being interactively moved/resized.
-    let smithay_seat = Seat::from_resource(seat).unwrap(); // Get Smithay Seat
-    if let Some(window) = state.space.elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() {
-        // state.start_interactive_move(window, smithay_seat, serial); // Your custom logic
-        warn!("Interactive move not yet fully implemented.");
-    }
-}
-
+/// Handles an interactive resize request for an XDG toplevel.
 pub fn handle_xdg_toplevel_resize(
     state: &mut DesktopState,
     toplevel: &XdgToplevel,
-    seat: &WlSeat,
-    serial: Serial,
+    seat_resource: &WlSeat,
+    _serial: Serial,
     edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
 ) {
-    info!(surface = ?toplevel.xdg_surface().wl_surface().id(), ?edges, "XDG Toplevel resize request");
-    // Initiate an interactive resize operation. Similar to move.
-    // The `edges` indicate which edges/corners are being dragged.
-    let smithay_seat = Seat::from_resource(seat).unwrap();
-    if let Some(window) = state.space.elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() {
-        // state.start_interactive_resize(window, smithay_seat, serial, edges); // Your custom logic
-        warn!("Interactive resize not yet fully implemented.");
+    let surface_id = toplevel.xdg_surface().wl_surface().id();
+    info!(surface = ?surface_id, ?edges, "XDG Toplevel resize request");
 
-        // During interactive resize, the compositor sends configure events with the new size.
-        // The client should redraw and ack_configure.
-        // The toplevel state's `resizing` flag should be true.
-        let mut current_state = window.toplevel().unwrap().current_state();
-        current_state.resizing = true; // Indicate resizing is in progress
-        // current_state.size = Some(new_size); // This would be set during the grab
+    let _smithay_seat = match Seat::from_resource(seat_resource) {
+        Ok(s) => s,
+        Err(_) => {
+            warn!("Invalid seat resource in resize request for toplevel {:?}", surface_id);
+            return;
+        }
+    };
+    if let Some(window) = state.space.lock().unwrap().elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.xdg_surface().wl_surface())).cloned() {
+        // TODO: Implement interactive resize logic using Seat::start_pointer_grab
+        warn!("Interactive resize for toplevel {:?} not yet fully implemented.", surface_id);
+
+        let mut current_xdg_state = window.toplevel().unwrap().current_state();
+        current_xdg_state.resizing = true;
+        // The actual size will be updated during the grab.
         let configure = Configure {
             surface: toplevel.xdg_surface().clone(),
-            state: current_state,
-            serial: SERIAL_COUNTER.next_serial(), // A new serial for this configure
+            state: current_xdg_state,
+            serial: SERIAL_COUNTER.next_serial(),
         };
         toplevel.send_configure(configure);
+        state.foreign_toplevel_manager_state.lock().unwrap().window_state_changed(&window);
     }
 }
 
+/// Handles a request to show the window menu for an XDG toplevel.
 pub fn handle_xdg_toplevel_show_window_menu(
-    state: &mut DesktopState,
+    _state: &mut DesktopState,
     toplevel: &XdgToplevel,
-    seat: &WlSeat,
-    serial: Serial,
+    _seat: &WlSeat,
+    _serial: Serial,
     position: Point<i32, Logical>,
 ) {
     info!(surface = ?toplevel.xdg_surface().wl_surface().id(), ?position, "XDG Toplevel show_window_menu request");
-    // Display a window menu (e.g., right-click context menu) at the given position.
-    // This is highly compositor-specific.
-    warn!("Show window menu not implemented.");
+    // NovaDE would need its own UI logic (e.g., a custom Layer Shell surface) to display a menu.
+    warn!("Show window menu not implemented for toplevel {:?}", toplevel.xdg_surface().wl_surface().id());
 }
 
-
-// --- Handlers for XDG Popup Requests ---
-
+/// Handles a grab request for an XDG popup.
 pub fn handle_xdg_popup_grab(
-    state: &mut DesktopState,
+    _state: &mut DesktopState, // Might need state to access PopupManager or Seat
     popup: &XdgPopup,
-    seat: &WlSeat,
-    serial: Serial,
+    _seat: &WlSeat, // The seat that initiated the grab
+    _serial: Serial,
 ) {
     info!(surface = ?popup.xdg_surface().wl_surface().id(), "XDG Popup grab request");
-    // Handle popup grabs. This is complex and involves managing input focus related to the popup.
-    // Smithay's PopupManager and Seat::start_grab might be involved.
-    // Often, a grab on a popup means subsequent pointer events are confined to it or its parent hierarchy.
-    // The `XdgShellHandler::grab` or `PopupManagerHandler::grab_xdg_popup` in Smithay 0.30 handles this.
-    warn!("Popup grab not yet fully implemented via this handler. Check PopupManagerHandler.");
+    // This is complex. Smithay's PopupManager and XdgShellHandler::grab (on DesktopState)
+    // typically handle the grab initiation and input routing.
+    warn!("Popup grab for {:?} not yet fully implemented via this helper. Relies on XdgShellHandler/PopupManager.", popup.xdg_surface().wl_surface().id());
 }
 
+/// Handles a reposition request for an XDG popup.
 pub fn handle_xdg_popup_reposition(
-    state: &mut DesktopState,
+    _state: &mut DesktopState, // Might need state to access PopupManager
     popup: &XdgPopup,
-    positioner: smithay::wayland::shell::xdg::XdgPositionerUserData, // Smithay 0.30 type
-    token: u32,
+    _positioner: smithay::wayland::shell::xdg::XdgPositionerUserData,
+    _token: u32,
 ) {
-    info!(surface = ?popup.xdg_surface().wl_surface().id(), ?token, "XDG Popup reposition request");
-    // Reposition the popup based on the new positioner rules.
-    // Smithay's PopupManager likely has a method for this.
-    // state.popups.reposition_popup(popup.xdg_surface(), positioner_resource, token);
-    // The XdgShellHandler::reposition_request in Smithay 0.30 handles this.
-    warn!("Popup reposition not yet fully implemented via this handler. Check XdgShellHandler.");
+    info!(surface = ?popup.xdg_surface().wl_surface().id(), ?_token, "XDG Popup reposition request");
+    // Smithay's PopupManager should handle repositioning based on the new token.
+    // The XdgShellHandler::reposition_request (on DesktopState) is the entry point.
+    warn!("Popup reposition for {:?} not yet fully implemented via this helper. Relies on XdgShellHandler/PopupManager.", popup.xdg_surface().wl_surface().id());
 }
 
-
-// This is a helper, actual commit handling for wl_surface is usually in handlers.rs
-mod compositor {
-    pub mod handlers {
-        use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-        use crate::compositor::state::DesktopState;
-        pub fn handle_surface_commit(_state: &mut DesktopState, _surface: &WlSurface) {
-            // actual implementation would live in handlers.rs
-        }
-    }
-}
-
-// If not using the delegate_xdg_shell! macro, you would need to implement
-// wayland_server::GlobalHandler for XdgWmBase and wayland_server::RequestHandler
-// for XdgWmBase, XdgSurface, XdgToplevel, XdgPopup, XdgPositioner.
-// These implementations would then call the `handle_...` functions defined above.
-// Smithay 0.30.0 provides XdgShellState which handles much of this when you
-// call its ::new_global method and then delegate to it.
-// The functions above are conceptual helpers for what those delegates would do.
-// Ensure that DesktopState correctly implements smithay::wayland::shell::xdg::XdgShellHandler
-// (usually via the delegate_xdg_shell!(DesktopState); macro in state.rs or core.rs).
-// The methods of that trait will be the entry points called by Smithay.
-// Example:
-// impl XdgShellHandler for DesktopState {
-//     fn xdg_shell_state(&mut self) -> &mut XdgShellState { &mut self.xdg_shell_state }
-//
-//     fn new_toplevel(&mut self, surface: &WlSurface, xdg_toplevel: XdgToplevel) {
-//         handle_new_xdg_toplevel(self, surface.clone(), xdg_toplevel);
-//     }
-//     // ... other XdgShellHandler methods ...
-// }
-// This pattern applies to all the requests. The XdgShellHandler trait methods in DesktopState
-// would call these functions.
+// Note on window destruction for foreign_toplevel:
+// When an XDG Toplevel is destroyed, XdgShellHandler::toplevel_destroyed on DesktopState
+// (in handlers.rs) is called. This method *must* call
+// state.foreign_toplevel_manager_state.lock().unwrap().window_unmapped(&window);
+// to notify external clients. This is now included in the XdgShellHandler::toplevel_destroyed override.
