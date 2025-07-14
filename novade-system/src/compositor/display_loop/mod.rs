@@ -93,7 +93,7 @@ pub fn run_compositor_event_loop() -> Result<(), Box<dyn std::error::Error>> {
                 let wgpu_renderer_arc = Arc::new(std::sync::Mutex::new(renderer));
                 // desktop_state.active_renderer = Some(wgpu_renderer_arc.clone() as Arc<std::sync::Mutex<dyn FrameRenderer>>);
                 // desktop_state.wgpu_renderer_concrete = Some(wgpu_renderer_arc);
-                // desktop_state.active_renderer_type = crate::compositor::core::state::ActiveRendererType::Wgpu;
+                // desktop_state.active_renderer_type = crate::compositor::state::ActiveRendererType::Wgpu;
                 info!("NovaWgpuRenderer initialized and would be set as active_renderer in DesktopState.");
             }
             Err(e) => {

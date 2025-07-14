@@ -15,7 +15,7 @@ pub mod xdg_surface; // ANCHOR: AddXdgSurfaceModule
 pub use errors::XdgShellError;
 pub use types::*; // Re-export types like ManagedWindow, XdgSurfaceUserData
 
-use crate::compositor::core::state::DesktopState;
+use crate::compositor::state::DesktopState;
 use smithay::reexports::wayland_server::{
     Client, DisplayHandle, GlobalDispatch, DataInit, New, Resource, Dispatch, ClientData,
 };
@@ -335,7 +335,7 @@ pub fn create_xdg_shell_global(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compositor::core::state::DesktopState;
+    use crate::compositor::state::DesktopState;
     use crate::compositor::shell::xdg_shell::types::{XdgSurfaceUserData, XdgSurfaceRole, XdgSurfaceState};
     use smithay::reexports::wayland_server::{
         Display, DisplayHandle, Client, protocol::wl_surface::WlSurface, UserData, Main,

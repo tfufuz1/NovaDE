@@ -8,7 +8,7 @@ use smithay::{
     output::Output,
     utils::{Rectangle, BufferCoord, Transform}, // BufferCoord and Transform might be needed for damage or specific captures
 };
-use crate::compositor::core::state::NovadeCompositorState;
+use crate::compositor::state::NovadeCompositorState;
 // AsRawFd might not be strictly needed if shm::with_buffer_data_and_format is used, which abstracts fd handling.
 // use std::os::unix::io::AsRawFd; 
 

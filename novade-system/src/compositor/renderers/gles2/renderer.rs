@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 // New imports for CompositorRenderer
 use crate::compositor::render::renderer::{CompositorRenderer, RenderableTexture as NewRenderableTexture};
-use crate::compositor::core::state::DesktopState;
+use crate::compositor::state::DesktopState;
 use crate::compositor::render::dmabuf_importer::DmabufImporter;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::output::Output;

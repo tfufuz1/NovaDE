@@ -3,7 +3,7 @@ use smithay::{
     input::Seat,
     reexports::libinput, // To access libinput::DeviceCapability more directly if needed
 };
-use crate::compositor::core::state::DesktopState;
+use crate::compositor::state::DesktopState;
 
 pub fn process_input_event(
     desktop_state: &mut DesktopState,

@@ -4,7 +4,7 @@ use anyhow::Result;
 use calloop::LoopHandle;
 use smithay::reexports::wayland_server::DisplayHandle;
 
-use crate::compositor::core::state::DesktopState; // Assuming DesktopState is here
+use crate::compositor::state::DesktopState; // Assuming DesktopState is here
 
 // Forward declare winit_backend and drm_backend modules
 pub mod winit_backend;

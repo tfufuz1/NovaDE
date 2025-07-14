@@ -1183,7 +1183,7 @@ impl XdgDecorationHandler for DesktopState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compositor::core::state::DesktopState;
+    use crate::compositor::state::DesktopState;
     use crate::compositor::shell::xdg_shell::types::{ManagedWindow, WindowState, DomainWindowIdentifier, WindowLayer};
     use smithay::reexports::wayland_server::{
         Display, DisplayHandle, Client, protocol::wl_surface::WlSurface, globals::GlobalData,
@@ -1977,7 +1977,7 @@ mod tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compositor::core::state::DesktopState; // Changed from NovadeCompositorState
+    use crate::compositor::state::DesktopState; // Changed from NovadeCompositorState
     use crate::compositor::shell::xdg_shell::types::{ManagedWindow, WindowState, DomainWindowIdentifier, WindowManagerData, WindowLayer}; // Changed path
     use smithay::reexports::wayland_server::{Display, DisplayHandle, Client, protocol::wl_surface::WlSurface, globals::GlobalData, UserData, backend::{ClientId, GlobalId}};
     use smithay::reexports::calloop::EventLoop;

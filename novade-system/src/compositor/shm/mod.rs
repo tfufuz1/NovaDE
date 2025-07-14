@@ -4,7 +4,7 @@ pub mod buffer_access;
 pub use errors::ShmError;
 pub use buffer_access::with_shm_buffer_contents;
 
-use crate::compositor::core::state::DesktopState;
+use crate::compositor::state::DesktopState;
 use smithay::reexports::wayland_server::{DisplayHandle, GlobalDispatch, DataInit, Client, New};
 use smithay::reexports::wayland_server::protocol::wl_shm::WlShm;
 use smithay::wayland::shm::ShmState;

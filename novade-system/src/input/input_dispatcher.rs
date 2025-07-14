@@ -9,7 +9,7 @@ use smithay::{
     },
     utils::{SERIAL_COUNTER, Serial, Logical, Point}, // SERIAL_COUNTER for event serials
 };
-use crate::compositor::core::state::DesktopState;
+use crate::compositor::state::DesktopState;
 // use crate::input::keyboard_layout::KeyboardLayoutManager; // Will be needed later
 
 pub struct InputDispatcher;

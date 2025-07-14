@@ -8,7 +8,7 @@ use smithay::{
     desktop::Space,
 };
 // Corrected: NovadeCompositorState should be DesktopState
-use crate::compositor::core::state::DesktopState;
+use crate::compositor::state::DesktopState;
 
 impl OutputHandler for DesktopState {
     fn output_state(&mut self) -> &mut OutputManagerState {
@@ -83,7 +83,7 @@ impl OutputHandler for DesktopState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compositor::core::state::DesktopState; // Assuming NovadeCompositorState is DesktopState
+    use crate::compositor::state::DesktopState; // Assuming NovadeCompositorState is DesktopState
     use smithay::{
         reexports::calloop::EventLoop,
         reexports::wayland_server::Display,
