@@ -575,12 +575,39 @@ impl DesktopState {
             tracing::warn!("Failed to add touch capability to seat in DesktopState::new: {}", e);
         }
 
-        let dmabuf_state = DmabufState::new(); // Already present
-        let dmabuf_importer = DmabufImporter::new().expect("Failed to create DmabufImporter"); // Added
-        let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
-        let screencopy_state = ScreencopyState::new::<Self>(&display_handle, None); // Initialize ScreencopyState
+        let dmabuf_state = DmabufState::new();
+        let dmabuf_importer = DmabufImporter::new().expect("Failed to create DmabufImporter");
 
-        Ok(Self { // Added Ok() for SystemResult
+        // ANCHOR: DmabufGlobalCreation
+        // TODO: Query these formats/modifiers from the active renderer instead of hardcoding.
+        // Common formats: ARGB8888, XRGB8888. Modifier: LINEAR.
+        // These are just examples and might not be optimal or correct for all hardware.
+        let default_dmabuf_formats = vec![
+            smithay::backend::allocator::Fourcc::Argb8888,
+            smithay::backend::allocator::Fourcc::Xrgb8888,
+        ];
+        // For simplicity, only advertise LINEAR modifier. Realistically, this needs to come from GBM/EGL/Vulkan.
+        let default_dmabuf_modifiers = vec![drm_fourcc::DrmFormatModifier::Linear];
+
+        // Create and register the DmabufGlobal.
+        // The DmabufGlobal itself doesn't need to be stored in DesktopState typically,
+        // as Smithay handles client binding to it once registered.
+        // The DmabufState is what's used by the DmabufHandler.
+        let _dmabuf_global = display_handle.create_global::<DesktopState, DmabufGlobal, _>(
+            4, // zwp_linux_dmabuf_v1 version 4 is common
+            smithay::wayland::dmabuf::DmabufGlobalData::new(
+                default_dmabuf_formats, // List of supported FourCCs
+                default_dmabuf_modifiers, // List of supported modifiers for each format (or global)
+                false // No dmabuf feedback for now
+            )
+        );
+        tracing::info!("Created and registered DmabufGlobal (zwp_linux_dmabuf_v1).");
+        // ANCHOR_END: DmabufGlobalCreation
+
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
+        let screencopy_state = ScreencopyState::new::<Self>(&display_handle, None);
+
+        Ok(Self {
             display_handle,
             loop_handle,
             clock,
