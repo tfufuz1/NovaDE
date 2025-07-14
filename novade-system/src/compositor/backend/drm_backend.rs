@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use calloop::LoopHandle;
 use smithay::reexports::wayland_server::DisplayHandle;
 
-use crate::compositor::core::state::DesktopState;
+use crate::compositor::state::DesktopState;
 use super::CompositorBackend; // Super refers to novade-system/src/compositor/backend/mod.rs
 
 pub struct DrmBackend {

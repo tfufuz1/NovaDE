@@ -24,7 +24,7 @@ use std::fmt;
 use super::renderer::{
     CompositorRenderer, RenderableTexture, RenderError, RenderElement,
 };
-use crate::compositor::core::state::DesktopState; // For import methods
+use crate::compositor::state::DesktopState; // For import methods
 use smithay::reexports::wayland_server::protocol::{
     wl_buffer::WlBuffer,
     wl_surface::WlSurface,

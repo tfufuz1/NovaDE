@@ -20,7 +20,7 @@ use smithay::input::{Seat as SmithaySeat, KeyboardHandle, PointerHandle, TouchHa
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Clock, SERIAL_COUNTER, Serial, Logical, Point, Time};
 use smithay::backend::input::{self as smithay_input, Axis, AxisSource, ButtonState as SmithayButtonState, KeyState as SmithayKeyState, MouseButton};
-use crate::compositor::core::state::DesktopState;
+use crate::compositor::state::DesktopState;
 use smithay::input::pointer::{MotionEvent, ButtonEvent as SmithayPointerButtonEvent, AxisEvent as SmithayPointerAxisEvent, AxisFrame};
 use smithay::input::touch::{DownEvent, UpEvent, MotionEvent as TouchMotionEvent, TouchSlotId};
 use std::ffi::CString;
@@ -509,7 +509,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::cell::RefCell;
     use std::collections::HashMap; // For DesktopState fields
-    // use crate::compositor::core::state::DesktopState as RealDesktopState; // To avoid naming conflict - Not needed for this mock
+    // use crate::compositor::state::DesktopState as RealDesktopState; // To avoid naming conflict - Not needed for this mock
     use crate::compositor::input::error::InputError; // For InputHandler
     use xkbcommon::xkb::{self, RuleNames, KEY_a}; // For test RMLVO
     use std::ffi::CString;

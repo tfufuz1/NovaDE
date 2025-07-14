@@ -15,7 +15,7 @@ use smithay::reexports::wayland_server::protocol::{
 };
 use smithay::utils::{Physical, Rectangle, Size, Point, Transform};
 use smithay::backend::allocator::{Fourcc, dmabuf::Dmabuf};
-use crate::compositor::core::state::DesktopState; // Assuming DesktopState remains relevant
+use crate::compositor::state::DesktopState; // Assuming DesktopState remains relevant
 use raw_window_handle::DisplayHandle; // For the new() method
 use std::any::Any;
 use std::fmt;

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::compositor::shell::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
 use crate::compositor::workspaces::{CompositorWorkspace, TilingLayout};
-use crate::compositor::core::state::DesktopState; // Needed for apply_active_tiling_layout
+use crate::compositor::state::DesktopState; // Needed for apply_active_tiling_layout
 
 // Import SSD constants
 use crate::compositor::shell::xdg_shell::types::{DEFAULT_BORDER_SIZE, DEFAULT_TITLE_BAR_HEIGHT};
