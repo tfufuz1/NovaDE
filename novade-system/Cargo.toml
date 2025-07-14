@@ -9,7 +9,7 @@ novade-domain = { path = "../novade-domain" }
 async-trait = "0.1.68"
 tokio = { version = "1.45.1", features = ["full"] } # Task requirement: Tokio 1.45.1
 # Smithay and Wayland versions
-smithay = { version = "0.4.0", default-features = false, features = [
+smithay = { version = "0.6.0", default-features = false, features = [
     "backend_libinput",     # For libinput backend
     "backend_udev",         # For udev backend and KMS/DRM
     "backend_winit",        # For running in a window (testing/development)
