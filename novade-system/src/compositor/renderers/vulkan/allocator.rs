@@ -267,56 +267,28 @@ impl Allocator {
 #[cfg(target_os = "linux")]
 impl Allocator {
     #[allow(clippy::too_many_arguments)]
-    pub fn import_dma_buf_as_image( 
+    pub fn import_dma_buf_as_image(
         &self,
         fd: std::os::unix::io::RawFd,
-        _width: u32,
-        _height: u32,
-        _vulkan_format: vk::Format,
-        _drm_format_modifier: Option<u64>,
-        _usage: vk::ImageUsageFlags,
-        _instance: &ash::Instance, // Raw ash::Instance
-        _physical_device: vk::PhysicalDevice, // Raw vk::PhysicalDevice
-        _device: &ash::Device, // Raw ash::Device for actual import calls
-    ) -> Result<(vk::Image, vk::DeviceMemory)> {
-        // THIS IS A PLACEHOLDER IMPLEMENTATION
-        // A real implementation would involve:
-        // 1. Querying memory FD properties using vkGetMemoryFdPropertiesKHR.
-        // 2. Creating a vk::Image with appropriate tiling and usage.
-        // 3. Getting image memory requirements (vkGetImageMemoryRequirements2).
-        // 4. Allocating vk::DeviceMemory with vk::ImportMemoryFdInfoKHR in pNext chain.
-        // 5. Binding the image to the imported memory (vkBindImageMemory2).
-        // 6. Handling format modifiers if present and supported.
-        error!(
-            "Placeholder: Allocator::import_dma_buf_as_image is not fully implemented. \
-            Returning VulkanError::FeatureNotSupported. DMABUF import will fail."
-        );
-        // To make it compile, we could return dummy handles, but an error is more honest.
-        Err(VulkanError::FeatureNotSupported(
-            "DMABUF import via Allocator::import_dma_buf_as_image".to_string()
-        ))
         width: u32,
         height: u32,
         vulkan_format: vk::Format,
         drm_format_modifier: Option<u64>,
         image_usage: vk::ImageUsageFlags,
-        instance_ash: &ash::Instance, 
+        instance_ash: &ash::Instance,
         physical_device_vk: vk::PhysicalDevice,
         device_ash: &ash::Device,
-        // We need enabled extension checks here, or assume they are checked by caller/globally
-        // For example, by checking fields in PhysicalDeviceInfo or LogicalDevice that store this.
-        // For now, proceeding with direct calls assuming extensions are loaded if functions are callable.
     ) -> Result<(vk::Image, vk::DeviceMemory)> {
+        // This is the actual implementation for importing a DMABUF file descriptor
+        // into a Vulkan image and memory.
 
-        // Check required instance extensions (usually done at instance creation)
-        // e.g. VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME
-        // Check required device extensions (usually done at device creation)
-        // e.g. VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, 
-        //      VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME
-        //      VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME (if modifier is Some)
+        // Assumptions: Required extensions are enabled on the logical device:
+        // - VK_KHR_external_memory_fd
+        // - VK_EXT_external_memory_dma_buf
+        // - VK_EXT_image_drm_format_modifier (if a modifier is used)
 
         let mut external_memory_image_info = vk::ExternalMemoryImageCreateInfo::builder()
-            .handle_types(vk::ExternalMemoryHandleTypeFlagsKHR::DMA_BUF_EXT); // Using KHR version for ash typically
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
 
         let mut image_info_builder = vk::ImageCreateInfo::builder()
             .image_type(vk::ImageType::TYPE_2D)
@@ -325,89 +297,61 @@ impl Allocator {
             .mip_levels(1)
             .array_layers(1)
             .samples(vk::SampleCountFlags::TYPE_1)
-            // Tiling depends on whether a modifier is used.
-            // If modifier is Some, TILING_DRM_FORMAT_MODIFIER_EXT is required.
-            // Otherwise, OPTIMAL is common.
             .tiling(if drm_format_modifier.is_some() { vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT } else { vk::ImageTiling::OPTIMAL })
-            .usage(image_usage) // e.g., vk::ImageUsageFlags::SAMPLED
-            .initial_layout(vk::ImageLayout::UNDEFINED) // Or PREINITIALIZED if data is already there (not for import)
+            .usage(image_usage)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
-            // .push_next(&mut external_memory_image_info); // This should be added to image_info
 
         let mut image_drm_format_modifier_info;
         if let Some(modifier) = drm_format_modifier {
-            // TODO: Check if VK_EXT_image_drm_format_modifier is enabled on device_ash
-            // This would typically be stored in LogicalDevice or PhysicalDeviceInfo
-            // if !logical_device.enabled_extensions.contains(&ash::extensions::ext::ImageDrmFormatModifier::name()) {
-            //    return Err(VulkanError::Message("DRM format modifier provided, but extension not enabled.".to_string()));
-            // }
             log::debug!("Using DRM format modifier: {}", modifier);
             image_drm_format_modifier_info = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::builder()
                 .drm_format_modifier(modifier)
-                .drm_format_modifier_plane_count(1); // Assuming single plane for simplicity here
+                .drm_format_modifier_plane_count(1); // Assuming single plane for simplicity
             
-            // Chain external_memory_image_info and image_drm_format_modifier_info
             external_memory_image_info = external_memory_image_info.push_next(&mut image_drm_format_modifier_info);
         }
         image_info_builder = image_info_builder.push_next(&mut external_memory_image_info);
         
         let image_info = image_info_builder.build();
         let image = unsafe { device_ash.create_image(&image_info, None) }.map_err(|e| {
-            tracing::error!(
-                "Vulkan API error: Failed to create image for DMABUF import (fd: {}, format: {:?}, modifier: {:?}, dims: {}x{}). Error: {:?}",
-                fd, vulkan_format, drm_format_modifier, width, height, e
-            );
-            VulkanError::VkResult(e)
+            tracing::error!("Failed to create image for DMABUF import (fd: {}, format: {:?}). Error: {:?}", fd, vulkan_format, e);
+            VulkanError::ImageCreationError(e)
         })?;
 
         // Get memory requirements
-        // Adapting the dedicated allocation check from vulkanalia version
-        let mut dedicated_allocation_required = false;
-        let memory_requirements: vk::MemoryRequirements;
-
-        // TODO: Extension check for VK_KHR_get_memory_requirements2 and VK_KHR_dedicated_allocation
-        // (core in Vulkan 1.1, but good practice if targeting 1.0 + extensions)
-        // For ash, these might be part of KhrGetPhysicalDeviceProperties2 or similar.
-        // Simplified check:
         let mut dedicated_reqs = vk::MemoryDedicatedRequirements::builder();
         let mut memory_requirements2_builder = vk::MemoryRequirements2::builder().push_next(&mut dedicated_reqs);
-        
         unsafe { device_ash.get_image_memory_requirements2(
             &vk::ImageMemoryRequirementsInfo2::builder().image(image).build(),
             &mut memory_requirements2_builder
         )};
-        
-        let memory_requirements2_result = memory_requirements2_builder.build(); // Finalize the builder to get the struct
-        if dedicated_reqs.prefers_dedicated_allocation == vk::TRUE || dedicated_reqs.requires_dedicated_allocation == vk::TRUE {
-            dedicated_allocation_required = true;
-            log::debug!("DMA-BUF image {} dedicated allocation.", if dedicated_reqs.requires_dedicated_allocation != vk::FALSE {"requires"} else {"prefers"});
+        let memory_requirements = memory_requirements2_builder.build().memory_requirements;
+
+        let dedicated_allocation_required = dedicated_reqs.prefers_dedicated_allocation == vk::TRUE || dedicated_reqs.requires_dedicated_allocation == vk::TRUE;
+        if dedicated_allocation_required {
+            log::debug!("DMABUF image requires or prefers a dedicated allocation.");
         }
-        memory_requirements = memory_requirements2_result.memory_requirements;
 
-
-        // Allocate memory
+        // Allocate memory by importing the FD
         let mut import_memory_info = vk::ImportMemoryFdInfoKHR::builder()
-            .handle_type(vk::ExternalMemoryHandleTypeFlagsKHR::DMA_BUF_EXT)
+            .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
             .fd(fd);
+
+        let memory_type_index = self.find_memory_type_index(
+            memory_requirements.memory_type_bits,
+            vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            instance_ash,
+            physical_device_vk,
+        ).map_err(|e| {
+            unsafe { device_ash.destroy_image(image, None); }
+            e
+        })?;
 
         let mut memory_allocate_info_builder = vk::MemoryAllocateInfo::builder()
             .allocation_size(memory_requirements.size)
-            .memory_type_index(self.find_memory_type_index(
-                memory_requirements.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL, // DMA-BUFs are typically device local
-                instance_ash,
-                physical_device_vk,
-            ).map_err(|e| {
-                tracing::error!(
-                    "Failed to find suitable memory type for DMABUF image (fd: {}, format: {:?}, modifier: {:?}, image_req_bits: {:#x}). Error: {:?}",
-                    fd, vulkan_format, drm_format_modifier, memory_requirements.memory_type_bits, e
-                );
-                // It's important to clean up the created image if memory allocation fails
-                unsafe { device_ash.destroy_image(image, None); }
-                e // Return original error from find_memory_type_index
-            })?);
-        
-        memory_allocate_info_builder = memory_allocate_info_builder.push_next(&mut import_memory_info);
+            .memory_type_index(memory_type_index)
+            .push_next(&mut import_memory_info);
 
         let mut dedicated_alloc_info;
         if dedicated_allocation_required {
@@ -417,29 +361,22 @@ impl Allocator {
         
         let memory_allocate_info = memory_allocate_info_builder.build();
         let memory = unsafe { device_ash.allocate_memory(&memory_allocate_info, None) }.map_err(|e| {
-            tracing::error!(
-                "Vulkan API error: Failed to allocate memory for DMABUF import (fd: {}, format: {:?}, modifier: {:?}, size: {}). Error: {:?}",
-                fd, vulkan_format, drm_format_modifier, memory_requirements.size, e
-            );
-            unsafe { device_ash.destroy_image(image, None); } // Clean up image
+            tracing::error!("Failed to allocate memory for DMABUF import (fd: {}). Error: {:?}", fd, e);
+            unsafe { device_ash.destroy_image(image, None); }
             VulkanError::VkResult(e)
         })?;
 
         // Bind image memory
         if let Err(e) = unsafe { device_ash.bind_image_memory(image, memory, 0) } {
-            tracing::error!(
-                "Vulkan API error: Failed to bind memory for DMABUF image (fd: {}, format: {:?}, modifier: {:?}). Error: {:?}",
-                fd, vulkan_format, drm_format_modifier, e
-            );
+            tracing::error!("Failed to bind memory for DMABUF image (fd: {}). Error: {:?}", fd, e);
             unsafe {
-                device_ash.free_memory(memory, None); // Clean up allocated memory
-                device_ash.destroy_image(image, None); // Clean up image
+                device_ash.free_memory(memory, None);
+                device_ash.destroy_image(image, None);
             }
             return Err(VulkanError::VkResult(e));
         }
         
-        log::info!("Imported DMA-BUF (fd: {}) as VkImage ({:?}) with format {:?}, modifier {:?}", fd, image, vulkan_format, drm_format_modifier);
-
+        log::info!("Successfully imported DMA-BUF (fd: {}) as VkImage ({:?})", fd, image);
         Ok((image, memory))
     }
 }

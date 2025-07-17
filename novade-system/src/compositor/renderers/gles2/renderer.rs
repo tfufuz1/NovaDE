@@ -11,19 +11,7 @@ use smithay::{
 use std::sync::Arc; // <<<< CHANGED FROM std::rc::Rc
 use uuid::Uuid;
 
-// New imports for CompositorRenderer
-use crate::compositor::render::renderer::{CompositorRenderer, RenderableTexture as NewRenderableTexture};
-use crate::compositor::state::DesktopState;
-use crate::compositor::render::dmabuf_importer::DmabufImporter;
-use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::output::Output;
-use smithay::backend::allocator::dmabuf::Dmabuf;
-use crate::compositor::core::errors::CompositorError;
-
-// Old imports
-use crate::compositor::renderer_interface::abstraction::{
-    FrameRenderer as OldFrameRenderer, RenderableTexture as OldRenderableTexture, RenderElement as OldRenderElement, RendererError as OldRendererError,
-};
+// Old imports have been removed.
 use super::errors::Gles2RendererError; 
 use super::shaders::{
     compile_shader, link_program, FS_SOLID_SRC, FS_TEXTURE_SRC, VS_SOLID_SRC, VS_TEXTURE_SRC,
@@ -418,173 +406,76 @@ impl OldFrameRenderer for Gles2Renderer {
 }
 */
 
-impl CompositorRenderer for Gles2Renderer {
-    type Texture = Arc<Gles2Texture>;
+// The old `impl CompositorRenderer for Gles2Renderer` block has been removed.
 
-    fn new() -> Result<Self, CompositorError> {
-        Err(CompositorError::FeatureUnavailable(
-            "Gles2Renderer cannot be created through CompositorRenderer::new directly. It must be initialized by a backend.".to_string()
-        ))
+use crate::compositor::renderer_interface::abstraction::{FrameRenderer, RenderElement, RenderableTexture, RendererError, ClientBuffer, BufferContent, AbstractionBufferFormat, DmabufDescriptor, DmabufPlaneFormat};
+
+impl FrameRenderer for Gles2Renderer {
+    fn id(&self) -> Uuid {
+        self.internal_id
     }
 
-    fn render_frame(
+    fn render_frame<'a>(
         &mut self,
-        output: &Output,
-        surfaces: &[(&WlSurface, Rectangle<i32, Physical>)],
-        _dmabuf_importer: &DmabufImporter, // Not directly used if import is done via import_dmabuf method
-        desktop_state: &DesktopState,
-    ) -> Result<(), CompositorError> {
-        // output_geometry_physical derived from output, used for projection
-        let output_geometry_physical = output.current_mode().unwrap_or_else(|| {
-            let size_logical = output.current_geometry().unwrap().size;
-            let mode_size_physical = output.current_scale().scale_coords(size_logical);
-            smithay::output::Mode { size: mode_size_physical, refresh: 60_000 }
-        }).size;
-
-        let projection = orthographic_projection(
-            output_geometry_physical.w as f32,
-            output_geometry_physical.h as f32,
-        );
-
+        _elements: impl IntoIterator<Item = RenderElement<'a>>,
+        _output_geometry: Rectangle<i32, Physical>,
+        _output_scale: f64,
+    ) -> Result<(), RendererError> {
+        // The rendering logic will be moved to the compositor's core loop.
+        // This function will be called by the compositor, but the element processing
+        // and drawing will happen in a centralized place.
+        // For now, we just clear the screen.
         unsafe {
-            self.gl.use_program(Some(self.texture_shader_program));
-            // Set projection matrix once for all textured quads (surfaces, cursor)
-            self.gl.uniform_matrix_3_f32_slice(
-                &self.texture_shader_mvp_loc,
-                false, // Smithay GLES2 examples use false for transpose
-                &projection,
-            );
-            self.gl.uniform_1_i32(&self.texture_shader_sampler_loc, 0); // Use texture unit 0
-        }
-
-        for (surface_wl, geometry_physical) in surfaces {
-            if !surface_wl.is_alive() {
-                continue;
-            }
-
-            let surface_data_dyn = surface_wl.data_map().get::<Arc<std::sync::Mutex<crate::compositor::surface_management::SurfaceData>>>();
-
-            if let Some(surface_data_arc_mutex) = surface_data_dyn {
-                let surface_data = surface_data_arc_mutex.lock().unwrap(); // TODO: Handle Mutex poison
-                if let Some(texture_dyn_arc) = &surface_data.texture_handle {
-                    if let Some(gles_texture_arc) = texture_dyn_arc.as_any().downcast_ref::<Arc<Gles2Texture>>() {
-                        let gles_texture = gles_texture_arc.as_ref();
-
-                        if let Err(e) = gles_texture.bind(0) { // bind is from the old AbstractionRenderableTexture
-                            tracing::error!("Failed to bind GLES2 texture for surface {:?}: {:?}", surface_wl.id(), e);
-                            continue;
-                        }
-
-                        // Placeholder for actual drawing logic.
-                        // This needs to use geometry_physical to position/scale the quad.
-                        // The current `render_quad_internal` is too basic and assumes direct vertex coords.
-                        // A real solution involves setting up a model matrix per surface based on `geometry_physical`,
-                        // then combining with `projection` for the final MVP, or sending transformed vertices.
-                        // For now, this is a conceptual draw call.
-                        unsafe {
-                            // This is a simplified draw call. A proper implementation would setup VBOs,
-                            // vertex attributes, and use a model matrix within the shader or by transforming CPU-side.
-                            // The `geometry_physical` contains the location and size for the surface.
-                            // This current setup implies that the MVP matrix (`projection`) alone is used,
-                            // and vertices are expected in clip space, or `render_quad_internal` handles this.
-                            // The `render_quad_internal` is not equipped for this yet.
-                            // For now, we'll just call a placeholder draw.
-                            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                        }
-                        tracing::trace!("Conceptually rendered surface {:?} at {:?}", surface_wl.id(), geometry_physical);
-
-                    } else {
-                         tracing::warn!("Surface texture for {:?} is not Arc<Gles2Texture>", surface_wl.id());
-                    }
-                } else {
-                    // It's normal for a surface to not have a texture if it hasn't committed one yet.
-                    tracing::trace!("Surface {:?} has no texture_handle. Skipping.", surface_wl.id());
-                }
-            } else {
-                tracing::warn!("Surface {:?} has no SurfaceData (crate::compositor::surface_management). Skipping.", surface_wl.id());
-            }
-        }
-
-        // Render cursor
-        if desktop_state.current_cursor_status.lock().unwrap().is_visible() { // TODO: Handle Mutex poison
-            if let Some(cursor_texture_dyn_arc) = &desktop_state.active_cursor_texture {
-                if let Some(cursor_gles_texture_arc) = cursor_texture_dyn_arc.as_any().downcast_ref::<Arc<Gles2Texture>>() {
-                    let cursor_gles_texture = cursor_gles_texture_arc.as_ref();
-                    let cursor_size_physical = cursor_gles_texture.dimensions();
-
-                    let output_scale_f64 = output.current_scale().fractional_scale();
-                    let pointer_output_local_logical = desktop_state.pointer_location - output.current_geometry().unwrap().loc.to_f64();
-                    let cursor_pos_physical_on_output = pointer_output_local_logical.to_physical(output_scale_f64).to_i32_round();
-
-                    let hotspot_physical = desktop_state.cursor_hotspot.to_physical(output_scale_f64).to_i32_round();
-                    let final_cursor_pos_on_output = Point::from((cursor_pos_physical_on_output.x - hotspot_physical.x, cursor_pos_physical_on_output.y - hotspot_physical.y));
-
-                    let _cursor_rect_physical = Rectangle::from_loc_and_size(final_cursor_pos_on_output, cursor_size_physical);
-
-                    if let Err(e) = cursor_gles_texture.bind(0) {
-                        tracing::error!("Failed to bind cursor GLES2 texture: {:?}", e);
-                    } else {
-                        unsafe {
-                            // Placeholder draw call for cursor, similar to surfaces.
-                            // Needs proper geometry transformation based on _cursor_rect_physical.
-                            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                        }
-                        tracing::trace!("Conceptually rendered cursor at {:?}", _cursor_rect_physical);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn import_shm_buffer(
-        &mut self,
-        buffer: &WlBuffer, // Removed _
-        _surface: Option<&WlSurface>,
-        _desktop_state: &DesktopState,
-    ) -> Result<Self::Texture, CompositorError> {
-        self.import_shm_buffer_internal(buffer) // Call the refactored internal method
-            .map(Arc::new) // Wrap the Gles2Texture in Arc
-            .map_err(|e| CompositorError::Generic(format!("GLES2 SHM import failed: {:?}", e)))
-    }
-
-    fn import_dmabuf(
-        &mut self,
-        dmabuf: &Dmabuf, // Removed _
-        _surface: Option<&WlSurface>,
-    ) -> Result<Self::Texture, CompositorError> {
-        self.import_dmabuf_internal(dmabuf) // Call the refactored internal method
-            .map(Arc::new) // Wrap the Gles2Texture in Arc
-            .map_err(|e| CompositorError::DmabufImportFailed(format!("GLES2 DMABUF import failed: {:?}", e)))
-    }
-
-    fn begin_frame(&mut self, output_geometry: Rectangle<i32, Physical>) -> Result<(), CompositorError> {
-        unsafe {
-            self.gl.viewport(
-                output_geometry.loc.x,
-                output_geometry.loc.y,
-                output_geometry.size.w,
-                output_geometry.size.h,
-            );
-            // self.current_screen_size = output_geometry.size; // If Gles2Renderer still tracks this, update here.
-            let background_color = [0.1f32, 0.1, 0.1, 1.0];
-            self.gl.clear_color(background_color[0], background_color[1], background_color[2], background_color[3]);
+            self.gl.clear_color(0.1, 0.1, 0.1, 1.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
-
-            self.gl.enable(glow::BLEND);
-            self.gl.blend_func_separate(
-                glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA,
-                glow::ONE, glow::ONE_MINUS_SRC_ALPHA
-            );
         }
         Ok(())
     }
 
-    fn finish_frame(&mut self) -> Result<(), CompositorError> {
+    fn submit_and_present_frame(&mut self) -> Result<(), RendererError> {
+        if let Some(surface) = self.egl_surface {
+            self._egl_instance
+                .swap_buffers(self.egl_display, surface)
+                .map_err(|e| RendererError::BufferSwapFailed(e.to_string()))?;
+        }
         unsafe {
             self.gl.finish();
         }
         Ok(())
+    }
+
+    fn create_texture_from_shm(
+        &mut self,
+        buffer: &WlBuffer,
+    ) -> Result<Box<dyn RenderableTexture>, RendererError> {
+        let texture = self.import_shm_buffer_internal(buffer)
+            .map_err(|e| RendererError::Gles2Error(e.to_string()))?;
+        Ok(Box::new(texture))
+    }
+
+    fn create_texture_from_dmabuf(
+        &mut self,
+        dmabuf: &Dmabuf,
+    ) -> Result<Box<dyn RenderableTexture>, RendererError> {
+        let texture = self.import_dmabuf_internal(dmabuf)
+            .map_err(|e| RendererError::Gles2Error(e.to_string()))?;
+        Ok(Box::new(texture))
+    }
+
+    fn screen_size(&self) -> Size<i32, Physical> {
+        self.current_screen_size
+    }
+
+    fn upload_surface_texture(&mut self, _surface_id: novade_compositor_core::surface::SurfaceId, _client_buffer: &ClientBuffer<'_>) -> Result<Box<dyn RenderableTexture>, RendererError> {
+        Err(RendererError::Unsupported("upload_surface_texture not yet implemented for GLES2".to_string()))
+    }
+
+    fn apply_gamma_correction(&mut self, _gamma_value: f32) -> Result<(), RendererError> {
+        Err(RendererError::Unsupported("Gamma correction not supported by GLES2 renderer".to_string()))
+    }
+
+    fn apply_hdr_to_sdr_tone_mapping(&mut self, _max_luminance: f32, _exposure: f32) -> Result<(), RendererError> {
+        Err(RendererError::Unsupported("HDR to SDR tone mapping not supported by GLES2 renderer".to_string()))
     }
 }
 

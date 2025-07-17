@@ -106,7 +106,7 @@ use smithay::{
 };
 
 use crate::compositor::foreign_toplevel::ForeignToplevelManagerState;
-use crate::compositor::render::renderer::{CompositorRenderer, RenderableTexture};
+use crate::compositor::renderer_interface::abstraction::{FrameRenderer, RenderableTexture};
 use crate::compositor::shell::xdg_shell::types::{DomainWindowIdentifier, ManagedWindow};
 use crate::compositor::workspaces::{CompositorWorkspace, TilingLayout};
 use crate::compositor::outputs::OutputConfig;
@@ -114,6 +114,16 @@ use crate::input::keyboard::xkb_config::XkbKeyboardData;
 use crate::input::input_dispatcher::InputDispatcher;
 use crate::input::keyboard_layout::KeyboardLayoutManager;
 use crate::error::SystemResult;
+use crate::compositor::renderers::{
+    gles2::Gles2Renderer,
+    vulkan::frame_renderer::FrameRenderer as VulkanFrameRenderer,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendererType {
+    Gles2,
+    Vulkan,
+}
 
 // --- Client Data Structs ---
 
@@ -205,7 +215,8 @@ pub struct DesktopState {
     pub active_resize_grab: Option<ActiveResizeGrabState>,
 
     // --- Rendering ---
-    pub renderer: Option<Arc<StdMutex<dyn CompositorRenderer<Texture = Arc<Gles2Renderer>>>>>,
+    pub renderer: Option<Box<dyn FrameRenderer>>,
+    pub active_renderer_type: Option<RendererType>,
     pub damage_tracker_state: DamageTrackerState,
     pub last_render_time: Instant,
     pub cursor_texture: Option<Arc<dyn RenderableTexture>>,
@@ -332,4 +343,31 @@ impl DesktopState {
     }
 
     // ... other methods from the original files will be merged here ...
+
+    pub fn init_renderer_backend(&mut self, renderer_type: RendererType) -> SystemResult<()> {
+        info!("Initializing renderer backend: {:?}", renderer_type);
+        self.active_renderer_type = Some(renderer_type);
+
+        let renderer: Box<dyn FrameRenderer> = match renderer_type {
+            RendererType::Gles2 => {
+                // Placeholder for GLES2 renderer initialization
+                // This would typically involve setting up an EGL context.
+                // For now, we'll assume a Gles2Renderer can be created.
+                // let gles_renderer = Gles2Renderer::new(...)
+                // Box::new(gles_renderer)
+                unimplemented!("GLES2 renderer initialization not yet implemented in backend handler.");
+            }
+            RendererType::Vulkan => {
+                // Placeholder for Vulkan renderer initialization
+                // This involves creating instance, device, swapchain, etc.
+                // let vulkan_renderer = VulkanFrameRenderer::new(...)
+                // Box::new(vulkan_renderer)
+                unimplemented!("Vulkan renderer initialization not yet implemented in backend handler.");
+            }
+        };
+
+        self.renderer = Some(renderer);
+        info!("Renderer backend initialized and stored in DesktopState.");
+        Ok(())
+    }
 }

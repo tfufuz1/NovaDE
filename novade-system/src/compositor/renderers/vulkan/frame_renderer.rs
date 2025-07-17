@@ -903,31 +903,22 @@ impl FrameRenderer {
     /// A `Result` containing a `Box<dyn RenderableTexture>` or a `RendererError`.
     pub fn import_shm_texture(
         &mut self,
-        buffer: &WlBuffer,
-        // allocator, logical_device_arc REMOVED
-    ) -> Result<Box<dyn AbstractionRenderableTexture>, AbstractionRendererError> { // Return type updated
+        data: &[u8],
+        width: u32,
+        height: u32,
+        stride: u32,
+        format: AbstractionBufferFormat,
+    ) -> Result<Box<dyn AbstractionRenderableTexture>, AbstractionRendererError> {
         let logical_device_ref = self.logical_device.as_ref();
-        // Use self.allocator.as_ref() for VMA calls.
-
-        let (shm_data, width, height, wl_shm_format) = match with_buffer_contents_data(buffer) {
-            Ok(data) => data,
-            Err(e) => {
-                let err_msg = format!("Failed to access SHM buffer contents: {}", e);
-                tracing::error!("{}", err_msg);
-                return Err(AbstractionRendererError::Generic(err_msg));
-            }
-        };
         
         tracing::debug!(
-            "Importing SHM buffer: format={:?}, dims={}x{}",
-            wl_shm_format, width, height
+            "Importing SHM data: format={:?}, dims={}x{}, stride={}",
+            format, width, height, stride
         );
 
-        let vk_format = match wl_shm_format {
-            smithay::reexports::wayland_server::protocol::wl_shm::Format::Argb8888 => vk::Format::B8G8R8A8_UNORM,
-            smithay::reexports::wayland_server::protocol::wl_shm::Format::Xrgb8888 => vk::Format::B8G8R8A8_UNORM,
-            smithay::reexports::wayland_server::protocol::wl_shm::Format::Abgr8888 => vk::Format::R8G8B8A8_UNORM,
-            smithay::reexports::wayland_server::protocol::wl_shm::Format::Xbgr8888 => vk::Format::R8G8B8A8_UNORM,
+        let vk_format = match format {
+            AbstractionBufferFormat::Argb8888 => vk::Format::B8G8R8A8_UNORM,
+            AbstractionBufferFormat::Xrgb8888 => vk::Format::B8G8R8A8_UNORM,
             _ => {
                 let err_msg = format!("Unsupported SHM format for Vulkan import: {:?}. Dimensions: {}x{}", wl_shm_format, width, height);
                 tracing::error!("{}", err_msg);
@@ -1123,6 +1114,8 @@ impl FrameRenderer {
     }
 }
 
+use novade_compositor_core::surface::SurfaceId;
+use crate::compositor::renderer_interface::abstraction::{ClientBuffer, BufferContent, BufferFormat as AbstractionBufferFormat, DmabufDescriptor, DmabufPlaneFormat};
 impl AbstractionFrameRenderer for FrameRenderer {
     fn id(&self) -> Uuid {
         self.internal_id
@@ -1285,7 +1278,7 @@ impl AbstractionFrameRenderer for FrameRenderer {
         Ok(())
     }
 
-    fn present_frame(&mut self) -> Result<(), AbstractionRendererError> {
+    fn submit_and_present_frame(&mut self) -> Result<(), AbstractionRendererError> {
         if self.swapchain_suboptimal || self.last_acquired_image_index.is_none() {
             warn!("Swapchain suboptimal or no image acquired prior to present. Attempting recreation.");
             // Call the refactored public method. Map error from VulkanError to AbstractionRendererError.
@@ -1337,19 +1330,72 @@ impl AbstractionFrameRenderer for FrameRenderer {
         &mut self,
         buffer: &WlBuffer,
     ) -> Result<Box<dyn AbstractionRenderableTexture>, AbstractionRendererError> {
-        self.import_shm_texture(buffer) // Call refactored public method
+        let (shm_data, width, height, format) = match with_buffer_contents_data(buffer) {
+            Ok((data, width, height, format)) => (data, width, height, format),
+            Err(e) => {
+                let err_msg = format!("Failed to access SHM buffer contents: {}", e);
+                tracing::error!("{}", err_msg);
+                return Err(AbstractionRendererError::Generic(err_msg));
+            }
+        };
+
+        let abstraction_format = match format {
+            smithay::reexports::wayland_server::protocol::wl_shm::Format::Argb8888 => AbstractionBufferFormat::Argb8888,
+            smithay::reexports::wayland_server::protocol::wl_shm::Format::Xrgb8888 => AbstractionBufferFormat::Xrgb8888,
+            _ => return Err(AbstractionRendererError::UnsupportedPixelFormat(format!("Unsupported SHM format: {:?}", format))),
+        };
+
+        self.import_shm_texture(shm_data, width, height, width * 4, abstraction_format)
     }
 
     fn create_texture_from_dmabuf(
         &mut self,
-        dmabuf_attributes: &Dmabuf,
+        dmabuf: &Dmabuf,
     ) -> Result<Box<dyn AbstractionRenderableTexture>, AbstractionRendererError> {
-        self.import_dmabuf_texture(dmabuf_attributes) // Call refactored public method
+        self.import_dmabuf_texture(dmabuf) // Call refactored public method
     }
 
     fn screen_size(&self) -> SmithaySize<i32, Physical> {
         let extent = self.surface_swapchain.extent();
         SmithaySize::from((extent.width as i32, extent.height as i32))
+    }
+
+    fn upload_surface_texture(
+        &mut self,
+        _surface_id: SurfaceId,
+        client_buffer: &ClientBuffer<'_>,
+    ) -> Result<Box<dyn AbstractionRenderableTexture>, AbstractionRendererError> {
+        match &client_buffer.content {
+            BufferContent::Shm { data, width, height, stride, format } => {
+                self.import_shm_texture(data, *width, *height, *stride, *format)
+            }
+            BufferContent::Dmabuf { descriptors, .. } => {
+                let primary_descriptor = descriptors[0].ok_or_else(|| AbstractionRendererError::InvalidBufferType("DMABUF descriptor missing".to_string()))?;
+                let dmabuf = Dmabuf::from_fd(primary_descriptor.fd, primary_descriptor.plane_index, primary_descriptor.offset, primary_descriptor.stride, primary_descriptor.modifier, primary_descriptor.format.into()).unwrap();
+                self.import_dmabuf_texture(&dmabuf)
+            }
+        }
+    }
+
+    fn apply_gamma_correction(&mut self, _gamma_value: f32) -> Result<(), AbstractionRendererError> {
+        Err(AbstractionRendererError::Unsupported("Gamma correction is not implemented for the Vulkan renderer.".to_string()))
+    }
+
+    fn apply_hdr_to_sdr_tone_mapping(&mut self, _max_luminance: f32, _exposure: f32) -> Result<(), AbstractionRendererError> {
+        Err(AbstractionRendererError::Unsupported("HDR to SDR tone mapping is not implemented for the Vulkan renderer.".to_string()))
+    }
+}
+
+// Helper function to create a mock WlBuffer for SHM data has been removed.
+
+impl From<DmabufPlaneFormat> for DrmFourcc {
+    fn from(format: DmabufPlaneFormat) -> Self {
+        match format {
+            DmabufPlaneFormat::R8 => DrmFourcc::R8,
+            DmabufPlaneFormat::Rg88 => DrmFourcc::Rg88,
+            DmabufPlaneFormat::Argb8888 => DrmFourcc::Argb8888,
+            DmabufPlaneFormat::Xrgb8888 => DrmFourcc::Xrgb8888,
+        }
     }
 }
 
