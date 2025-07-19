@@ -1,5 +1,10 @@
 // novade-system/src/compositor/protocols/mod.rs
 
+pub mod wl_compositor;
+pub mod wl_shm;
+pub mod wl_subcompositor;
+pub mod wl_seat;
+pub mod wl_output;
 pub mod xdg_shell;
 pub mod wlr_layer_shell;
 pub mod zxdg_decoration_manager_v1;
