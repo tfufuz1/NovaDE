@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use crate::error::UiError;
 use crate::common::{UiResult, UiComponent};
 use crate::styles::StyleManager;
+use crate::window_manager::{WindowManager, create_dummy_window};
 
 /// Context menu manager that handles all context menus in the UI
 pub struct ContextMenuManager {
@@ -403,7 +404,11 @@ impl ContextMenuManager {
     }
     
     /// Creates a window context menu
-    pub fn create_window_context_menu(&self, position: (i32, i32)) -> UiResult<ContextMenu> {
+    pub fn create_window_context_menu(
+        &self,
+        position: (i32, i32),
+        window_manager: Arc<WindowManager>,
+    ) -> UiResult<ContextMenu> {
         // Create the template if it doesn't exist
         let templates = self.templates.read().map_err(|_| {
             UiError::LockError("Failed to acquire read lock on templates".to_string())
@@ -412,6 +417,7 @@ impl ContextMenuManager {
         if !templates.contains_key("window") {
             drop(templates);
             
+            let window_manager_clone = window_manager.clone();
             let template = ContextMenuTemplate {
                 id: "window".to_string(),
                 name: "Window Context Menu".to_string(),
@@ -420,8 +426,13 @@ impl ContextMenuManager {
                         id: "minimize".to_string(),
                         label: "Minimize".to_string(),
                         icon: Some("window-minimize-symbolic".to_string()),
-                        action: ContextMenuAction::Callback(Box::new(|| {
-                            // This would be implemented to minimize the window
+                        action: ContextMenuAction::Callback(Box::new(move || {
+                            let window_manager = window_manager_clone.clone();
+                            glib::MainContext::default().spawn_local(async move {
+                                if let Err(e) = window_manager.minimize_window(&create_dummy_window()).await {
+                                    eprintln!("Failed to minimize window: {}", e);
+                                }
+                            });
                             Ok(())
                         })),
                         enabled: true,
@@ -432,8 +443,13 @@ impl ContextMenuManager {
                         id: "maximize".to_string(),
                         label: "Maximize".to_string(),
                         icon: Some("window-maximize-symbolic".to_string()),
-                        action: ContextMenuAction::Callback(Box::new(|| {
-                            // This would be implemented to maximize the window
+                        action: ContextMenuAction::Callback(Box::new(move || {
+                            let window_manager = window_manager.clone();
+                            glib::MainContext::default().spawn_local(async move {
+                                if let Err(e) = window_manager.maximize_window(&create_dummy_window()).await {
+                                    eprintln!("Failed to maximize window: {}", e);
+                                }
+                            });
                             Ok(())
                         })),
                         enabled: true,
@@ -498,8 +514,13 @@ impl ContextMenuManager {
                         id: "close".to_string(),
                         label: "Close".to_string(),
                         icon: Some("window-close-symbolic".to_string()),
-                        action: ContextMenuAction::Callback(Box::new(|| {
-                            // This would be implemented to close the window
+                        action: ContextMenuAction::Callback(Box::new(move || {
+                            let window_manager = window_manager.clone();
+                            glib::MainContext::default().spawn_local(async move {
+                                if let Err(e) = window_manager.close_window(&create_dummy_window()).await {
+                                    eprintln!("Failed to close window: {}", e);
+                                }
+                            });
                             Ok(())
                         })),
                         enabled: true,

@@ -24,6 +24,8 @@ use novade_system::system_health_collectors::{
     BasicDiagnosticsRunner,
 };
 use novade_ui::system_health_dashboard::main_view::SystemHealthDashboardView;
+use novade_domain::window_management::{DefaultWindowPolicyManager, WindowPolicyManager};
+use novade_ui::window_manager::WindowManager;
 use std::sync::Arc;
 
 const APP_ID: &str = "org.novade.SystemHealthDashboard";
@@ -110,6 +112,10 @@ fn main() {
         )
     });
 
+    // --- Instantiate Window Manager ---
+    let window_policy_manager = Arc::new(DefaultWindowPolicyManager::new());
+    let window_manager = Arc::new(WindowManager::new(window_policy_manager));
+
 
     // Create a new GTK application
     let app = Application::builder().application_id(APP_ID).build();
@@ -117,6 +123,7 @@ fn main() {
     // Clone services and managers for connect_activate closure
     let service_for_ui = system_health_service.clone();
     let theming_engine_for_gtk_manager = theming_engine_arc.clone();
+    let window_manager_for_ui = window_manager.clone();
     // GtkThemeManager will be created inside connect_activate to access the display property of the window
 
     app.connect_activate(move |app| {
@@ -132,8 +139,18 @@ fn main() {
             .default_height(600)
             .build();
 
+        let style_manager = Arc::new(crate::styles::StyleManager::new());
+        let context_menu_manager = Arc::new(crate::context_menu::ContextMenuManager::new(
+            app.clone(),
+            style_manager.clone(),
+        ));
         // Create the SystemHealthDashboardView, passing the downgraded window reference
-        let dashboard_view = SystemHealthDashboardView::new(service_for_ui.clone(), window.downgrade());
+        let dashboard_view = SystemHealthDashboardView::new(
+            service_for_ui.clone(),
+            window.downgrade(),
+            window_manager_for_ui.clone(),
+            context_menu_manager,
+        );
 
         // Set the dashboard_view as the content of the window
         window.set_content(Some(&dashboard_view));

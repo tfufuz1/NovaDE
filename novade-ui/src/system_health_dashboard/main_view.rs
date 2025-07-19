@@ -18,6 +18,8 @@ mod imp {
     use super::*;
     use std::cell::RefCell;
 
+    use crate::window_manager::WindowManager;
+    use std::sync::Arc;
     #[derive(Debug, Properties, Default)]
     #[properties(wrapper_type = super::SystemHealthDashboardView)]
     pub struct SystemHealthDashboardViewPriv {
@@ -28,6 +30,7 @@ mod imp {
         pub diagnostics_panel: RefCell<Option<DiagnosticsPanel>>,
         pub alerts_panel: RefCell<Option<AlertsPanel>>,
         pub notebook: RefCell<Option<Notebook>>,
+        pub window_manager: RefCell<Option<Arc<WindowManager>>>,
     }
 
     #[glib::object_subclass]
@@ -87,11 +90,35 @@ glib::wrapper! {
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget, gtk::Orientable;
 }
 
+use crate::window_manager::WindowManager;
+use crate::context_menu::ContextMenuManager;
+use crate::styles::StyleManager;
+use gtk::gdk;
+
 impl SystemHealthDashboardView {
     // Updated constructor signature
-    pub fn new(service: Arc<dyn SystemHealthServiceTrait>, main_app_window: WeakRef<adw::ApplicationWindow>) -> Self {
+    pub fn new(
+        service: Arc<dyn SystemHealthServiceTrait>,
+        main_app_window: WeakRef<adw::ApplicationWindow>,
+        window_manager: Arc<WindowManager>,
+        context_menu_manager: Arc<ContextMenuManager>,
+    ) -> Self {
         let obj: Self = glib::Object::builder().build();
         let imp = obj.imp();
+        imp.window_manager.replace(Some(window_manager.clone()));
+
+        let gesture = gtk::GestureClick::new();
+        gesture.set_button(gdk::BUTTON_SECONDARY);
+        gesture.connect_pressed(move |gesture, _, x, y| {
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            let position = (x as i32, y as i32);
+            if let Ok(menu) = context_menu_manager.create_window_context_menu(position, window_manager.clone()) {
+                if let Err(e) = context_menu_manager.show_menu(&menu.id, Some(position)) {
+                    eprintln!("Failed to show context menu: {}", e);
+                }
+            }
+        });
+        obj.add_controller(gesture);
 
         // Pass main_app_window to SystemHealthViewModel constructor
         let vm = SystemHealthViewModel::new(service.clone(), main_app_window);

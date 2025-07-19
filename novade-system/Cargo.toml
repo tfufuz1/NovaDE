@@ -9,17 +9,17 @@ novade-domain = { path = "../novade-domain" }
 async-trait = "0.1.68"
 tokio = { version = "1.45.1", features = ["full"] } # Task requirement: Tokio 1.45.1
 # Smithay and Wayland versions
-smithay = { version = "0.6.0", default-features = false, features = [
+smithay = { version = "0.7.0", default-features = false, features = [
     "backend_libinput",     # For libinput backend
     "backend_udev",         # For udev backend and KMS/DRM
     "backend_winit",        # For running in a window (testing/development)
     "renderer_gl",          # For OpenGL ES 2.0 renderer
-    "renderer_vulkan",      # For Vulkan renderer (requires 'ash' feature in smithay if it exists, or manual ash integration)
-    "renderer_software",    # Fallback or testing renderer
-    "wayland_server",       # Core Wayland server functionalities
+    # "renderer_vulkan",      # For Vulkan renderer (requires 'ash' feature in smithay if it exists, or manual ash integration)
+    # "renderer_software",    # Fallback or testing renderer
+    "wayland-server",       # Core Wayland server functionalities
     "xwayland",             # For XWayland support
     "desktop",              # For desktop components like Space, Window, PopupManager, LayerSurface
-    "seat_management",      # For managing seats, keyboard, pointer, touch
+    # "seat_management",      # For managing seats, keyboard, pointer, touch
     "backend_drm",
     "backend_egl",
     "renderer_gl",
@@ -27,25 +27,24 @@ smithay = { version = "0.6.0", default-features = false, features = [
     "use_system_lib",
     "backend_session",
     "backend_session_libseat",
-    "systemd",
     "backend_udev",
     "xwayland",
     "xkbcommon",
     "renderer_pixman",
-    "wlr_layer_shell",    # Smithay 0.30.0 might not have a direct feature; handled by wayland-protocols
+    # "wlr_layer_shell",    # Smithay 0.30.0 might not have a direct feature; handled by wayland-protocols
     "xdg_decoration",       # For zxdg_decoration_manager_v1
-    "xdg_activation",       # For xdg_activation_v1
-    "presentation_time",    # For wp_presentation_time
+    # "xdg_activation",       # For xdg_activation_v1
+    # "presentation_time",    # For wp_presentation_time
     # IME and text input protocols might need specific features or direct use of wayland-protocols
-    "viewporter",           # For wp_viewport_v1
+    # "viewporter",           # For wp_viewport_v1
     # "xdg_output_management", # Usually part of output_management or handled by wayland-protocols for zxdg_output_manager_v1
-    "single_pixel_buffer",  # For wp_single_pixel_buffer_v1
-    "relative_pointer"     # For wp_relative_pointer_manager_v1
+    # "single_pixel_buffer",  # For wp_single_pixel_buffer_v1
+    # "relative_pointer"     # For wp_relative_pointer_manager_v1
     # "foreign_toplevel_management", # May need wayland-protocols for wlr_foreign_toplevel_management_unstable_v1
     # "idle_notify",        # May need wayland-protocols for idle_notify_unstable_v1
 ] }
-wayland-server = { version = "0.31.2" } # Match Smithay's version
-wayland-protocols = { version = "0.32.1", features = [
+wayland-server = { version = "0.31" } # Match Smithay's version
+wayland-protocols = { version = "0.32", features = [
     "server",
     "unstable", # For many of the specified unstable protocols
     "staging",  # For some staging protocols
@@ -56,22 +55,19 @@ wayland-protocols = { version = "0.32.1", features = [
     # Check wayland-protocols documentation for exact feature names for each protocol.
     # Smithay often re-exports these, but direct dependency can be clearer.
     "xdg-decoration",
-    "xdg-activation",
     "linux-dmabuf-v1",
-    "presentation-time",
     "input-method-unstable-v2",
     "text-input-unstable-v3",
     "fractional-scale-v1",
-    "viewporter",
     "xdg-output-unstable-v1", # For zxdg_output_manager_v1
-    "single-pixel-buffer-v1",
-    "relative-pointer-unstable-v1",
+    # "single-pixel-buffer-v1",
+    # "relative-pointer-unstable-v1",
     "pointer-constraints-unstable-v1",
     "foreign-toplevel-management-unstable-v1",
     "idle-notify-unstable-v1",
 ] }
 
-calloop = { version = "0.14.0", features = ["executor"] } # Task requirement: Calloop 0.14.0. `executor` for async tasks.
+calloop = { version = "0.12.0", features = ["executor"] } # Task requirement: Calloop 0.12.0. `executor` for async tasks.
 glib = { version = "0.19.0" } # For MainContext::spawn_local (check latest compatible version)
 
 # General purpose

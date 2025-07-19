@@ -6,6 +6,7 @@
 // Re-export key modules for convenience
 pub mod assistant_ui; // Added for Smart Assistant
 pub mod error;
+pub mod window_manager;
 pub mod window_manager_ui;
 pub mod desktop_ui;
 pub mod panel_ui;
