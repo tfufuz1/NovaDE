@@ -11,6 +11,18 @@ use crate::error::{DomainError, WindowManagementError};
 use crate::entities::value_objects::Timestamp;
 use crate::types::geometry::{Point, Size, Rect};
 
+/// Specifies the decoration mode for a window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DecorationMode {
+    /// The client is responsible for drawing its own decorations.
+    ClientSide,
+    /// The server (compositor) is responsible for drawing the decorations.
+    #[default]
+    ServerSide,
+    /// The compositor decides based on internal policies or client hints.
+    Auto,
+}
+
 /// Represents the state of a window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WindowState {
@@ -80,6 +92,34 @@ pub struct Window {
     properties: HashMap<String, String>,
 }
 
+impl Window {
+    pub fn new(window_id: String, title: String, app_id: String, window_type: WindowType) -> Self {
+        Self {
+            window_id,
+            title,
+            app_id,
+            window_type,
+            state: WindowState::Normal,
+            geometry: Rect {
+                origin: Point { x: 0.0, y: 0.0 },
+                size: Size {
+                    width: 0.0,
+                    height: 0.0,
+                },
+            },
+            min_size: None,
+            max_size: None,
+            resizable: true,
+            movable: true,
+            closable: true,
+            focused: false,
+            created_at: Timestamp::now(),
+            last_focused_at: None,
+            properties: HashMap::new(),
+        }
+    }
+}
+
 /// Represents a window management policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowPolicy {
@@ -107,6 +147,8 @@ pub struct WindowPolicy {
     allow_resize: bool,
     /// Whether windows can be closed
     allow_close: bool,
+    /// The preferred decoration mode for windows matching this policy.
+    decoration_mode: DecorationMode,
     /// The policy creation timestamp
     created_at: Timestamp,
     /// The policy last modified timestamp
@@ -148,6 +190,7 @@ pub trait WindowPolicyManager: Send + Sync {
         allow_fullscreen: bool,
         allow_resize: bool,
         allow_close: bool,
+        decoration_mode: DecorationMode,
     ) -> Result<String, DomainError>;
     
     /// Gets a window policy by ID.
@@ -195,6 +238,7 @@ pub trait WindowPolicyManager: Send + Sync {
         allow_fullscreen: bool,
         allow_resize: bool,
         allow_close: bool,
+        decoration_mode: DecorationMode,
     ) -> Result<(), DomainError>;
     
     /// Deletes a window policy.
@@ -237,6 +281,17 @@ pub trait WindowPolicyManager: Send + Sync {
     ///
     /// A `Result` containing true if the action is allowed, false otherwise.
     async fn is_action_allowed(&self, window: &Window, action: WindowAction) -> Result<bool, DomainError>;
+
+    /// Gets the decoration mode for a window.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The window
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing the decoration mode for the window.
+    async fn get_decoration_mode_for_window(&self, window: &Window) -> Result<DecorationMode, DomainError>;
 }
 
 /// Represents a window action.

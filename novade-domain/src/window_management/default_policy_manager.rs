@@ -40,6 +40,7 @@ impl DefaultWindowPolicyManager {
             true, // Allow fullscreen
             true, // Allow resize
             true, // Allow close
+            super::DecorationMode::ServerSide,
         ).await?;
         
         // Create default policy for dialog windows
@@ -55,6 +56,7 @@ impl DefaultWindowPolicyManager {
             false, // Don't allow fullscreen
             true, // Allow resize
             true, // Allow close
+            super::DecorationMode::ServerSide,
         ).await?;
         
         // Create default policy for utility windows
@@ -70,6 +72,7 @@ impl DefaultWindowPolicyManager {
             false, // Don't allow fullscreen
             true, // Allow resize
             true, // Allow close
+            super::DecorationMode::ServerSide,
         ).await?;
         
         // Create default policy for popup windows
@@ -85,6 +88,7 @@ impl DefaultWindowPolicyManager {
             false, // Don't allow fullscreen
             false, // Don't allow resize
             true, // Allow close
+            super::DecorationMode::ServerSide,
         ).await?;
         
         // Create default policy for notification windows
@@ -100,6 +104,7 @@ impl DefaultWindowPolicyManager {
             false, // Don't allow fullscreen
             false, // Don't allow resize
             true, // Allow close
+            super::DecorationMode::ServerSide,
         ).await?;
         
         Ok(manager)
@@ -121,6 +126,7 @@ impl WindowPolicyManager for DefaultWindowPolicyManager {
         allow_fullscreen: bool,
         allow_resize: bool,
         allow_close: bool,
+        decoration_mode: super::DecorationMode,
     ) -> Result<String, DomainError> {
         let policy_id = Uuid::new_v4().to_string();
         let now = Timestamp::now();
@@ -138,6 +144,7 @@ impl WindowPolicyManager for DefaultWindowPolicyManager {
             allow_fullscreen,
             allow_resize,
             allow_close,
+            decoration_mode,
             created_at: now,
             modified_at: now,
         };
@@ -229,6 +236,7 @@ impl WindowPolicyManager for DefaultWindowPolicyManager {
         allow_fullscreen: bool,
         allow_resize: bool,
         allow_close: bool,
+        decoration_mode: super::DecorationMode,
     ) -> Result<(), DomainError> {
         todo!("Policies are not actually mutated in the original instance. Needs Arc<Mutex<HashMap>> for policies.");
         Ok(())
@@ -273,6 +281,11 @@ impl WindowPolicyManager for DefaultWindowPolicyManager {
         };
         
         Ok(allowed)
+    }
+
+    async fn get_decoration_mode_for_window(&self, window: &Window) -> Result<super::DecorationMode, DomainError> {
+        let policy = self.get_effective_policy(window.window_type.clone()).await?;
+        Ok(policy.decoration_mode)
     }
 }
 
@@ -431,6 +444,56 @@ mod tests {
         assert_eq!(manager.is_action_allowed(&window, WindowAction::MoveToWorkspace).await.unwrap(), false); // Disallowed by policy
         assert_eq!(manager.is_action_allowed(&window, WindowAction::Maximize).await.unwrap(), false); // Disallowed by policy
         assert_eq!(manager.is_action_allowed(&window, WindowAction::Fullscreen).await.unwrap(), false); // Disallowed by policy
+    }
+
+    #[tokio::test]
+    async fn test_get_decoration_mode() {
+        let mut manager = DefaultWindowPolicyManager::new();
+        let policy = WindowPolicy {
+            policy_id: "decoration_policy".to_string(),
+            name: "Decoration Policy".to_string(),
+            description: "".to_string(),
+            priority: 100,
+            applies_to: vec![WindowType::Normal],
+            auto_focus: true,
+            allow_workspace_movement: true,
+            allow_maximize: true,
+            allow_minimize: true,
+            allow_fullscreen: true,
+            allow_resize: true,
+            allow_close: true,
+            decoration_mode: super::DecorationMode::ClientSide,
+            created_at: Timestamp::now(),
+            modified_at: Timestamp::now(),
+        };
+        manager.policies.insert("decoration_policy".to_string(), policy);
+
+        let window = Window {
+            window_id: "window1".to_string(),
+            title: "Test Window".to_string(),
+            app_id: "test.app".to_string(),
+            window_type: WindowType::Normal,
+            state: super::WindowState::Normal,
+            geometry: Rect {
+                origin: Point { x: 0.0, y: 0.0 },
+                size: Size {
+                    width: 800.0,
+                    height: 600.0,
+                },
+            },
+            min_size: None,
+            max_size: None,
+            resizable: true,
+            movable: true,
+            closable: true,
+            focused: false,
+            created_at: Timestamp::now(),
+            last_focused_at: None,
+            properties: HashMap::new(),
+        };
+
+        let decoration_mode = manager.get_decoration_mode_for_window(&window).await.unwrap();
+        assert_eq!(decoration_mode, super::DecorationMode::ClientSide);
     }
     
     #[tokio::test]

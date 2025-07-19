@@ -24,9 +24,10 @@ use super::core::{DesktopState, OutputConfiguration, OutputMode};
 use super::renderers::{DrmGbmRenderer, WinitRenderer};
 use super::renderer_interface::FrameRenderer;
 use super::thread_safety::run_all_validations;
+use smithay::reexports::calloop::EventLoop;
 
 /// Initializes the compositor with a DRM/GBM backend
-pub fn initialize_compositor_drm(
+pub async fn initialize_compositor_drm(
     drm_node: DrmNode,
     output_size: (i32, i32),
     output_scale: f64,
@@ -38,12 +39,10 @@ pub fn initialize_compositor_drm(
     // This needs to be reconciled. For now, I'll proceed assuming this can be resolved.
     // Let's simulate getting them if they are not passed. This is a placeholder.
     let mut display: Display<DesktopState> = Display::new().expect("Failed to create Wayland display");
-    let event_loop: EventLoop<DesktopState> = EventLoop::try_new().expect("Failed to create event loop");
-    let display_handle = display.handle();
-    let loop_handle = event_loop.handle();
+    let mut event_loop: EventLoop<DesktopState> = EventLoop::try_new().expect("Failed to create event loop");
 
     // Create the desktop state
-    let desktop_state = Arc::new(DesktopState::new(loop_handle.clone(), display_handle.clone()).map_err(|e| CompositorError::InitializationError(format!("Failed to create DesktopState: {}",e)))?);
+    let desktop_state = Arc::new(DesktopState::new(&mut event_loop, &mut display).await.map_err(|e| CompositorError::InitializationError(format!("Failed to create DesktopState: {}",e)))?);
     
     // Create the renderer
     let renderer = DrmGbmRenderer::new(drm_node, Size::from(output_size), output_scale)?;
@@ -158,18 +157,16 @@ pub fn initialize_compositor_drm(
 mod init_tests;
 
 /// Initializes the compositor with a Winit backend
-pub fn initialize_compositor_winit(
+pub async fn initialize_compositor_winit(
     backend: WinitGraphicsBackend,
     output_scale: f64,
 ) -> CompositorResult<(Arc<DesktopState>, Arc<Mutex<WinitRenderer>>)> {
     // Similar to DRM, create Display and EventLoop for DesktopState::new
     let mut display: Display<DesktopState> = Display::new().expect("Failed to create Wayland display");
-    let event_loop: EventLoop<DesktopState> = EventLoop::try_new().expect("Failed to create event loop");
-    let display_handle = display.handle();
-    let loop_handle = event_loop.handle();
+    let mut event_loop: EventLoop<DesktopState> = EventLoop::try_new().expect("Failed to create event loop");
 
     // Create the desktop state
-    let desktop_state = Arc::new(DesktopState::new(loop_handle.clone(), display_handle.clone()).map_err(|e| CompositorError::InitializationError(format!("Failed to create DesktopState: {}",e)))?);
+    let desktop_state = Arc::new(DesktopState::new(&mut event_loop, &mut display).await.map_err(|e| CompositorError::InitializationError(format!("Failed to create DesktopState: {}",e)))?);
     
     // Create the renderer
     let renderer = WinitRenderer::new(backend, output_scale)?;
@@ -280,7 +277,7 @@ pub fn initialize_compositor_winit(
 }
 
 /// Convenience function to initialize the compositor
-pub fn initialize_compositor() -> CompositorResult<Arc<DesktopState>> {
+pub async fn initialize_compositor() -> CompositorResult<Arc<DesktopState>> {
     // Try to find a DRM device
     let drm_nodes = DrmNode::available_nodes().map_err(|e| {
         CompositorError::InitializationError(format!("Failed to enumerate DRM nodes: {}", e))
@@ -288,7 +285,7 @@ pub fn initialize_compositor() -> CompositorResult<Arc<DesktopState>> {
     
     if let Some(node) = drm_nodes.first() {
         // Initialize with DRM/GBM
-        let (desktop_state, _) = initialize_compositor_drm(*node, (1920, 1080), 1.0)?;
+        let (desktop_state, _) = initialize_compositor_drm(*node, (1920, 1080), 1.0).await?;
         Ok(desktop_state)
     } else {
         // Initialize with Winit
@@ -300,7 +297,7 @@ pub fn initialize_compositor() -> CompositorResult<Arc<DesktopState>> {
             CompositorError::InitializationError(format!("Failed to create Winit backend: {}", e))
         })?;
         
-        let (desktop_state, renderer) = initialize_compositor_winit(backend, 1.0)?;
+        let (desktop_state, renderer) = initialize_compositor_winit(backend, 1.0).await?;
         
         // Store the event loop in the renderer
         renderer.lock().map_err(|_| {

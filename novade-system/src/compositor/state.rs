@@ -114,6 +114,8 @@ use crate::input::keyboard::xkb_config::XkbKeyboardData;
 use crate::input::input_dispatcher::InputDispatcher;
 use crate::input::keyboard_layout::KeyboardLayoutManager;
 use crate::error::SystemResult;
+use novade_domain::window_management::{WindowPolicyManager, DefaultWindowPolicyManager};
+use zbus::Connection;
 
 // --- Client Data Structs ---
 
@@ -192,6 +194,7 @@ pub struct DesktopState {
     pub output_workspaces: HashMap<String, Vec<Arc<RwLock<CompositorWorkspace>>>>,
     pub active_workspaces: Arc<RwLock<HashMap<String, Uuid>>>,
     pub primary_output_name: Arc<RwLock<Option<String>>>,
+    pub window_policy_manager: Arc<dyn WindowPolicyManager>,
 
     // --- Input Management ---
     pub seat_state: NovaSeatState,
@@ -220,10 +223,11 @@ pub struct DesktopState {
     pub is_user_idle: Arc<StdMutex<bool>>,
     pub idle_timeout: Duration,
     pub idle_timer_handle: Option<TimerHandle>,
+    pub zbus_connection: Arc<Connection>,
 }
 
 impl DesktopState {
-    pub fn new(
+    pub async fn new(
         event_loop: &mut EventLoop<'static, Self>,
         display: &mut Display<Self>,
     ) -> SystemResult<Self> {
@@ -263,6 +267,8 @@ impl DesktopState {
         let output_workspaces = HashMap::new();
         let active_workspaces = Arc::new(RwLock::new(HashMap::new()));
         let primary_output_name = Arc::new(RwLock::new(None));
+        let window_policy_manager = Arc::new(DefaultWindowPolicyManager::with_default_policies().await?);
+        let zbus_connection = Arc::new(Connection::session().await?);
 
         // --- Input Initialization ---
         let mut seat_state_manager = NovaSeatState::new();
@@ -308,6 +314,7 @@ impl DesktopState {
             output_workspaces,
             active_workspaces,
             primary_output_name,
+            window_policy_manager,
             seat_state: seat_state_manager,
             primary_seat,
             pointer_location: (0.0, 0.0).into(),
@@ -328,6 +335,7 @@ impl DesktopState {
             is_user_idle: Arc::new(StdMutex::new(false)),
             idle_timeout: Duration::from_secs(300),
             idle_timer_handle: None,
+            zbus_connection,
         })
     }
 

@@ -9,10 +9,6 @@ novade-domain = { path = "../novade-domain" }
 novade-system = { path = "../novade-system" }
 async-trait = "0.1.68"
 tokio = { version = "1", features = ["full"] }
-iced = { version = "0.9.0", features = ["tokio", "image", "svg", "canvas"] }
-iced_native = "0.10.0"
-iced_style = "0.8.0"
-iced_futures = "0.6.0"
 image = "0.24.6"
 rfd = "0.11.3"
 chrono = { version = "0.4.24", features = ["serde"] }
@@ -22,14 +18,14 @@ parking_lot = "0.12.1"
 futures = "0.3.28"
 futures-util = { version = "0.3" } # Added for StreamExt
 anyhow = "1.0.71"
-gtk4 = { version = "0.8.2" } # Removed "closures" feature
-libadwaita = { version = "0.6.0", package = "libadwaita" } # Downgraded to align with gtk4 0.8.x
+gtk4 = { version = "0.8.2", features = ["macros"] }
+libadwaita = { version = "0.6.0", package = "libadwaita" }
 gio = "0.19.5"
-glib = { version = "0.19.5" } # Removed "properties" feature
+glib = { version = "0.19.5" }
 gtk4-layer-shell = "*"
 dirs = "5.0.1"
 notify = "5.1.0"
-freetype-rs = "0.26.0" # Downgraded to align with iced dependency
+freetype-rs = "0.26.0"
 svg = "0.18.0"
 resvg = "0.26.1"
 usvg = "0.26.1"

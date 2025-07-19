@@ -133,6 +133,8 @@ delegate_wlr_layer_shell!(DesktopState);
 
 
 // --- XDG Decoration Handler ---
+use novade_domain::window_management::DecorationMode;
+
 impl XdgDecorationHandler for DesktopState {
     fn xdg_decoration_state(&mut self) -> &mut XdgDecorationState {
         &mut self.xdg_decoration_state
@@ -140,11 +142,45 @@ impl XdgDecorationHandler for DesktopState {
     fn new_decoration(&mut self, toplevel: ToplevelSurface, _decoration: ZxdgToplevelDecorationV1) {
         info!(surface = ?toplevel.wl_surface().id(), "XDG Toplevel Decoration object created.");
     }
+use crate::dbus_interfaces::window_management::WindowManagerProxy;
+
     fn request_mode(&mut self, toplevel: ToplevelSurface, _decoration: ZxdgToplevelDecorationV1, client_preferred_mode: Option<XdgToplevelDecorationMode>) -> Option<XdgToplevelDecorationMode> {
         info!(surface = ?toplevel.wl_surface().id(), ?client_preferred_mode, "Client requested decoration mode.");
-        // NovaDE Policy: Prefer Client-Side Decorations (CSD).
-        let chosen_mode = XdgToplevelDecorationMode::ClientSide;
-        info!(surface = ?toplevel.wl_surface().id(), "Compositor chose decoration mode: {:?}", chosen_mode);
+
+        let space = self.space.lock().unwrap();
+        let window = space.elements().find(|w| w.wl_surface().as_ref() == Some(toplevel.wl_surface())).cloned();
+
+        if let Some(window) = window {
+            let domain_window_lock = window.domain_window.clone();
+            let domain_window = domain_window_lock.read().unwrap();
+            let future = self.window_policy_manager.get_decoration_mode_for_window(&domain_window);
+            let decoration_mode = futures::executor::block_on(future).unwrap_or(DecorationMode::ServerSide);
+
+            let chosen_mode = match decoration_mode {
+                DecorationMode::ClientSide => XdgToplevelDecorationMode::ClientSide,
+                DecorationMode::ServerSide => XdgToplevelDecorationMode::ServerSide,
+                DecorationMode::Auto => {
+                    // If auto, prefer client side if they have a preference, otherwise server side.
+                    client_preferred_mode.unwrap_or(XdgToplevelDecorationMode::ServerSide)
+                }
+            };
+            info!(surface = ?toplevel.wl_surface().id(), "Compositor chose decoration mode: {:?}", chosen_mode);
+
+            let proxy = WindowManagerProxy::new(&self.zbus_connection);
+            let mode_str = if chosen_mode == XdgToplevelDecorationMode::ClientSide { "ClientSide" } else { "ServerSide" };
+            let window_id = window.id.to_string();
+            if let Ok(proxy) = proxy {
+                let _ = futures::executor::block_on(proxy.decoration_mode_changed(&window_id, mode_str));
+            } else {
+                tracing::error!("Failed to create D-Bus proxy for WindowManager");
+            }
+
+            return Some(chosen_mode);
+        }
+
+        // Fallback
+        let chosen_mode = XdgToplevelDecorationMode::ServerSide;
+        info!(surface = ?toplevel.wl_surface().id(), "Compositor chose decoration mode (fallback): {:?}", chosen_mode);
         Some(chosen_mode)
     }
     fn destroy_decoration(&mut self, toplevel: ToplevelSurface, _decoration: ZxdgToplevelDecorationV1) {
@@ -641,6 +677,10 @@ impl XdgShellHandler for DesktopState {
         let wl_surface = toplevel.wl_surface().clone();
         info!("XdgShellHandler: Mapping XDG Toplevel: {:?}", wl_surface.id());
         let window = self.xdg_shell_state().map_toplevel(toplevel); // Let Smithay create the Window
+
+        // Store the domain_window in the user_data of the smithay Window
+        let domain_window = window.user_data().get::<crate::compositor::shell::xdg_shell::types::ManagedWindow>().unwrap().domain_window.clone();
+        window.user_data().insert_if_missing(|| domain_window);
 
         // Then, map it into our space
         let mut space_guard = self.space.lock().unwrap();

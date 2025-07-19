@@ -21,6 +21,7 @@ pub mod input;
 pub mod xwayland;
 // Error types for the compositor
 pub mod errors;
+pub mod window_info_provider;
 
 
 // Existing modules (to be reviewed and integrated/removed as needed)

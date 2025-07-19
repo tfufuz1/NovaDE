@@ -17,6 +17,7 @@ use std::{
     sync::{Arc, RwLock, Weak, Mutex}, // Added RwLock, Mutex for specific cases
 };
 use uuid::Uuid;
+use novade_domain::window_management as domain_wm;
 
 // ANCHOR: XdgSurfaceRole
 /// Represents the role of an XDG surface.
@@ -170,6 +171,35 @@ pub struct WindowManagerData {
     pub decorations: bool, // true for server-side, false for client-side
 }
 
+#[derive(Debug)]
+pub struct ManagedWindow {
+    pub id: Uuid, // Internal compositor ID
+    pub domain_id: DomainWindowIdentifier,
+    pub domain_window: Arc<RwLock<domain_wm::Window>>,
+    pub xdg_surface: WindowSurface, // Toplevel or Popup
+    // ANCHOR: ManagedWindowCurrentGeometryRwLock
+    pub current_geometry: Arc<RwLock<Rectangle<i32, Logical>>>,
+    // ANCHOR_END: ManagedWindowCurrentGeometryRwLock
+    pub is_mapped: bool,
+    pub parent: Option<Weak<ManagedWindow>>,
+    // Fields for title and app_id (direct, as per existing ManagedWindow in types.rs)
+    pub title: Option<String>,
+    pub app_id: Option<String>,
+    pub last_configure_serial: Option<Serial>,
+    // ANCHOR: AddWorkspaceIdToManagedWindow
+    pub workspace_id: Arc<RwLock<Option<Uuid>>>,
+    // ANCHOR_END: AddWorkspaceIdToManagedWindow
+    // ANCHOR: AddOutputNameToManagedWindow
+    pub output_name: Arc<RwLock<Option<String>>>, // Name of the output the window is primarily on
+    // ANCHOR_END: AddOutputNameToManagedWindow
+    // ANCHOR: AddTilingMasterToManagedWindow
+    pub tiling_master: Arc<RwLock<bool>>, // True if this window is the master in a tiling layout
+    // ANCHOR_END: AddTilingMasterToManagedWindow
+    // Added fields from xdg_shell/mod.rs's ManagedWindow
+    pub state: Arc<RwLock<WindowState>>,
+    pub manager_data: Arc<RwLock<WindowManagerData>>,
+}
+
 /// Window layer for stacking order
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)] // Added PartialOrd, Ord for easy sorting/comparison
 pub enum WindowLayer {
@@ -223,9 +253,17 @@ impl ManagedWindow {
         let title = toplevel_surface.title();
         let app_id = toplevel_surface.app_id();
 
+        let domain_window = domain_wm::Window::new(
+            domain_id.to_string(),
+            title.clone().unwrap_or_default(),
+            app_id.clone().unwrap_or_default(),
+            domain_wm::WindowType::Normal,
+        );
+
         Self {
             id: Uuid::new_v4(),
             domain_id,
+            domain_window: Arc::new(RwLock::new(domain_window)),
             xdg_surface: WindowSurface::Toplevel(toplevel_surface),
             current_geometry: Arc::new(RwLock::new(initial_geometry)), // ANCHOR_REF: ManagedWindowCurrentGeometryRwLock
             is_mapped: false,
@@ -261,14 +299,22 @@ impl ManagedWindow {
         }
     }
 
-    pub fn new_popup(popup_surface: PopupSurface, _parent_domain_id: DomainWindowIdentifier, parent_window: Option<Arc<ManagedWindow>>) -> Self {
+    pub fn new_popup(popup_surface: PopupSurface, parent_domain_id: DomainWindowIdentifier, parent_window: Option<Arc<ManagedWindow>>) -> Self {
         let title = popup_surface.wl_surface().data_map().get::<XdgToplevelSurfaceData>().and_then(|d| d.title.clone());
         let app_id = popup_surface.wl_surface().data_map().get::<XdgToplevelSurfaceData>().and_then(|d| d.app_id.clone());
+
+        let domain_window = domain_wm::Window::new(
+            parent_domain_id.to_string(),
+            title.clone().unwrap_or_default(),
+            app_id.clone().unwrap_or_default(),
+            domain_wm::WindowType::Popup,
+        );
 
         Self {
             id: Uuid::new_v4(),
             // Popups might share parent's domain_id or have a new one. For now, new.
-            domain_id: DomainWindowIdentifier::new_v4(), 
+            domain_id: DomainWindowIdentifier::new_v4(),
+            domain_window: Arc::new(RwLock::new(domain_window)),
             xdg_surface: WindowSurface::Popup(popup_surface),
             current_geometry: Arc::new(RwLock::new(Rectangle::from_loc_and_size((0, 0), (0, 0)))), // ANCHOR_REF: ManagedWindowCurrentGeometryRwLockInitPopup
             is_mapped: false,

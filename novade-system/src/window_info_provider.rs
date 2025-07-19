@@ -25,6 +25,7 @@ pub struct FocusedWindowDetails {
 #[async_trait]
 pub trait SystemWindowInfoProvider: Send + Sync {
     fn get_focused_window_details(&self) -> FocusedWindowDetails;
+    async fn get_windows(&self) -> Vec<FocusedWindowDetails>;
 }
 
 // --- StubSystemWindowInfoProvider (remains unchanged from previous task) ---
@@ -76,6 +77,10 @@ impl SystemWindowInfoProvider for StubSystemWindowInfoProvider {
         let details_to_return = self.details[index].clone();
         self.counter.set((index + 1) % self.details.len());
         details_to_return
+    }
+
+    async fn get_windows(&self) -> Vec<FocusedWindowDetails> {
+        self.details.clone()
     }
 }
 
@@ -266,5 +271,16 @@ impl SystemWindowInfoProvider for WaylandWindowInfoProvider {
         let details_to_return = self.fallback_details[index].clone();
         self.fallback_counter.set((index + 1) % self.fallback_details.len());
         details_to_return
+    }
+
+    async fn get_windows(&self) -> Vec<FocusedWindowDetails> {
+        if !self.toplevel_manager_was_bound {
+            return vec![FocusedWindowDetails {
+                title: Some(format!("Wayland Init: {}", self.connection_status)),
+                app_id: None,
+                icon_name: None,
+            }];
+        }
+        self.fallback_details.clone()
     }
 }

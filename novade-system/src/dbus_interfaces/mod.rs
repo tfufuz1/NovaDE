@@ -5,6 +5,7 @@ pub mod object_manager;
 pub mod notifications_server;
 // ANCHOR: AddPropertiesModule
 pub mod properties;
+pub mod window_management;
 // ANCHOR: AddExampleEchoServiceModule
 pub mod example_echo_service;
 // ANCHOR: AddCoreSystemInterfaceModule
